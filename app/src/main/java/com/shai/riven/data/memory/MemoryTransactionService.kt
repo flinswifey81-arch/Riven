@@ -370,16 +370,26 @@ class MemoryTransactionService(
             )
             memoryDao.updateMemory(forgotten)
             evidence.forEach { source ->
-                maintenanceDao.insertSuppressionTombstone(
-                    SuppressionTombstoneEntity(
-                        id = idGenerator.nextId(),
-                        kind = SuppressionKind.FORGET,
-                        sourceLineageHash = source.lineageHash(),
-                        isActive = true,
-                        createdAt = input.occurredAt,
-                        formatVersion = 1,
-                    ),
-                )
+                val sourceLineageHash = source.lineageHash()
+                val existing = maintenanceDao.suppressionTombstone(sourceLineageHash)
+                when {
+                    existing == null -> maintenanceDao.insertSuppressionTombstone(
+                        SuppressionTombstoneEntity(
+                            id = idGenerator.nextId(),
+                            kind = SuppressionKind.FORGET,
+                            sourceLineageHash = sourceLineageHash,
+                            isActive = true,
+                            createdAt = input.occurredAt,
+                            formatVersion = 1,
+                        ),
+                    )
+                    !existing.isActive -> maintenanceDao.updateSuppressionTombstone(
+                        existing.copy(
+                            isActive = true,
+                            expiresAt = null,
+                        ),
+                    )
+                }
             }
             insertAudit(
                 memoryId = memory.id,

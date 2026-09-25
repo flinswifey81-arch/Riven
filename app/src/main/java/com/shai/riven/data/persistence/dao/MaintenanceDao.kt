@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactExperienceDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMemoryDependencyEntity
@@ -18,6 +19,12 @@ import com.shai.riven.data.persistence.model.DerivedArtifactState
 interface MaintenanceDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertSuppressionTombstone(tombstone: SuppressionTombstoneEntity)
+
+    @Update
+    fun updateSuppressionTombstone(tombstone: SuppressionTombstoneEntity)
+
+    @Query("SELECT * FROM suppression_tombstones WHERE source_lineage_hash = :sourceLineageHash LIMIT 1")
+    fun suppressionTombstone(sourceLineageHash: String): SuppressionTombstoneEntity?
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertDerivedArtifact(artifact: DerivedArtifactEntity)

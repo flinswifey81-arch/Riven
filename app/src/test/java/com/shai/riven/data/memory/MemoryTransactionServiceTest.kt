@@ -18,6 +18,7 @@ import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
+import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ConversationStatus
@@ -661,6 +662,97 @@ class MemoryTransactionServiceTest {
     }
 
     @Test
+    fun sharedLineageAcrossMemoriesReusesOneGlobalTombstone() = runBlocking {
+        insertExperience("experience-shared", 1)
+        insertCanonicalMemory("memory-a", "experience-shared", meaning = "First distinct retained meaning.")
+        insertCanonicalMemory("memory-b", "experience-shared", meaning = "Second distinct retained meaning.")
+
+        assertSuccess(service.forget(MemoryStateTransitionInput("memory-a", occurredAt = 100)))
+        val firstTombstone = database.maintenanceDao().suppressionTombstones().single()
+
+        assertSuccess(service.forget(MemoryStateTransitionInput("memory-b", occurredAt = 101)))
+
+        assertEquals(MemoryRetentionState.FORGOTTEN, database.memoryDao().memory("memory-a")?.retentionState)
+        assertEquals(MemoryRetentionState.FORGOTTEN, database.memoryDao().memory("memory-b")?.retentionState)
+        assertEquals(firstTombstone, database.maintenanceDao().suppressionTombstones().single())
+        assertEquals(
+            sha256("experience-shared:lineage-experience-shared"),
+            firstTombstone.sourceLineageHash,
+        )
+        assertEquals(MemoryAuditAction.FORGOTTEN, database.maintenanceDao().memoryAuditHistory("memory-a").single().action)
+        assertEquals(MemoryAuditAction.FORGOTTEN, database.maintenanceDao().memoryAuditHistory("memory-b").single().action)
+    }
+
+    @Test
+    fun activeForgetTombstoneIsReusedWithoutDuplicateInsert() = runBlocking {
+        insertExperience("experience-shared", 1)
+        insertCanonicalMemory("memory-1", "experience-shared")
+        val existing = suppressionTombstone(
+            id = "active-tombstone",
+            sourceLineageHash = sha256("experience-shared:lineage-experience-shared"),
+            kind = SuppressionKind.FORGET,
+            isActive = true,
+            createdAt = 10,
+        )
+        database.maintenanceDao().insertSuppressionTombstone(existing)
+
+        assertSuccess(service.forget(MemoryStateTransitionInput("memory-1", occurredAt = 110)))
+
+        assertEquals(existing, database.maintenanceDao().suppressionTombstones().single())
+        assertEquals(MemoryRetentionState.FORGOTTEN, database.memoryDao().memory("memory-1")?.retentionState)
+    }
+
+    @Test
+    fun inactiveForgetTombstoneIsReactivatedInPlaceForIndefiniteSuppression() = runBlocking {
+        insertExperience("experience-shared", 1)
+        insertCanonicalMemory("memory-1", "experience-shared")
+        val existing = suppressionTombstone(
+            id = "inactive-tombstone",
+            sourceLineageHash = sha256("experience-shared:lineage-experience-shared"),
+            kind = SuppressionKind.FORGET,
+            isActive = false,
+            createdAt = 10,
+            expiresAt = 50,
+        )
+        database.maintenanceDao().insertSuppressionTombstone(existing)
+
+        assertSuccess(service.forget(MemoryStateTransitionInput("memory-1", occurredAt = 120)))
+
+        val reactivated = database.maintenanceDao().suppressionTombstones().single()
+        assertEquals(existing.id, reactivated.id)
+        assertEquals(existing.createdAt, reactivated.createdAt)
+        assertEquals(existing.kind, reactivated.kind)
+        assertEquals(existing.formatVersion, reactivated.formatVersion)
+        assertTrue(reactivated.isActive)
+        assertNull(reactivated.expiresAt)
+    }
+
+    @Test
+    fun deleteTombstoneIsNeverDowngradedByForget() = runBlocking {
+        insertExperience("experience-shared", 1)
+        insertCanonicalMemory("memory-1", "experience-shared")
+        val existingDelete = suppressionTombstone(
+            id = "delete-tombstone",
+            sourceLineageHash = sha256("experience-shared:lineage-experience-shared"),
+            kind = SuppressionKind.DELETE,
+            isActive = false,
+            createdAt = 10,
+            expiresAt = 60,
+        )
+        database.maintenanceDao().insertSuppressionTombstone(existingDelete)
+
+        assertSuccess(service.forget(MemoryStateTransitionInput("memory-1", occurredAt = 130)))
+
+        val preserved = database.maintenanceDao().suppressionTombstones().single()
+        assertEquals(existingDelete.id, preserved.id)
+        assertEquals(existingDelete.createdAt, preserved.createdAt)
+        assertEquals(SuppressionKind.DELETE, preserved.kind)
+        assertTrue(preserved.isActive)
+        assertNull(preserved.expiresAt)
+        assertEquals(MemoryRetentionState.FORGOTTEN, database.memoryDao().memory("memory-1")?.retentionState)
+    }
+
+    @Test
     fun controlledMidTransactionFailureRollsBackCorrectionCompletely() = runBlocking {
         insertExperience("experience-old", 1)
         insertExperience("experience-new", 2)
@@ -888,6 +980,23 @@ class MemoryTransactionServiceTest {
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
+
+    private fun suppressionTombstone(
+        id: String,
+        sourceLineageHash: String,
+        kind: SuppressionKind,
+        isActive: Boolean,
+        createdAt: Long,
+        expiresAt: Long? = null,
+    ) = SuppressionTombstoneEntity(
+        id = id,
+        kind = kind,
+        sourceLineageHash = sourceLineageHash,
+        isActive = isActive,
+        createdAt = createdAt,
+        expiresAt = expiresAt,
+        formatVersion = 1,
+    )
 
     private fun assertSuccess(result: MemoryWriteResult): MemoryWriteResult.Success {
         assertTrue("Expected success but was $result", result is MemoryWriteResult.Success)
