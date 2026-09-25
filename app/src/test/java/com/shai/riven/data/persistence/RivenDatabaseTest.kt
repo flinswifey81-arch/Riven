@@ -108,6 +108,7 @@ class RivenDatabaseTest {
             "open_loop_audit_history",
             "message_parent_edges",
             "conversation_timeline_heads",
+            "shai_system_instructions",
         )
 
         val actualTables = database.openHelper.writableDatabase

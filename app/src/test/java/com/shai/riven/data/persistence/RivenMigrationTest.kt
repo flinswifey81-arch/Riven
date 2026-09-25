@@ -180,6 +180,139 @@ class RivenMigrationTest {
         migrated.close()
     }
 
+    @Test
+    fun migrationTwoToThreeCreatesEmptyInstructionsTableAndPreservesVersionTwoData() {
+        migrationHelper.createDatabase(2).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-v2', 10, 20, 'ACTIVE', 'Version two conversation')",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    message_id, conversation_id, sequence_number, role, delivery_state,
+                    content, created_at, updated_at
+                ) VALUES (
+                    'message-v2', 'conversation-v2', 1, 'USER', 'PERSISTED',
+                    'Preserved version two message', 11, 11
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO conversation_timeline_heads VALUES " +
+                    "('conversation-v2', 'message-v2', 7, 20)",
+            )
+            execSQL(
+                """
+                INSERT INTO experiences (
+                    experience_id, event_order, experience_type, actor, source_content,
+                    occurred_at, recorded_at, sensitivity, availability
+                ) VALUES (
+                    'experience-v2', 1, 'CONVERSATION_MESSAGE', 'SHAI',
+                    'Preserved version two experience', 11, 11, 'STANDARD', 'AVAILABLE'
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO memories (
+                    memory_id, kind, scope, meaning, epistemic_basis, certainty,
+                    truth_state, retention_state, lifecycle_state, temporal_state,
+                    learned_at, sensitivity, created_at, updated_at
+                ) VALUES (
+                    'memory-v2', 'SEMANTIC', 'SHAI', 'Preserved version two meaning',
+                    'DIRECT_USER_STATEMENT', 'CERTAIN', 'SUPPORTED', 'ACTIVE',
+                    'VALIDATED', 'CURRENT', 11, 'STANDARD', 11, 11
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 3,
+            migrations = listOf(MIGRATION_2_3),
+        )
+
+        assertEquals(0L, migrated.rowCount("shai_system_instructions"))
+        assertEquals(1L, migrated.rowCount("conversations"))
+        assertEquals(1L, migrated.rowCount("messages"))
+        assertEquals(1L, migrated.rowCount("conversation_timeline_heads"))
+        assertEquals(1L, migrated.rowCount("experiences"))
+        assertEquals(1L, migrated.rowCount("memories"))
+        assertEquals("message-v2", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v2'",
+        ))
+        assertEquals(7L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v2'",
+        ))
+        assertEquals("Preserved version two message", migrated.singleString(
+            "SELECT content FROM messages WHERE message_id = 'message-v2'",
+        ))
+        assertEquals("Preserved version two meaning", migrated.singleString(
+            "SELECT meaning FROM memories WHERE memory_id = 'memory-v2'",
+        ))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationOneToThreeChainsExistingTimelineMigrationAndCreatesInstructionsTable() {
+        migrationHelper.createDatabase(1).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-chain', 10, 30, 'ACTIVE', 'Migration chain')",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    message_id, conversation_id, sequence_number, role, delivery_state,
+                    content, created_at, updated_at
+                ) VALUES
+                    ('chain-1', 'conversation-chain', 1, 'USER', 'PERSISTED', 'First', 11, 11),
+                    ('chain-2', 'conversation-chain', 2, 'ASSISTANT', 'PERSISTED', 'Second', 12, 12),
+                    ('chain-3', 'conversation-chain', 3, 'USER', 'PERSISTED', 'Third', 13, 13)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO memories (
+                    memory_id, kind, scope, meaning, epistemic_basis, certainty,
+                    truth_state, retention_state, lifecycle_state, temporal_state,
+                    learned_at, sensitivity, created_at, updated_at
+                ) VALUES (
+                    'memory-chain', 'SEMANTIC', 'SHAI', 'Preserved through full chain',
+                    'DIRECT_USER_STATEMENT', 'CERTAIN', 'SUPPORTED', 'ACTIVE',
+                    'VALIDATED', 'CURRENT', 11, 'STANDARD', 11, 11
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 3,
+            migrations = listOf(MIGRATION_1_2, MIGRATION_2_3),
+        )
+
+        assertEquals("chain-3", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-chain'",
+        ))
+        assertEquals(listOf("chain-1", "chain-2", "chain-3"), migrated.activePath("chain-3"))
+        assertEquals(0L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-chain'",
+        ))
+        assertEquals(1L, migrated.rowCount("memories"))
+        assertEquals("Preserved through full chain", migrated.singleString(
+            "SELECT meaning FROM memories WHERE memory_id = 'memory-chain'",
+        ))
+        assertEquals(0L, migrated.rowCount("shai_system_instructions"))
+        migrated.close()
+    }
+
     private fun SQLiteConnection.execSQL(sql: String) {
         prepare(sql).use { statement -> statement.step() }
     }

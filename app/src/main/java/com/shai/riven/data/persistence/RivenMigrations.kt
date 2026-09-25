@@ -84,3 +84,21 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
         )
     }
 }
+
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `shai_system_instructions` (
+                `instruction_id` TEXT NOT NULL,
+                `content` TEXT NOT NULL,
+                `is_enabled` INTEGER NOT NULL,
+                `revision` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`instruction_id`)
+            )
+            """.trimIndent(),
+        )
+    }
+}
