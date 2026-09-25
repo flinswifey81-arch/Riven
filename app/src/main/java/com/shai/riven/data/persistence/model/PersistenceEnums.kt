@@ -233,7 +233,10 @@ enum class RepairJobState {
 
 enum class MemoryAuditAction {
     CREATED,
+    REINFORCED,
     STATE_CHANGED,
+    DISPUTED,
+    DORMANT,
     CORRECTED,
     REFINED,
     SUPERSEDED,

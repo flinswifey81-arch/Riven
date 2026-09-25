@@ -12,6 +12,7 @@ import com.shai.riven.data.persistence.entity.DerivedArtifactOpenLoopDependencyE
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
+import com.shai.riven.data.persistence.model.DerivedArtifactState
 
 @Dao
 interface MaintenanceDao {
@@ -47,4 +48,33 @@ interface MaintenanceDao {
 
     @Query("SELECT COUNT(*) FROM derived_artifact_message_dependencies WHERE derived_artifact_id = :artifactId")
     fun messageDependencyCount(artifactId: String): Int
+
+    @Query("SELECT * FROM derived_artifacts WHERE derived_artifact_id = :artifactId")
+    fun derivedArtifact(artifactId: String): DerivedArtifactEntity?
+
+    @Query(
+        """
+        UPDATE derived_artifacts
+        SET state = :state, invalidated_at = :invalidatedAt
+        WHERE derived_artifact_id IN (
+            SELECT derived_artifact_id
+            FROM derived_artifact_memory_dependencies
+            WHERE memory_id IN (:memoryIds)
+        )
+        """,
+    )
+    fun markMemoryDerivedArtifacts(
+        memoryIds: List<String>,
+        state: DerivedArtifactState,
+        invalidatedAt: Long,
+    ): Int
+
+    @Query("SELECT * FROM memory_audit_history WHERE memory_id = :memoryId ORDER BY occurred_at, memory_audit_id")
+    fun memoryAuditHistory(memoryId: String): List<MemoryAuditHistoryEntity>
+
+    @Query("SELECT * FROM suppression_tombstones ORDER BY created_at, tombstone_id")
+    fun suppressionTombstones(): List<SuppressionTombstoneEntity>
+
+    @Query("SELECT * FROM repair_jobs WHERE target_type = :targetType AND target_id = :targetId ORDER BY created_at, repair_job_id")
+    fun repairJobs(targetType: String, targetId: String): List<RepairJobEntity>
 }
