@@ -1,0 +1,36 @@
+# Gradle and generated build output
+.gradle/
+**/build/
+*.apk
+*.aab
+*.ap_
+
+# Android Studio and machine-local IDE state
+.idea/
+*.iml
+.kotlin/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# Machine-local Android configuration
+local.properties
+
+# Secrets, signing material, API keys, and credential files
+.env
+.env.*
+!.env.example
+credentials.json
+service-account*.json
+google-services.json
+key.properties
+secret.properties
+secrets.properties
+*.jks
+*.keystore
+
+# Operating-system and diagnostic artifacts
+.DS_Store
+Thumbs.db
+*.hprof
+*.log
