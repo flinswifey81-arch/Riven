@@ -102,6 +102,18 @@ interface MemoryDao {
     @Query("SELECT COUNT(*) FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId")
     fun memoryEvidenceExists(memoryId: String, experienceId: String): Int
 
+    @Query("SELECT COUNT(*) FROM memory_evidence WHERE memory_id = :memoryId AND lineage_key = :lineageKey")
+    fun memoryEvidenceLineageExists(memoryId: String, lineageKey: String): Int
+
+    @Query("SELECT DISTINCT experience_id FROM memory_evidence WHERE memory_id IN (:memoryIds)")
+    fun experienceIdsForMemories(memoryIds: List<String>): List<String>
+
+    @Query("SELECT DISTINCT message_id FROM experience_message_sources WHERE experience_id IN (:experienceIds)")
+    fun messageIdsForExperiences(experienceIds: List<String>): List<String>
+
+    @Query("SELECT open_loop_id FROM open_loops WHERE related_memory_id IN (:memoryIds)")
+    fun openLoopIdsForMemories(memoryIds: List<String>): List<String>
+
     @Query("SELECT COUNT(*) FROM entities WHERE entity_id = :entityId")
     fun entityCount(entityId: String): Int
 

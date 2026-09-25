@@ -128,6 +128,9 @@ class MemoryTransactionService(
             if (memoryDao.memoryEvidenceExists(memory.id, input.evidence.experienceId) != 0) {
                 abort(MemoryWriteError.DuplicateEvidence(memory.id, input.evidence.experienceId))
             }
+            if (memoryDao.memoryEvidenceLineageExists(memory.id, input.evidence.lineageKey) != 0) {
+                abort(MemoryWriteError.DuplicateEvidenceLineage(memory.id, input.evidence.lineageKey))
+            }
 
             memoryDao.insertMemoryEvidence(
                 MemoryEvidenceEntity(
@@ -235,13 +238,15 @@ class MemoryTransactionService(
             val refinement = input.refinement.copy(temporalState = TemporalState.CURRENT)
             insertValidatedMemory(refinement, input.occurredAt)
 
-            val historical = old.copy(
-                lifecycleState = MemoryLifecycleState.SUPERSEDED,
-                temporalState = TemporalState.HISTORICAL,
-                validUntil = old.validUntil ?: input.occurredAt,
-                updatedAt = input.occurredAt,
-            )
-            memoryDao.updateMemory(historical)
+            val broaderAfterRefinement = when (input.disposition) {
+                RefinementDisposition.KEEP_BROADER_CURRENT -> old
+                RefinementDisposition.SUPERSEDE_BROADER -> old.copy(
+                    lifecycleState = MemoryLifecycleState.SUPERSEDED,
+                    temporalState = TemporalState.HISTORICAL,
+                    validUntil = old.validUntil ?: input.occurredAt,
+                    updatedAt = input.occurredAt,
+                ).also { memoryDao.updateMemory(it) }
+            }
             memoryDao.insertMemoryRelationship(
                 MemoryRelationshipEntity(
                     sourceMemoryId = refinement.memoryId,
@@ -256,9 +261,9 @@ class MemoryTransactionService(
                 action = MemoryAuditAction.REFINED,
                 triggeringExperienceId = input.triggeringExperienceId,
                 fromTruthState = old.truthState,
-                toTruthState = historical.truthState,
+                toTruthState = broaderAfterRefinement.truthState,
                 fromLifecycleState = old.lifecycleState,
-                toLifecycleState = historical.lifecycleState,
+                toLifecycleState = broaderAfterRefinement.lifecycleState,
                 occurredAt = input.occurredAt,
             )
             invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
@@ -364,16 +369,18 @@ class MemoryTransactionService(
                 updatedAt = input.occurredAt,
             )
             memoryDao.updateMemory(forgotten)
-            maintenanceDao.insertSuppressionTombstone(
-                SuppressionTombstoneEntity(
-                    id = idGenerator.nextId(),
-                    kind = SuppressionKind.FORGET,
-                    sourceLineageHash = evidence.lineageHash(),
-                    isActive = true,
-                    createdAt = input.occurredAt,
-                    formatVersion = 1,
-                ),
-            )
+            evidence.forEach { source ->
+                maintenanceDao.insertSuppressionTombstone(
+                    SuppressionTombstoneEntity(
+                        id = idGenerator.nextId(),
+                        kind = SuppressionKind.FORGET,
+                        sourceLineageHash = source.lineageHash(),
+                        isActive = true,
+                        createdAt = input.occurredAt,
+                        formatVersion = 1,
+                    ),
+                )
+            }
             insertAudit(
                 memoryId = memory.id,
                 action = MemoryAuditAction.FORGOTTEN,
@@ -395,11 +402,7 @@ class MemoryTransactionService(
     ): MemoryWriteResult = execute(operation) {
         val memory = requireMemory(input.memoryId)
         requireTriggeringExperience(input.triggeringExperienceId)
-        if (
-            memory.retentionState != requiredState ||
-            memory.truthState == MemoryTruthState.CORRECTED_FALSE ||
-            memory.lifecycleState != MemoryLifecycleState.VALIDATED
-        ) {
+        if (memory.retentionState != requiredState) {
             abort(
                 MemoryWriteError.IllegalStateTransition(
                     memory.id,
@@ -558,11 +561,40 @@ class MemoryTransactionService(
         occurredAt: Long,
         repairJobType: RepairJobType,
     ) {
+        val canonicalMemoryIds = memoryIds.toList()
+        val experienceIds = memoryDao.experienceIdsForMemories(canonicalMemoryIds)
+        val messageIds = if (experienceIds.isEmpty()) {
+            emptyList()
+        } else {
+            memoryDao.messageIdsForExperiences(experienceIds)
+        }
+        val openLoopIds = memoryDao.openLoopIdsForMemories(canonicalMemoryIds)
         maintenanceDao.markMemoryDerivedArtifacts(
-            memoryIds = memoryIds.toList(),
+            memoryIds = canonicalMemoryIds,
             state = DerivedArtifactState.STALE,
             invalidatedAt = occurredAt,
         )
+        if (experienceIds.isNotEmpty()) {
+            maintenanceDao.markExperienceDerivedArtifacts(
+                experienceIds = experienceIds,
+                state = DerivedArtifactState.STALE,
+                invalidatedAt = occurredAt,
+            )
+        }
+        if (messageIds.isNotEmpty()) {
+            maintenanceDao.markMessageDerivedArtifacts(
+                messageIds = messageIds,
+                state = DerivedArtifactState.STALE,
+                invalidatedAt = occurredAt,
+            )
+        }
+        if (openLoopIds.isNotEmpty()) {
+            maintenanceDao.markOpenLoopDerivedArtifacts(
+                openLoopIds = openLoopIds,
+                state = DerivedArtifactState.STALE,
+                invalidatedAt = occurredAt,
+            )
+        }
         memoryIds.forEach { memoryId ->
             maintenanceDao.insertRepairJob(
                 RepairJobEntity(
@@ -636,9 +668,8 @@ class MemoryTransactionService(
         MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, failure::class.java.simpleName))
     }
 
-    private fun List<MemoryEvidenceEntity>.lineageHash(): String {
-        val canonicalLineage = sortedWith(compareBy(MemoryEvidenceEntity::experienceId, MemoryEvidenceEntity::lineageKey))
-            .joinToString("|") { "${it.experienceId}:${it.lineageKey}" }
+    private fun MemoryEvidenceEntity.lineageHash(): String {
+        val canonicalLineage = "$experienceId:$lineageKey"
         val digest = MessageDigest.getInstance("SHA-256").digest(canonicalLineage.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { byte -> "%02x".format(byte) }
     }

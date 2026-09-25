@@ -69,6 +69,57 @@ interface MaintenanceDao {
         invalidatedAt: Long,
     ): Int
 
+    @Query(
+        """
+        UPDATE derived_artifacts
+        SET state = :state, invalidated_at = :invalidatedAt
+        WHERE derived_artifact_id IN (
+            SELECT derived_artifact_id
+            FROM derived_artifact_experience_dependencies
+            WHERE experience_id IN (:experienceIds)
+        )
+        """,
+    )
+    fun markExperienceDerivedArtifacts(
+        experienceIds: List<String>,
+        state: DerivedArtifactState,
+        invalidatedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE derived_artifacts
+        SET state = :state, invalidated_at = :invalidatedAt
+        WHERE derived_artifact_id IN (
+            SELECT derived_artifact_id
+            FROM derived_artifact_message_dependencies
+            WHERE message_id IN (:messageIds)
+        )
+        """,
+    )
+    fun markMessageDerivedArtifacts(
+        messageIds: List<String>,
+        state: DerivedArtifactState,
+        invalidatedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE derived_artifacts
+        SET state = :state, invalidated_at = :invalidatedAt
+        WHERE derived_artifact_id IN (
+            SELECT derived_artifact_id
+            FROM derived_artifact_open_loop_dependencies
+            WHERE open_loop_id IN (:openLoopIds)
+        )
+        """,
+    )
+    fun markOpenLoopDerivedArtifacts(
+        openLoopIds: List<String>,
+        state: DerivedArtifactState,
+        invalidatedAt: Long,
+    ): Int
+
     @Query("SELECT * FROM memory_audit_history WHERE memory_id = :memoryId ORDER BY occurred_at, memory_audit_id")
     fun memoryAuditHistory(memoryId: String): List<MemoryAuditHistoryEntity>
 

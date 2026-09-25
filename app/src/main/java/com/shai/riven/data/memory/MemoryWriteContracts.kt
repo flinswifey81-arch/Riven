@@ -61,6 +61,10 @@ sealed interface MemoryWriteError {
         val memoryId: String,
         val experienceId: String,
     ) : MemoryWriteError
+    data class DuplicateEvidenceLineage(
+        val memoryId: String,
+        val lineageKey: String,
+    ) : MemoryWriteError
 
     data class IllegalStateTransition(
         val memoryId: String,
@@ -176,9 +180,15 @@ data class SupersedeMemoryInput(
     val triggeringExperienceId: String? = null,
 )
 
+enum class RefinementDisposition {
+    KEEP_BROADER_CURRENT,
+    SUPERSEDE_BROADER,
+}
+
 data class RefineMemoryInput(
     val broaderMemoryId: String,
     val refinement: ValidatedMemoryInput,
+    val disposition: RefinementDisposition,
     val occurredAt: Long,
     val triggeringExperienceId: String? = null,
 )
