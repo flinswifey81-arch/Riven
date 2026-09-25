@@ -21,6 +21,13 @@ sealed interface SafeDeleteError {
         val actualConversationId: String,
     ) : SafeDeleteError
 
+    data class ParentBelongsToDifferentConversation(
+        val childMessageId: String,
+        val parentMessageId: String,
+        val expectedConversationId: String,
+        val actualConversationId: String,
+    ) : SafeDeleteError
+
     data class StaleTimelineRevision(
         val expected: Long,
         val actual: Long,

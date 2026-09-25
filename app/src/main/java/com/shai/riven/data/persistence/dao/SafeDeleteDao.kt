@@ -208,6 +208,9 @@ interface SafeDeleteDao {
     @Query("DELETE FROM derived_artifact_open_loop_dependencies WHERE open_loop_id = :openLoopId")
     fun deleteDerivedOpenLoopDependencies(openLoopId: String): Int
 
+    @Query("SELECT COUNT(*) FROM derived_artifact_open_loop_dependencies WHERE derived_artifact_id = :artifactId")
+    fun derivedOpenLoopDependencyCount(artifactId: String): Int
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertSuppressionTombstone(tombstone: SuppressionTombstoneEntity)
 

@@ -27,6 +27,7 @@ import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
+import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.OpenLoopAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntityLinkEntity
@@ -161,6 +162,53 @@ class SafeDeleteServiceTest {
                 .any { it.jobType == RepairJobType.PROPAGATE_DELETION },
         )
         assertTrue(result.invalidatedDerivedArtifactIds.contains("memory-artifact"))
+    }
+
+    @Test
+    fun hardMemoryDeleteInvalidatesFullRetainedSourceLineageWithoutDeletingCanonicalSources() = runBlocking {
+        createConversation("conversation")
+        append("conversation", "message", MessageRole.USER, 0, 10)
+        insertExperience("experience", listOf("message"), "retained source content")
+        insertMemory("memory", "private retained meaning", listOf("experience" to "lineage"))
+        insertOpenLoop(
+            id = "loop",
+            creationExperienceId = "experience",
+            relatedMemoryId = "memory",
+        )
+        insertArtifact("artifact-memory", memoryIds = listOf("memory"))
+        insertArtifact("artifact-experience", experienceIds = listOf("experience"))
+        insertArtifact("artifact-message", messageIds = listOf("message"))
+        insertArtifact("artifact-loop", openLoopIds = listOf("loop"))
+
+        val result = assertMemoryDeleted(
+            deleteService.deleteMemory(DeleteMemoryInput("memory", occurredAt = 20)),
+        )
+
+        assertNull(database.safeDeleteDao().memory("memory"))
+        assertNotNull(database.safeDeleteDao().experience("experience"))
+        assertNotNull(database.safeDeleteDao().message("message"))
+        assertNull(database.safeDeleteDao().openLoop("loop")?.relatedMemoryId)
+        val artifactIds = setOf(
+            "artifact-memory",
+            "artifact-experience",
+            "artifact-message",
+            "artifact-loop",
+        )
+        assertEquals(artifactIds, result.invalidatedDerivedArtifactIds)
+        artifactIds.forEach { artifactId ->
+            assertEquals(
+                DerivedArtifactState.INVALIDATED,
+                database.maintenanceDao().derivedArtifact(artifactId)?.state,
+            )
+        }
+        assertEquals(0, database.maintenanceDao().memoryDependencyCount("artifact-memory"))
+        assertEquals(1, database.maintenanceDao().experienceDependencyCount("artifact-experience"))
+        assertEquals(1, database.maintenanceDao().messageDependencyCount("artifact-message"))
+        assertEquals(1, database.safeDeleteDao().derivedOpenLoopDependencyCount("artifact-loop"))
+        assertEquals(
+            SuppressionKind.DELETE,
+            database.safeDeleteDao().suppressionTombstone(lineageHash("experience", "lineage"))?.kind,
+        )
     }
 
     @Test
@@ -523,6 +571,141 @@ class SafeDeleteServiceTest {
     }
 
     @Test
+    fun openLoopRollbackRefusesAdditionalAuditMutationFromResolutionExperience() = runBlocking {
+        createConversation("conversation")
+        append("conversation", "creation-message", MessageRole.USER, 0, 1)
+        append("conversation", "resolution-message", MessageRole.ASSISTANT, 1, 2)
+        insertExperience("creation-experience", listOf("creation-message"))
+        insertExperience("resolution-experience", listOf("resolution-message"))
+        insertOpenLoop(
+            id = "loop",
+            creationExperienceId = "creation-experience",
+            resolutionExperienceId = "resolution-experience",
+            state = OpenLoopState.COMPLETED,
+            dueAt = 99,
+            closedAt = 2,
+        )
+        database.openLoopDao().insertAuditHistory(
+            OpenLoopAuditHistoryEntity(
+                id = "resolution-state-audit",
+                openLoopId = "loop",
+                action = OpenLoopAuditAction.STATE_CHANGED,
+                triggeringExperienceId = "resolution-experience",
+                fromState = OpenLoopState.ACTIVE,
+                toState = OpenLoopState.COMPLETED,
+                occurredAt = 2,
+            ),
+        )
+        database.openLoopDao().insertAuditHistory(
+            OpenLoopAuditHistoryEntity(
+                id = "resolution-due-audit",
+                openLoopId = "loop",
+                action = OpenLoopAuditAction.DUE_DATE_CHANGED,
+                triggeringExperienceId = "resolution-experience",
+                occurredAt = 2,
+            ),
+        )
+
+        val error = assertTimelineFailure(
+            deleteService.deleteLeafMessage(
+                DeleteTimelineMessageInput("conversation", "resolution-message", 2, occurredAt = 3),
+            ),
+        )
+
+        assertEquals(SafeDeleteError.AmbiguousOpenLoopRollback("loop", "resolution-experience"), error)
+        assertNotNull(database.safeDeleteDao().message("resolution-message"))
+        assertNotNull(database.safeDeleteDao().experience("resolution-experience"))
+        val loop = database.safeDeleteDao().openLoop("loop")!!
+        assertEquals(OpenLoopState.COMPLETED, loop.state)
+        assertEquals("resolution-experience", loop.resolutionExperienceId)
+        assertEquals(99L, loop.dueAt)
+        assertEquals(2, database.safeDeleteDao().openLoopAuditsForExperience("loop", "resolution-experience").size)
+        assertEquals("resolution-message", database.safeDeleteDao().timelineHead("conversation")?.activeHeadMessageId)
+        assertEquals(2L, database.safeDeleteDao().timelineHead("conversation")?.timelineRevision)
+    }
+
+    @Test
+    fun openLoopRollbackRefusesMultipleStateTransitionsFromResolutionExperience() = runBlocking {
+        createConversation("conversation")
+        append("conversation", "creation-message", MessageRole.USER, 0, 1)
+        append("conversation", "resolution-message", MessageRole.ASSISTANT, 1, 2)
+        insertExperience("creation-experience", listOf("creation-message"))
+        insertExperience("resolution-experience", listOf("resolution-message"))
+        insertOpenLoop(
+            id = "loop",
+            creationExperienceId = "creation-experience",
+            resolutionExperienceId = "resolution-experience",
+            state = OpenLoopState.COMPLETED,
+            closedAt = 2,
+        )
+        listOf(OpenLoopState.ACTIVE, OpenLoopState.WAITING).forEachIndexed { index, priorState ->
+            database.openLoopDao().insertAuditHistory(
+                OpenLoopAuditHistoryEntity(
+                    id = "resolution-audit-$index",
+                    openLoopId = "loop",
+                    action = OpenLoopAuditAction.STATE_CHANGED,
+                    triggeringExperienceId = "resolution-experience",
+                    fromState = priorState,
+                    toState = OpenLoopState.COMPLETED,
+                    occurredAt = 2,
+                ),
+            )
+        }
+
+        val error = assertTimelineFailure(
+            deleteService.deleteLeafMessage(
+                DeleteTimelineMessageInput("conversation", "resolution-message", 2, occurredAt = 3),
+            ),
+        )
+
+        assertEquals(SafeDeleteError.AmbiguousOpenLoopRollback("loop", "resolution-experience"), error)
+        assertNotNull(database.safeDeleteDao().message("resolution-message"))
+        assertNotNull(database.safeDeleteDao().experience("resolution-experience"))
+        val loop = database.safeDeleteDao().openLoop("loop")!!
+        assertEquals(OpenLoopState.COMPLETED, loop.state)
+        assertEquals("resolution-experience", loop.resolutionExperienceId)
+        assertEquals(2, database.safeDeleteDao().openLoopAuditsForExperience("loop", "resolution-experience").size)
+        assertEquals("resolution-message", database.safeDeleteDao().timelineHead("conversation")?.activeHeadMessageId)
+        assertEquals(2L, database.safeDeleteDao().timelineHead("conversation")?.timelineRevision)
+    }
+
+    @Test
+    fun activeHeadDeleteRefusesCrossConversationParentWithoutRepairingCorruptEdge() = runBlocking {
+        createConversation("conversation-a")
+        append("conversation-a", "child-a", MessageRole.ASSISTANT, 0, 1)
+        createConversation("conversation-b")
+        append("conversation-b", "parent-b", MessageRole.USER, 0, 1)
+        database.conversationTimelineDao().insertParentEdge(
+            MessageParentEdgeEntity(
+                childMessageId = "child-a",
+                parentMessageId = "parent-b",
+                createdAt = 2,
+            ),
+        )
+
+        val error = assertTimelineFailure(
+            deleteService.deleteLeafMessage(
+                DeleteTimelineMessageInput("conversation-a", "child-a", 1, occurredAt = 3),
+            ),
+        )
+
+        assertEquals(
+            SafeDeleteError.ParentBelongsToDifferentConversation(
+                childMessageId = "child-a",
+                parentMessageId = "parent-b",
+                expectedConversationId = "conversation-a",
+                actualConversationId = "conversation-b",
+            ),
+            error,
+        )
+        assertEquals("child-a", database.safeDeleteDao().timelineHead("conversation-a")?.activeHeadMessageId)
+        assertEquals(1L, database.safeDeleteDao().timelineHead("conversation-a")?.timelineRevision)
+        assertNotNull(database.safeDeleteDao().message("child-a"))
+        assertEquals("parent-b", database.safeDeleteDao().parentEdge("child-a")?.parentMessageId)
+        assertNotNull(database.safeDeleteDao().message("parent-b"))
+    }
+
+    @Test
     fun multiSourceExperienceWithSemanticDependentRefusesAmbiguousDeletion() = runBlocking {
         createConversation("conversation")
         append("conversation", "u1", MessageRole.USER, 0, 1)
@@ -881,6 +1064,7 @@ class SafeDeleteServiceTest {
         relatedMemoryId: String? = null,
         resolutionExperienceId: String? = null,
         state: OpenLoopState = OpenLoopState.ACTIVE,
+        dueAt: Long? = null,
         closedAt: Long? = null,
         title: String = "loop title",
     ) {
@@ -893,6 +1077,7 @@ class SafeDeleteServiceTest {
                 title = title,
                 state = state,
                 openedAt = 1,
+                dueAt = dueAt,
                 closedAt = closedAt,
                 sensitivity = SensitivityLevel.STANDARD,
                 createdAt = 1,

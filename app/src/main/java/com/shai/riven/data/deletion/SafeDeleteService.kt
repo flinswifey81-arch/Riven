@@ -279,14 +279,16 @@ class SafeDeleteService(
             dao.openLoopsResolvedByExperience(experienceId)
                 .filter { it.id !in openLoopIdsToDelete }
                 .forEach { openLoop ->
-                    val stateAudits = dao.openLoopAuditsForExperience(openLoop.id, experienceId)
-                        .filter { audit ->
-                            audit.action == OpenLoopAuditAction.STATE_CHANGED &&
-                                audit.fromState != null &&
-                                audit.toState == openLoop.state
-                        }
-                    val priorState = stateAudits.singleOrNull()?.fromState
+                    val audits = dao.openLoopAuditsForExperience(openLoop.id, experienceId)
+                    val rollbackAudit = audits.singleOrNull()
+                    val priorState = rollbackAudit?.fromState
                     if (priorState == null || priorState !in UNRESOLVED_OPEN_LOOP_STATES) {
+                        abort(SafeDeleteError.AmbiguousOpenLoopRollback(openLoop.id, experienceId))
+                    }
+                    if (
+                        rollbackAudit.action != OpenLoopAuditAction.STATE_CHANGED ||
+                        rollbackAudit.toState != openLoop.state
+                    ) {
                         abort(SafeDeleteError.AmbiguousOpenLoopRollback(openLoop.id, experienceId))
                     }
                     openLoopRollbacks += OpenLoopRollback(openLoop.id, experienceId, priorState)
@@ -302,6 +304,20 @@ class SafeDeleteService(
         }
 
         val parentId = dao.parentEdge(message.id)?.parentMessageId
+        if (head.activeHeadMessageId == message.id && parentId != null) {
+            val parent = dao.message(parentId)
+                ?: abort(SafeDeleteError.MissingMessage(parentId))
+            if (parent.conversationId != input.conversationId) {
+                abort(
+                    SafeDeleteError.ParentBelongsToDifferentConversation(
+                        childMessageId = message.id,
+                        parentMessageId = parent.id,
+                        expectedConversationId = input.conversationId,
+                        actualConversationId = parent.conversationId,
+                    ),
+                )
+            }
+        }
         return TimelineDeletePlan(
             conversation = conversation,
             head = head,
@@ -335,13 +351,31 @@ class SafeDeleteService(
         invokeFailureHook: Boolean,
     ) {
         dao.memory(memoryId) ?: abort(SafeDeleteError.MissingMemory(memoryId))
-        val retainedEvidence = dao.evidenceForMemory(memoryId)
+        val evidence = dao.evidenceForMemory(memoryId)
+        val retainedEvidence = evidence
             .filterNot { it.experienceId in sourceExperienceIdsBeingDeleted }
+        val supportingExperienceIds = evidence.mapTo(linkedSetOf()) { it.experienceId }
+        val sourceMessageIds = supportingExperienceIds.flatMapTo(linkedSetOf()) { experienceId ->
+            dao.messageSourcesForExperience(experienceId).map { it.messageId }
+        }
+        val relatedOpenLoops = dao.openLoopsForMemory(memoryId)
         retainedEvidence.forEach { evidence ->
             accumulator.tombstones += ensureDeleteTombstone(evidence, accumulator.occurredAt)
         }
 
-        invalidateArtifacts(dao.derivedArtifactIdsForMemory(memoryId), accumulator)
+        val lineageArtifactIds = buildList {
+            addAll(dao.derivedArtifactIdsForMemory(memoryId))
+            supportingExperienceIds.forEach { experienceId ->
+                addAll(dao.derivedArtifactIdsForExperience(experienceId))
+            }
+            sourceMessageIds.forEach { messageId ->
+                addAll(dao.derivedArtifactIdsForMessage(messageId))
+            }
+            relatedOpenLoops.forEach { openLoop ->
+                addAll(dao.derivedArtifactIdsForOpenLoop(openLoop.id))
+            }
+        }
+        invalidateArtifacts(lineageArtifactIds, accumulator)
         dao.deleteDerivedMemoryDependencies(memoryId)
 
         dao.relationshipsForMemory(memoryId).forEach { relationship ->
@@ -356,7 +390,7 @@ class SafeDeleteService(
             }
         }
 
-        dao.openLoopsForMemory(memoryId).forEach { openLoop ->
+        relatedOpenLoops.forEach { openLoop ->
             dao.updateOpenLoop(
                 openLoop.copy(
                     relatedMemoryId = null,
