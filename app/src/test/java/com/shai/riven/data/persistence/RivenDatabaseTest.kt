@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
+import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactExperienceDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMemoryDependencyEntity
@@ -19,6 +20,7 @@ import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
+import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntityLinkEntity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
@@ -51,6 +53,7 @@ import com.shai.riven.data.persistence.model.TemporalState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Before
@@ -103,10 +106,20 @@ class RivenDatabaseTest {
             "repair_jobs",
             "memory_audit_history",
             "open_loop_audit_history",
+            "message_parent_edges",
+            "conversation_timeline_heads",
         )
 
         val actualTables = database.openHelper.writableDatabase
-            .query("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .query(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'android_%'
+                  AND name NOT LIKE 'room_%'
+                  AND name NOT LIKE 'sqlite_%'
+                """.trimIndent(),
+            )
             .use { cursor ->
                 buildSet {
                     while (cursor.moveToNext()) {
@@ -115,7 +128,7 @@ class RivenDatabaseTest {
                 }
             }
 
-        assertTrue(actualTables.containsAll(expectedTables))
+        assertEquals(expectedTables, actualTables)
     }
 
     @Test
@@ -138,6 +151,48 @@ class RivenDatabaseTest {
 
         assertThrows(SQLiteConstraintException::class.java) {
             database.conversationDao().insertMessage(orphanMessage)
+        }
+    }
+
+    @Test
+    fun timelineForeignKeysRestrictCanonicalParentsAndHeadsWhileCascadingOwnedRows() {
+        val conversation = conversation("conversation-1")
+        val parent = message("message-parent", conversation.id, 1)
+        val child = message("message-child", conversation.id, 2)
+        database.conversationDao().insertConversation(conversation)
+        database.conversationDao().insertMessage(parent)
+        database.conversationDao().insertMessage(child)
+        database.conversationTimelineDao().insertParentEdge(
+            MessageParentEdgeEntity(child.id, parent.id, 2),
+        )
+
+        assertThrows(SQLiteConstraintException::class.java) {
+            database.conversationDao().deleteMessage(parent)
+        }
+
+        database.conversationDao().deleteMessage(child)
+        assertNull(database.conversationTimelineDao().parentEdge(child.id))
+
+        database.conversationTimelineDao().insertTimelineHead(
+            ConversationTimelineHeadEntity(
+                conversationId = conversation.id,
+                activeHeadMessageId = parent.id,
+                timelineRevision = 0,
+                updatedAt = 2,
+            ),
+        )
+        assertThrows(SQLiteConstraintException::class.java) {
+            database.conversationDao().deleteMessage(parent)
+        }
+        assertThrows(SQLiteConstraintException::class.java) {
+            database.conversationTimelineDao().insertTimelineHead(
+                ConversationTimelineHeadEntity(
+                    conversationId = conversation.id,
+                    activeHeadMessageId = parent.id,
+                    timelineRevision = 0,
+                    updatedAt = 3,
+                ),
+            )
         }
     }
 

@@ -38,6 +38,9 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+    sourceSets {
+        getByName("debug").assets.directories.add("$projectDir/schemas")
+    }
 }
 
 room {
