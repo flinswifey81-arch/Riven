@@ -313,6 +313,141 @@ class RivenMigrationTest {
         migrated.close()
     }
 
+    @Test
+    fun migrationThreeToFourCreatesAttachmentFoundationWithoutFabricatingRows() {
+        migrationHelper.createDatabase(3).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-v3', 10, 20, 'ACTIVE', 'Version three conversation')",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    message_id, conversation_id, sequence_number, role, delivery_state,
+                    content, created_at, updated_at
+                ) VALUES (
+                    'message-v3', 'conversation-v3', 1, 'USER', 'PERSISTED',
+                    'Preserved version three message', 11, 11
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO conversation_timeline_heads VALUES " +
+                    "('conversation-v3', 'message-v3', 4, 20)",
+            )
+            execSQL(
+                """
+                INSERT INTO memories (
+                    memory_id, kind, scope, meaning, epistemic_basis, certainty,
+                    truth_state, retention_state, lifecycle_state, temporal_state,
+                    learned_at, sensitivity, created_at, updated_at
+                ) VALUES (
+                    'memory-v3', 'SEMANTIC', 'SHAI', 'Preserved version three meaning',
+                    'DIRECT_USER_STATEMENT', 'CERTAIN', 'SUPPORTED', 'ACTIVE',
+                    'VALIDATED', 'CURRENT', 11, 'STANDARD', 11, 11
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO shai_system_instructions VALUES " +
+                    "('PRIMARY', 'Preserve exact instructions', 1, 7, 12, 13)",
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 4,
+            migrations = listOf(MIGRATION_3_4),
+        )
+
+        assertEquals(1L, migrated.rowCount("conversations"))
+        assertEquals(1L, migrated.rowCount("messages"))
+        assertEquals(1L, migrated.rowCount("conversation_timeline_heads"))
+        assertEquals(1L, migrated.rowCount("memories"))
+        assertEquals(1L, migrated.rowCount("shai_system_instructions"))
+        assertEquals("message-v3", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v3'",
+        ))
+        assertEquals(4L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v3'",
+        ))
+        assertEquals("Preserved version three meaning", migrated.singleString(
+            "SELECT meaning FROM memories WHERE memory_id = 'memory-v3'",
+        ))
+        assertEquals("Preserve exact instructions", migrated.singleString(
+            "SELECT content FROM shai_system_instructions WHERE instruction_id = 'PRIMARY'",
+        ))
+        listOf(
+            "attachments",
+            "message_attachments",
+            "generated_media_provenance",
+            "derived_artifact_attachment_dependencies",
+        ).forEach { table ->
+            assertEquals("Migration must not fabricate rows in $table", 0L, migrated.rowCount(table))
+        }
+        migrated.close()
+    }
+
+    @Test
+    fun migrationOneToFourChainsTimelineInstructionsAndAttachmentFoundation() {
+        migrationHelper.createDatabase(1).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-full-chain', 10, 30, 'ACTIVE', 'Full chain')",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    message_id, conversation_id, sequence_number, role, delivery_state,
+                    content, created_at, updated_at
+                ) VALUES
+                    ('full-1', 'conversation-full-chain', 1, 'USER', 'PERSISTED', 'First', 11, 11),
+                    ('full-2', 'conversation-full-chain', 2, 'ASSISTANT', 'PERSISTED', 'Second', 12, 12)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO memories (
+                    memory_id, kind, scope, meaning, epistemic_basis, certainty,
+                    truth_state, retention_state, lifecycle_state, temporal_state,
+                    learned_at, sensitivity, created_at, updated_at
+                ) VALUES (
+                    'memory-full-chain', 'SEMANTIC', 'SHAI', 'Preserved from version one',
+                    'DIRECT_USER_STATEMENT', 'CERTAIN', 'SUPPORTED', 'ACTIVE',
+                    'VALIDATED', 'CURRENT', 11, 'STANDARD', 11, 11
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 4,
+            migrations = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4),
+        )
+
+        assertEquals(listOf("full-1", "full-2"), migrated.activePath("full-2"))
+        assertEquals("full-2", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-full-chain'",
+        ))
+        assertEquals(0L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-full-chain'",
+        ))
+        assertEquals("Preserved from version one", migrated.singleString(
+            "SELECT meaning FROM memories WHERE memory_id = 'memory-full-chain'",
+        ))
+        assertEquals(0L, migrated.rowCount("shai_system_instructions"))
+        assertEquals(0L, migrated.rowCount("attachments"))
+        assertEquals(0L, migrated.rowCount("message_attachments"))
+        assertEquals(0L, migrated.rowCount("generated_media_provenance"))
+        assertEquals(0L, migrated.rowCount("derived_artifact_attachment_dependencies"))
+        migrated.close()
+    }
+
     private fun SQLiteConnection.execSQL(sql: String) {
         prepare(sql).use { statement -> statement.step() }
     }

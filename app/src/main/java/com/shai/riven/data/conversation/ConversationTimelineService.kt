@@ -6,8 +6,10 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
+import com.shai.riven.data.persistence.entity.MessageAttachmentEntity
 import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.AttachmentState
 import kotlinx.coroutines.CancellationException
 
 class ConversationTimelineService(
@@ -15,6 +17,7 @@ class ConversationTimelineService(
     private val afterMessageGraphWrite: (TimelineOperation) -> Unit = {},
 ) {
     private val timelineDao = database.conversationTimelineDao()
+    private val attachmentDao = database.attachmentDao()
 
     suspend fun createConversationWithTimeline(
         input: CreateTimelineConversationInput,
@@ -49,12 +52,14 @@ class ConversationTimelineService(
             requireExpectedRevision(head, input.expectedTimelineRevision)
             walkActivePath(head)
             requireNewMessageId(input.message.messageId)
+            requireAvailableAttachments(input.message.attachmentIds)
             val sequenceNumber = nextSequenceNumber(input.conversationId)
             val message = input.message.toEntity(input.conversationId, sequenceNumber)
             timelineDao.insertMessage(message)
             head.activeHeadMessageId?.let { parentId ->
                 insertValidatedParentEdge(message.id, parentId, input.occurredAt)
             }
+            insertMessageAttachments(message.id, input.message.attachmentIds, input.occurredAt)
             afterMessageGraphWrite(TimelineOperation.APPEND_MESSAGE)
             val nextRevision = nextRevision(head)
             timelineDao.updateTimelineHead(
@@ -178,10 +183,12 @@ class ConversationTimelineService(
                 ),
             )
         requireNewMessageId(input.replacement.messageId)
+        requireAvailableAttachments(input.replacement.attachmentIds)
         val sequenceNumber = nextSequenceNumber(input.conversationId)
         val replacement = input.replacement.toEntity(input.conversationId, sequenceNumber)
         timelineDao.insertMessage(replacement)
         insertValidatedParentEdge(replacement.id, originalParent.parentMessageId, input.occurredAt)
+        insertMessageAttachments(replacement.id, input.replacement.attachmentIds, input.occurredAt)
         afterMessageGraphWrite(TimelineOperation.REGENERATE_ASSISTANT)
         val nextRevision = nextRevision(head)
         timelineDao.updateTimelineHead(
@@ -316,6 +323,42 @@ class ConversationTimelineService(
     private fun requireNewMessageId(messageId: String) {
         if (timelineDao.message(messageId) != null) {
             abort(ConversationTimelineError.DuplicateMessageId(messageId))
+        }
+    }
+
+    private fun requireAvailableAttachments(attachmentIds: List<String>) {
+        val seen = mutableSetOf<String>()
+        attachmentIds.forEach { attachmentId ->
+            if (!seen.add(attachmentId)) {
+                abort(ConversationTimelineError.DuplicateAttachmentReference(attachmentId))
+            }
+            val attachment = attachmentDao.attachment(attachmentId)
+                ?: abort(ConversationTimelineError.MissingAttachment(attachmentId))
+            if (attachment.state != AttachmentState.AVAILABLE) {
+                abort(
+                    ConversationTimelineError.AttachmentUnavailable(
+                        attachmentId = attachmentId,
+                        state = attachment.state,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun insertMessageAttachments(
+        messageId: String,
+        attachmentIds: List<String>,
+        createdAt: Long,
+    ) {
+        attachmentIds.forEachIndexed { index, attachmentId ->
+            attachmentDao.insertMessageAttachment(
+                MessageAttachmentEntity(
+                    messageId = messageId,
+                    attachmentId = attachmentId,
+                    attachmentOrder = index,
+                    createdAt = createdAt,
+                ),
+            )
         }
     }
 

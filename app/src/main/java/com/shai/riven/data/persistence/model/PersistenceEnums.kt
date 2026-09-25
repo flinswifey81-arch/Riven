@@ -22,6 +22,27 @@ enum class MessageDeliveryState {
     CANCELLED,
 }
 
+enum class AttachmentKind {
+    IMAGE,
+    FILE,
+}
+
+enum class AttachmentSource {
+    SHAI_IMPORT,
+    RIVEN_GENERATED,
+}
+
+enum class AttachmentState {
+    STAGING,
+    AVAILABLE,
+    DELETE_PENDING,
+}
+
+enum class GeneratedMediaKind {
+    RIVEN_SELFIE_STYLE,
+    GENERATED_IMAGE,
+}
+
 enum class ExperienceType {
     CONVERSATION_MESSAGE,
     TOOL_RESULT,

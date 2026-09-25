@@ -101,6 +101,7 @@ sealed interface TimelineDeleteResult {
         val deletedMemoryIds: Set<String>,
         val deletedOpenLoopIds: Set<String>,
         val invalidatedDerivedArtifactIds: Set<String>,
+        val attachmentIdsPendingDeletion: Set<String> = emptySet(),
     ) : TimelineDeleteResult
 
     data class Failure(val error: SafeDeleteError) : TimelineDeleteResult

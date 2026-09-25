@@ -2,6 +2,7 @@ package com.shai.riven.data.conversation
 
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.model.ConversationStatus
+import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
 
@@ -28,6 +29,13 @@ sealed interface ConversationTimelineError {
     data class MissingTimelineHeadRecord(val conversationId: String) : ConversationTimelineError
     data class MissingMessage(val messageId: String) : ConversationTimelineError
     data class DuplicateMessageId(val messageId: String) : ConversationTimelineError
+    data class MissingAttachment(val attachmentId: String) : ConversationTimelineError
+    data class AttachmentUnavailable(
+        val attachmentId: String,
+        val state: AttachmentState,
+    ) : ConversationTimelineError
+
+    data class DuplicateAttachmentReference(val attachmentId: String) : ConversationTimelineError
     data class MessageBelongsToDifferentConversation(
         val messageId: String,
         val expectedConversationId: String,
@@ -107,6 +115,7 @@ data class NewTimelineMessageInput(
     val providerModel: String? = null,
     val providerRequestId: String? = null,
     val errorCode: String? = null,
+    val attachmentIds: List<String> = emptyList(),
 )
 
 data class AppendTimelineMessageInput(

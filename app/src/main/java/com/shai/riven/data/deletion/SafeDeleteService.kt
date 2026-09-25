@@ -11,6 +11,7 @@ import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.CandidateMemoryState
+import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.OpenLoopAuditAction
 import com.shai.riven.data.persistence.model.OpenLoopState
@@ -51,6 +52,27 @@ class SafeDeleteService(
         executeTimelineDelete {
             val plan = buildTimelineDeletePlan(input)
             val accumulator = DeleteAccumulator(input.occurredAt)
+
+            dao.attachmentIdsForMessage(plan.messageId).forEach { attachmentId ->
+                if (dao.messageReferenceCountForAttachment(attachmentId) == 1) {
+                    val attachment = dao.attachment(attachmentId)
+                        ?: abort(SafeDeleteError.StorageFailure(
+                            SafeDeleteOperation.DELETE_TIMELINE_MESSAGE,
+                            "MissingReferencedAttachment",
+                        ))
+                    invalidateArtifacts(dao.derivedArtifactIdsForAttachment(attachmentId), accumulator)
+                    dao.deleteDerivedAttachmentDependencies(attachmentId)
+                    check(
+                        dao.updateAttachment(
+                            attachment.copy(
+                                state = AttachmentState.DELETE_PENDING,
+                                updatedAt = input.occurredAt,
+                            ),
+                        ) == 1,
+                    )
+                    accumulator.attachmentIdsPendingDeletion += attachmentId
+                }
+            }
 
             invalidateMessageDependencies(plan.messageId, accumulator)
 
@@ -204,6 +226,7 @@ class SafeDeleteService(
                 deletedMemoryIds = accumulator.deletedMemoryIds.toSortedSet(),
                 deletedOpenLoopIds = accumulator.deletedOpenLoopIds.toSortedSet(),
                 invalidatedDerivedArtifactIds = accumulator.invalidatedArtifactIds.toSortedSet(),
+                attachmentIdsPendingDeletion = accumulator.attachmentIdsPendingDeletion.toSortedSet(),
             )
         }
 
@@ -358,6 +381,9 @@ class SafeDeleteService(
         val sourceMessageIds = supportingExperienceIds.flatMapTo(linkedSetOf()) { experienceId ->
             dao.messageSourcesForExperience(experienceId).map { it.messageId }
         }
+        val sourceAttachmentIds = sourceMessageIds.flatMapTo(linkedSetOf()) { messageId ->
+            dao.attachmentIdsForMessage(messageId)
+        }
         val relatedOpenLoops = dao.openLoopsForMemory(memoryId)
         retainedEvidence.forEach { evidence ->
             accumulator.tombstones += ensureDeleteTombstone(evidence, accumulator.occurredAt)
@@ -373,6 +399,9 @@ class SafeDeleteService(
             }
             relatedOpenLoops.forEach { openLoop ->
                 addAll(dao.derivedArtifactIdsForOpenLoop(openLoop.id))
+            }
+            sourceAttachmentIds.forEach { attachmentId ->
+                addAll(dao.derivedArtifactIdsForAttachment(attachmentId))
             }
         }
         invalidateArtifacts(lineageArtifactIds, accumulator)
@@ -605,6 +634,7 @@ class SafeDeleteService(
         val deletedCandidateIds = linkedSetOf<String>()
         val deletedMemoryIds = linkedSetOf<String>()
         val deletedOpenLoopIds = linkedSetOf<String>()
+        val attachmentIdsPendingDeletion = linkedSetOf<String>()
         val reassessedMemoryIds = linkedSetOf<String>()
         val tombstones = linkedSetOf<SuppressionTombstoneReference>()
         val repairKeys = linkedSetOf<RepairKey>()

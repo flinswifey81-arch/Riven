@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import com.shai.riven.data.persistence.dao.ConversationDao
 import com.shai.riven.data.persistence.dao.ConversationTimelineDao
+import com.shai.riven.data.persistence.dao.AttachmentDao
 import com.shai.riven.data.persistence.dao.MaintenanceDao
 import com.shai.riven.data.persistence.dao.MemoryDao
 import com.shai.riven.data.persistence.dao.OpenLoopDao
@@ -14,9 +15,11 @@ import com.shai.riven.data.persistence.dao.SafeDeleteDao
 import com.shai.riven.data.persistence.dao.ShaiSystemInstructionsDao
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
+import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DerivedArtifactAttachmentDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactExperienceDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMemoryDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMessageDependencyEntity
@@ -24,6 +27,7 @@ import com.shai.riven.data.persistence.entity.DerivedArtifactOpenLoopDependencyE
 import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntityLinkEntity
 import com.shai.riven.data.persistence.entity.ExperienceMessageSourceEntity
+import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
 import com.shai.riven.data.persistence.entity.KnownEntityEntity
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
@@ -31,6 +35,7 @@ import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
+import com.shai.riven.data.persistence.entity.MessageAttachmentEntity
 import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.OpenLoopAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
@@ -69,8 +74,12 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         MessageParentEdgeEntity::class,
         ConversationTimelineHeadEntity::class,
         ShaiSystemInstructionsEntity::class,
+        AttachmentEntity::class,
+        MessageAttachmentEntity::class,
+        GeneratedMediaProvenanceEntity::class,
+        DerivedArtifactAttachmentDependencyEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -88,6 +97,8 @@ abstract class RivenDatabase : RoomDatabase() {
 
     abstract fun shaiSystemInstructionsDao(): ShaiSystemInstructionsDao
 
+    abstract fun attachmentDao(): AttachmentDao
+
     companion object {
         const val DATABASE_NAME = "riven.db"
 
@@ -97,7 +108,7 @@ abstract class RivenDatabase : RoomDatabase() {
                 RivenDatabase::class.java,
                 DATABASE_NAME,
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
     }
 }

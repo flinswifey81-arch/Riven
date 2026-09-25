@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DerivedArtifactAttachmentDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactExperienceDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMemoryDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMessageDependencyEntity
@@ -42,6 +43,9 @@ interface MaintenanceDao {
     fun insertDerivedArtifactOpenLoopDependency(dependency: DerivedArtifactOpenLoopDependencyEntity)
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
+    fun insertDerivedArtifactAttachmentDependency(dependency: DerivedArtifactAttachmentDependencyEntity)
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertRepairJob(job: RepairJobEntity)
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
@@ -55,6 +59,15 @@ interface MaintenanceDao {
 
     @Query("SELECT COUNT(*) FROM derived_artifact_message_dependencies WHERE derived_artifact_id = :artifactId")
     fun messageDependencyCount(artifactId: String): Int
+
+    @Query("SELECT COUNT(*) FROM derived_artifact_attachment_dependencies WHERE derived_artifact_id = :artifactId")
+    fun attachmentDependencyCount(artifactId: String): Int
+
+    @Query("SELECT derived_artifact_id FROM derived_artifact_attachment_dependencies WHERE attachment_id = :attachmentId")
+    fun derivedArtifactIdsForAttachment(attachmentId: String): List<String>
+
+    @Query("DELETE FROM derived_artifact_attachment_dependencies WHERE attachment_id = :attachmentId")
+    fun deleteDerivedArtifactAttachmentDependencies(attachmentId: String): Int
 
     @Query("SELECT * FROM derived_artifacts WHERE derived_artifact_id = :artifactId")
     fun derivedArtifact(artifactId: String): DerivedArtifactEntity?

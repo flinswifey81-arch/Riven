@@ -7,6 +7,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
+import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
@@ -51,6 +52,24 @@ interface SafeDeleteDao {
 
     @Query("DELETE FROM messages WHERE message_id = :messageId")
     fun deleteMessage(messageId: String): Int
+
+    @Query(
+        """
+        SELECT attachment_id FROM message_attachments
+        WHERE message_id = :messageId
+        ORDER BY attachment_order
+        """,
+    )
+    fun attachmentIdsForMessage(messageId: String): List<String>
+
+    @Query("SELECT COUNT(*) FROM message_attachments WHERE attachment_id = :attachmentId")
+    fun messageReferenceCountForAttachment(attachmentId: String): Int
+
+    @Query("SELECT * FROM attachments WHERE attachment_id = :attachmentId")
+    fun attachment(attachmentId: String): AttachmentEntity?
+
+    @Update
+    fun updateAttachment(attachment: AttachmentEntity): Int
 
     @Query("SELECT * FROM experience_message_sources WHERE message_id = :messageId ORDER BY experience_id")
     fun messageSourcesForMessage(messageId: String): List<ExperienceMessageSourceEntity>
@@ -180,6 +199,9 @@ interface SafeDeleteDao {
     @Query("SELECT derived_artifact_id FROM derived_artifact_open_loop_dependencies WHERE open_loop_id = :openLoopId")
     fun derivedArtifactIdsForOpenLoop(openLoopId: String): List<String>
 
+    @Query("SELECT derived_artifact_id FROM derived_artifact_attachment_dependencies WHERE attachment_id = :attachmentId")
+    fun derivedArtifactIdsForAttachment(attachmentId: String): List<String>
+
     @Query(
         """
         UPDATE derived_artifacts
@@ -207,6 +229,9 @@ interface SafeDeleteDao {
 
     @Query("DELETE FROM derived_artifact_open_loop_dependencies WHERE open_loop_id = :openLoopId")
     fun deleteDerivedOpenLoopDependencies(openLoopId: String): Int
+
+    @Query("DELETE FROM derived_artifact_attachment_dependencies WHERE attachment_id = :attachmentId")
+    fun deleteDerivedAttachmentDependencies(attachmentId: String): Int
 
     @Query("SELECT COUNT(*) FROM derived_artifact_open_loop_dependencies WHERE derived_artifact_id = :artifactId")
     fun derivedOpenLoopDependencyCount(artifactId: String): Int
