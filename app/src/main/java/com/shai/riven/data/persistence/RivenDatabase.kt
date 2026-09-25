@@ -10,6 +10,7 @@ import com.shai.riven.data.persistence.dao.ConversationTimelineDao
 import com.shai.riven.data.persistence.dao.MaintenanceDao
 import com.shai.riven.data.persistence.dao.MemoryDao
 import com.shai.riven.data.persistence.dao.OpenLoopDao
+import com.shai.riven.data.persistence.dao.SafeDeleteDao
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
@@ -79,6 +80,8 @@ abstract class RivenDatabase : RoomDatabase() {
     abstract fun openLoopDao(): OpenLoopDao
 
     abstract fun maintenanceDao(): MaintenanceDao
+
+    abstract fun safeDeleteDao(): SafeDeleteDao
 
     companion object {
         const val DATABASE_NAME = "riven.db"
