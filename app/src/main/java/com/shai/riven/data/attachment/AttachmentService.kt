@@ -17,6 +17,7 @@ class AttachmentService(
     private val blobStore: AttachmentBlobStore,
     private val idGenerator: AttachmentIdGenerator = AttachmentIdGenerator { UUID.randomUUID().toString() },
     private val afterFinalizationMutation: () -> Unit = {},
+    private val afterStagingCleanupClaimMutation: () -> Unit = {},
 ) {
     private val dao = database.attachmentDao()
 
@@ -116,14 +117,21 @@ class AttachmentService(
         }
     }
 
-    suspend fun cleanupStagingAttachment(attachmentId: String): AttachmentCleanupResult =
-        cleanupAttachment(attachmentId, AttachmentState.STAGING, AttachmentOperation.CLEANUP_STAGING)
+    suspend fun cleanupStagingAttachment(
+        attachmentId: String,
+        occurredAt: Long,
+    ): AttachmentCleanupResult = cleanupAttachment(
+        attachmentId = attachmentId,
+        requiredState = AttachmentState.STAGING,
+        operation = AttachmentOperation.CLEANUP_STAGING,
+        stagingClaimedAt = occurredAt,
+    )
 
     suspend fun finalizePendingDeletion(attachmentId: String): AttachmentCleanupResult =
         cleanupAttachment(
-            attachmentId,
-            AttachmentState.DELETE_PENDING,
-            AttachmentOperation.FINALIZE_PENDING_DELETION,
+            attachmentId = attachmentId,
+            requiredState = AttachmentState.DELETE_PENDING,
+            operation = AttachmentOperation.FINALIZE_PENDING_DELETION,
         )
 
     private suspend fun createAttachment(
@@ -227,28 +235,41 @@ class AttachmentService(
         attachmentId: String,
         requiredState: AttachmentState,
         operation: AttachmentOperation,
+        stagingClaimedAt: Long? = null,
     ): AttachmentCleanupResult {
         val attachment = try {
-            dao.attachment(attachmentId)
+            database.withTransaction {
+                val current = dao.attachment(attachmentId)
+                    ?: abort(AttachmentError.MissingAttachment(attachmentId))
+                if (current.state != requiredState) {
+                    abort(AttachmentError.AttachmentUnavailable(attachmentId, current.state))
+                }
+                val references = dao.messageReferenceCount(attachmentId)
+                if (references != 0) {
+                    abort(AttachmentError.AttachmentStillReferenced(attachmentId, references))
+                }
+                if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
+                    abort(AttachmentError.StorageFailure(operation, REMAINING_DERIVED_DEPENDENCIES))
+                }
+                if (requiredState == AttachmentState.STAGING) {
+                    val claimed = current.copy(
+                        state = AttachmentState.DELETE_PENDING,
+                        updatedAt = checkNotNull(stagingClaimedAt),
+                    )
+                    check(dao.updateAttachment(claimed) == 1)
+                    afterStagingCleanupClaimMutation()
+                    claimed
+                } else {
+                    current
+                }
+            }
+        } catch (abort: AttachmentAbort) {
+            return AttachmentCleanupResult.Failure(abort.error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (failure: Exception) {
             return AttachmentCleanupResult.Failure(
                 AttachmentError.StorageFailure(operation, failure::class.java.simpleName),
-            )
-        } ?: return AttachmentCleanupResult.Failure(AttachmentError.MissingAttachment(attachmentId))
-        if (attachment.state != requiredState) {
-            return AttachmentCleanupResult.Failure(
-                AttachmentError.AttachmentUnavailable(attachmentId, attachment.state),
-            )
-        }
-        val references = dao.messageReferenceCount(attachmentId)
-        if (references != 0) {
-            return AttachmentCleanupResult.Failure(
-                AttachmentError.AttachmentStillReferenced(attachmentId, references),
-            )
-        }
-        if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
-            return AttachmentCleanupResult.Failure(
-                AttachmentError.StorageFailure(operation, REMAINING_DERIVED_DEPENDENCIES),
             )
         }
         try {
@@ -262,7 +283,7 @@ class AttachmentService(
             database.withTransaction {
                 val current = dao.attachment(attachmentId)
                     ?: return@withTransaction
-                if (current.state != requiredState) {
+                if (current.state != AttachmentState.DELETE_PENDING) {
                     abort(AttachmentError.AttachmentUnavailable(attachmentId, current.state))
                 }
                 val currentReferences = dao.messageReferenceCount(attachmentId)
@@ -272,7 +293,12 @@ class AttachmentService(
                 if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
                     abort(AttachmentError.StorageFailure(operation, REMAINING_DERIVED_DEPENDENCIES))
                 }
-                check(dao.deleteUnreferencedAttachmentInState(attachmentId, requiredState) == 1)
+                check(
+                    dao.deleteUnreferencedAttachmentInState(
+                        attachmentId,
+                        AttachmentState.DELETE_PENDING,
+                    ) == 1,
+                )
             }
             AttachmentCleanupResult.Removed(attachmentId)
         } catch (abort: AttachmentAbort) {

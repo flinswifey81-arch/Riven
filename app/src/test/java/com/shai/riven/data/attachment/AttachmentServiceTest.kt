@@ -212,7 +212,10 @@ class AttachmentServiceTest {
 
     @Test
     fun finalizationFailureLeavesRecoverableStagingRowAndBlobForExplicitCleanup() = runBlocking {
-        val failingService = newAttachmentService(blobStore) { error("controlled finalization failure") }
+        val failingService = newAttachmentService(
+            store = blobStore,
+            afterFinalizationMutation = { error("controlled finalization failure") },
+        )
 
         val result = failingService.createImportedAttachment(
             ImportedAttachmentInput(
@@ -236,10 +239,129 @@ class AttachmentServiceTest {
         assertTrue(read is AttachmentBlobReadResult.Failure)
         assertTrue((read as AttachmentBlobReadResult.Failure).error is AttachmentError.AttachmentUnavailable)
 
-        val cleanup = attachmentService.cleanupStagingAttachment("finalization-failure")
+        val cleanup = attachmentService.cleanupStagingAttachment("finalization-failure", occurredAt = 2)
         assertEquals(AttachmentCleanupResult.Removed("finalization-failure"), cleanup)
         assertNull(database.attachmentDao().attachment("finalization-failure"))
         assertFalse(blobStore.exists(staging.storageKey))
+    }
+
+    @Test
+    fun stagingCleanupClaimsDeletePendingBeforeBlobDeletionBegins() = runBlocking {
+        val storageKey = "attachments/claim-before-delete.blob"
+        lateinit var store: TestBlobStore
+        store = TestBlobStore(
+            beforeDelete = { deletedKey ->
+                assertEquals(storageKey, deletedKey)
+                val claimed = database.attachmentDao().attachment("claim-before-delete")
+                assertNotNull(claimed)
+                assertEquals(AttachmentState.DELETE_PENDING, claimed?.state)
+                assertEquals(20L, claimed?.updatedAt)
+                assertTrue(store.exists(storageKey))
+            },
+        )
+        store.seed(storageKey, "staging blob".toByteArray())
+        insertAttachment(
+            id = "claim-before-delete",
+            state = AttachmentState.STAGING,
+            storageKey = storageKey,
+        )
+        val service = newAttachmentService(store)
+
+        val cleanup = service.cleanupStagingAttachment("claim-before-delete", occurredAt = 20)
+
+        assertEquals(AttachmentCleanupResult.Removed("claim-before-delete"), cleanup)
+        assertEquals(1, store.deleteCallCount)
+        assertFalse(store.exists(storageKey))
+        assertNull(database.attachmentDao().attachment("claim-before-delete"))
+    }
+
+    @Test
+    fun availableAttachmentWinsBeforeStagingCleanupWithoutDeletingBlobOrChangingMetadata() = runBlocking {
+        val store = TestBlobStore()
+        val service = newAttachmentService(store)
+        val attachment = assertCreated(
+            service.createImportedAttachment(
+                ImportedAttachmentInput(
+                    attachmentId = "available-wins",
+                    kind = AttachmentKind.IMAGE,
+                    mimeType = "image/png",
+                    occurredAt = 10,
+                    bytes = AttachmentByteSource.fromBytes("available blob".toByteArray()),
+                ),
+            ),
+        )
+        val metadataBeforeCleanup = checkNotNull(database.attachmentDao().attachment(attachment.attachmentId))
+
+        val cleanup = service.cleanupStagingAttachment(attachment.attachmentId, occurredAt = 20)
+
+        assertTrue(cleanup is AttachmentCleanupResult.Failure)
+        val error = (cleanup as AttachmentCleanupResult.Failure).error
+        assertTrue(error is AttachmentError.AttachmentUnavailable)
+        assertEquals(AttachmentState.AVAILABLE, (error as AttachmentError.AttachmentUnavailable).state)
+        assertEquals(metadataBeforeCleanup, database.attachmentDao().attachment(attachment.attachmentId))
+        assertTrue(store.exists(attachment.storageKey))
+        assertEquals(0, store.deleteCallCount)
+    }
+
+    @Test
+    fun stagingBlobDeleteFailureLeavesClaimPendingAndFinalizeRetryRemovesIt() = runBlocking {
+        val storageKey = "attachments/staging-delete-failure.blob"
+        val store = TestBlobStore(failDelete = true)
+        store.seed(storageKey, "retry blob".toByteArray())
+        insertAttachment(
+            id = "staging-delete-failure",
+            state = AttachmentState.STAGING,
+            storageKey = storageKey,
+        )
+        val service = newAttachmentService(store)
+
+        val cleanup = service.cleanupStagingAttachment("staging-delete-failure", occurredAt = 30)
+
+        assertTrue(cleanup is AttachmentCleanupResult.Failure)
+        assertTrue((cleanup as AttachmentCleanupResult.Failure).error is AttachmentError.BlobDeleteFailure)
+        val pending = database.attachmentDao().attachment("staging-delete-failure")
+        assertNotNull(pending)
+        assertEquals(AttachmentState.DELETE_PENDING, pending?.state)
+        assertEquals(30L, pending?.updatedAt)
+        assertTrue(store.exists(storageKey))
+        val read = service.readAvailableBlob("staging-delete-failure")
+        assertTrue(read is AttachmentBlobReadResult.Failure)
+        assertTrue((read as AttachmentBlobReadResult.Failure).error is AttachmentError.AttachmentUnavailable)
+
+        store.failDelete = false
+        assertEquals(
+            AttachmentCleanupResult.Removed("staging-delete-failure"),
+            service.finalizePendingDeletion("staging-delete-failure"),
+        )
+        assertFalse(store.exists(storageKey))
+        assertNull(database.attachmentDao().attachment("staging-delete-failure"))
+    }
+
+    @Test
+    fun stagingClaimTransactionFailureRollsBackBeforeBlobDeletion() = runBlocking {
+        val storageKey = "attachments/claim-failure.blob"
+        val store = TestBlobStore()
+        store.seed(storageKey, "preserved blob".toByteArray())
+        insertAttachment(
+            id = "claim-failure",
+            state = AttachmentState.STAGING,
+            storageKey = storageKey,
+        )
+        val service = newAttachmentService(
+            store = store,
+            afterStagingCleanupClaimMutation = { error("controlled staging claim failure") },
+        )
+
+        val cleanup = service.cleanupStagingAttachment("claim-failure", occurredAt = 40)
+
+        assertTrue(cleanup is AttachmentCleanupResult.Failure)
+        assertTrue((cleanup as AttachmentCleanupResult.Failure).error is AttachmentError.StorageFailure)
+        val staging = database.attachmentDao().attachment("claim-failure")
+        assertNotNull(staging)
+        assertEquals(AttachmentState.STAGING, staging?.state)
+        assertEquals(1L, staging?.updatedAt)
+        assertTrue(store.exists(storageKey))
+        assertEquals(0, store.deleteCallCount)
     }
 
     @Test
@@ -535,12 +657,14 @@ class AttachmentServiceTest {
 
     private fun newAttachmentService(
         store: AttachmentBlobStore,
-        hook: () -> Unit = {},
+        afterFinalizationMutation: () -> Unit = {},
+        afterStagingCleanupClaimMutation: () -> Unit = {},
     ) = AttachmentService(
         database = database,
         blobStore = store,
         idGenerator = AttachmentIdGenerator { "generated-attachment-${generatedId++}" },
-        afterFinalizationMutation = hook,
+        afterFinalizationMutation = afterFinalizationMutation,
+        afterStagingCleanupClaimMutation = afterStagingCleanupClaimMutation,
     )
 
     private fun newSafeDeleteService(
@@ -742,9 +866,12 @@ class AttachmentServiceTest {
 
     private class TestBlobStore(
         private val failWrite: Boolean = false,
-        private val failDelete: Boolean = false,
+        var failDelete: Boolean = false,
+        private val beforeDelete: (String) -> Unit = {},
     ) : AttachmentBlobStore {
         private val blobs = linkedMapOf<String, ByteArray>()
+        var deleteCallCount: Int = 0
+            private set
 
         override fun write(storageKey: String, source: AttachmentByteSource): AttachmentBlobWriteResult {
             val bytes = source.openStream().use { it.readBytes() }
@@ -759,6 +886,8 @@ class AttachmentServiceTest {
             blobs[storageKey]?.let(::ByteArrayInputStream) ?: throw FileNotFoundException(storageKey)
 
         override fun delete(storageKey: String) {
+            deleteCallCount += 1
+            beforeDelete(storageKey)
             if (failDelete) error("controlled blob delete failure")
             blobs.remove(storageKey)
         }
