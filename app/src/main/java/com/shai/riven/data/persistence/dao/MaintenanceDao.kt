@@ -15,6 +15,8 @@ import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.DerivedArtifactState
+import com.shai.riven.data.persistence.model.RepairJobState
+import com.shai.riven.data.persistence.model.RepairJobType
 
 @Dao
 interface MaintenanceDao {
@@ -47,6 +49,91 @@ interface MaintenanceDao {
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertRepairJob(job: RepairJobEntity)
+
+    @Query("SELECT * FROM repair_jobs WHERE repair_job_id = :repairJobId")
+    fun repairJob(repairJobId: String): RepairJobEntity?
+
+    @Query(
+        """
+        SELECT *
+        FROM repair_jobs
+        WHERE state = :pendingState
+          AND job_type IN (:supportedTypes)
+        ORDER BY created_at, repair_job_id
+        LIMIT :limit
+        """,
+    )
+    fun pendingRepairJobsForTypes(
+        pendingState: RepairJobState,
+        supportedTypes: List<RepairJobType>,
+        limit: Int,
+    ): List<RepairJobEntity>
+
+    @Query(
+        """
+        UPDATE repair_jobs
+        SET state = :runningState,
+            attempt_count = attempt_count + 1,
+            updated_at = :claimedAt,
+            last_error_code = NULL
+        WHERE repair_job_id = :repairJobId
+          AND state = :pendingState
+          AND attempt_count = :expectedAttemptCount
+        """,
+    )
+    // A successful claim clears the prior attempt's code; only a completed failure writes a new code.
+    fun claimPendingRepairJob(
+        repairJobId: String,
+        pendingState: RepairJobState,
+        runningState: RepairJobState,
+        expectedAttemptCount: Int,
+        claimedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE repair_jobs
+        SET attempt_count = attempt_count + 1,
+            updated_at = :claimedAt,
+            last_error_code = NULL
+        WHERE repair_job_id = :repairJobId
+          AND state = :runningState
+          AND attempt_count = :expectedAttemptCount
+          AND updated_at = :expectedUpdatedAt
+          AND updated_at <= :staleBefore
+        """,
+    )
+    // Reclaim follows the same error-code policy as a fresh claim.
+    fun reclaimStaleRunningRepairJob(
+        repairJobId: String,
+        runningState: RepairJobState,
+        expectedAttemptCount: Int,
+        expectedUpdatedAt: Long,
+        staleBefore: Long,
+        claimedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE repair_jobs
+        SET state = :newState,
+            updated_at = :updatedAt,
+            last_error_code = :lastErrorCode
+        WHERE repair_job_id = :repairJobId
+          AND state = :runningState
+          AND attempt_count = :expectedAttemptCount
+          AND updated_at = :claimedAt
+        """,
+    )
+    fun finishClaimedRepairJob(
+        repairJobId: String,
+        runningState: RepairJobState,
+        newState: RepairJobState,
+        expectedAttemptCount: Int,
+        claimedAt: Long,
+        updatedAt: Long,
+        lastErrorCode: String?,
+    ): Int
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertMemoryAuditHistory(auditHistory: MemoryAuditHistoryEntity)

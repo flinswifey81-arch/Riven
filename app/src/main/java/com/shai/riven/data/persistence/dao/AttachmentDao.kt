@@ -27,6 +27,26 @@ interface AttachmentDao {
     @Query("SELECT * FROM attachments WHERE attachment_id = :attachmentId")
     fun attachment(attachmentId: String): AttachmentEntity?
 
+    @Query(
+        """
+        SELECT *
+        FROM attachments
+        WHERE state = :deletePendingState
+           OR (state = :stagingState AND updated_at <= :staleBefore)
+        ORDER BY
+            CASE WHEN state = :deletePendingState THEN 0 ELSE 1 END,
+            updated_at,
+            attachment_id
+        LIMIT :limit
+        """,
+    )
+    fun maintenanceCandidates(
+        deletePendingState: AttachmentState,
+        stagingState: AttachmentState,
+        staleBefore: Long,
+        limit: Int,
+    ): List<AttachmentEntity>
+
     @Query("SELECT * FROM generated_media_provenance WHERE attachment_id = :attachmentId")
     fun generatedMediaProvenance(attachmentId: String): GeneratedMediaProvenanceEntity?
 

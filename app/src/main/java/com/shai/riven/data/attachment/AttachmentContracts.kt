@@ -30,6 +30,8 @@ sealed interface AttachmentError {
         val messageReferenceCount: Int,
     ) : AttachmentError
 
+    data class AttachmentHasDerivedDependencies(val attachmentId: String) : AttachmentError
+
     data class DuplicateAttachmentId(val attachmentId: String) : AttachmentError
     data class InvalidMimeType(val mimeType: String) : AttachmentError
     data class InvalidGeneratedMediaProvenance(val reason: String) : AttachmentError

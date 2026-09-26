@@ -249,7 +249,7 @@ class AttachmentService(
                     abort(AttachmentError.AttachmentStillReferenced(attachmentId, references))
                 }
                 if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
-                    abort(AttachmentError.StorageFailure(operation, REMAINING_DERIVED_DEPENDENCIES))
+                    abort(AttachmentError.AttachmentHasDerivedDependencies(attachmentId))
                 }
                 if (requiredState == AttachmentState.STAGING) {
                     val claimed = current.copy(
@@ -274,6 +274,8 @@ class AttachmentService(
         }
         try {
             blobStore.delete(attachment.storageKey)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (failure: Exception) {
             return AttachmentCleanupResult.Failure(
                 AttachmentError.BlobDeleteFailure(attachmentId, failure::class.java.simpleName),
@@ -291,7 +293,7 @@ class AttachmentService(
                     abort(AttachmentError.AttachmentStillReferenced(attachmentId, currentReferences))
                 }
                 if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
-                    abort(AttachmentError.StorageFailure(operation, REMAINING_DERIVED_DEPENDENCIES))
+                    abort(AttachmentError.AttachmentHasDerivedDependencies(attachmentId))
                 }
                 check(
                     dao.deleteUnreferencedAttachmentInState(
@@ -403,6 +405,5 @@ class AttachmentService(
         val MIME_TYPE = Regex("[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*")
         val LOWERCASE_SHA256 = Regex("[0-9a-f]{64}")
         const val INVALID_BLOB_METADATA = "InvalidBlobMetadata"
-        const val REMAINING_DERIVED_DEPENDENCIES = "RemainingDerivedAttachmentDependencies"
     }
 }
