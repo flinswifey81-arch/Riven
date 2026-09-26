@@ -55,14 +55,7 @@ sealed interface ShaiSystemInstructionsWriteResult {
     data class Failure(val error: ShaiSystemInstructionsError) : ShaiSystemInstructionsWriteResult
 }
 
-/** Future provider-neutral context assembly order, from strongest to most situational. */
-enum class RivenContextLayer {
-    APP_INVARIANTS_SAFETY_AND_TOOL_TRUTH,
-    LOCKED_RIVEN_PERSONALITY_AND_IDENTITY_CANON,
-    SHAI_SYSTEM_INSTRUCTIONS,
-    RETRIEVED_DYNAMIC_MEMORY_OPEN_LOOPS_AND_TOOL_CONTEXT,
-    ACTIVE_CANONICAL_CONVERSATION_AND_CURRENT_INTERACTION,
-}
+typealias RivenContextLayer = com.shai.riven.data.context.RivenContextLayer
 
 data class ShaiSystemInstructionsContextFragment(
     val layer: RivenContextLayer,
