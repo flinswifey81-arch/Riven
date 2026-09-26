@@ -182,3 +182,52 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
         )
     }
 }
+
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `provider_profiles` (
+                `profile_id` TEXT NOT NULL,
+                `display_name` TEXT NOT NULL,
+                `adapter_id` TEXT NOT NULL,
+                `endpoint_base_url` TEXT NOT NULL,
+                `model_id` TEXT NOT NULL,
+                `credential_slot_id` TEXT,
+                `is_enabled` INTEGER NOT NULL,
+                `revision` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`profile_id`)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_provider_profiles_adapter_id` " +
+                "ON `provider_profiles` (`adapter_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_provider_profiles_credential_slot_id` " +
+                "ON `provider_profiles` (`credential_slot_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_provider_profiles_is_enabled` " +
+                "ON `provider_profiles` (`is_enabled`)",
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `provider_profile_capabilities` (
+                `profile_id` TEXT NOT NULL,
+                `capability` TEXT NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                PRIMARY KEY(`profile_id`, `capability`),
+                FOREIGN KEY(`profile_id`) REFERENCES `provider_profiles`(`profile_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_provider_profile_capabilities_capability` " +
+                "ON `provider_profile_capabilities` (`capability`)",
+        )
+    }
+}

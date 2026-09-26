@@ -11,6 +11,7 @@ import com.shai.riven.data.persistence.dao.AttachmentDao
 import com.shai.riven.data.persistence.dao.MaintenanceDao
 import com.shai.riven.data.persistence.dao.MemoryDao
 import com.shai.riven.data.persistence.dao.OpenLoopDao
+import com.shai.riven.data.persistence.dao.ProviderProfileDao
 import com.shai.riven.data.persistence.dao.SafeDeleteDao
 import com.shai.riven.data.persistence.dao.ShaiSystemInstructionsDao
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -40,6 +41,8 @@ import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.OpenLoopAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntityLinkEntity
+import com.shai.riven.data.persistence.entity.ProviderProfileCapabilityEntity
+import com.shai.riven.data.persistence.entity.ProviderProfileEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.entity.ShaiSystemInstructionsEntity
@@ -78,8 +81,10 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         MessageAttachmentEntity::class,
         GeneratedMediaProvenanceEntity::class,
         DerivedArtifactAttachmentDependencyEntity::class,
+        ProviderProfileEntity::class,
+        ProviderProfileCapabilityEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -99,6 +104,8 @@ abstract class RivenDatabase : RoomDatabase() {
 
     abstract fun attachmentDao(): AttachmentDao
 
+    abstract fun providerProfileDao(): ProviderProfileDao
+
     companion object {
         const val DATABASE_NAME = "riven.db"
 
@@ -108,7 +115,7 @@ abstract class RivenDatabase : RoomDatabase() {
                 RivenDatabase::class.java,
                 DATABASE_NAME,
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
     }
 }

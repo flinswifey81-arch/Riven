@@ -1,0 +1,2773 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 5,
+    "identityHash": "c80e94ece604a0dab9d07e7a10856987",
+    "entities": [
+      {
+        "tableName": "conversations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`conversation_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `status` TEXT NOT NULL, `title` TEXT, PRIMARY KEY(`conversation_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "conversation_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "conversation_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_conversations_created_at",
+            "unique": false,
+            "columnNames": [
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_conversations_created_at` ON `${TABLE_NAME}` (`created_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "messages",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`message_id` TEXT NOT NULL, `conversation_id` TEXT NOT NULL, `sequence_number` INTEGER NOT NULL, `role` TEXT NOT NULL, `delivery_state` TEXT NOT NULL, `content` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `provider_name` TEXT, `provider_model` TEXT, `provider_request_id` TEXT, `error_code` TEXT, PRIMARY KEY(`message_id`), FOREIGN KEY(`conversation_id`) REFERENCES `conversations`(`conversation_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "message_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conversationId",
+            "columnName": "conversation_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequenceNumber",
+            "columnName": "sequence_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deliveryState",
+            "columnName": "delivery_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "content",
+            "columnName": "content",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerName",
+            "columnName": "provider_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "providerModel",
+            "columnName": "provider_model",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "providerRequestId",
+            "columnName": "provider_request_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "error_code",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "message_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_messages_conversation_id_sequence_number",
+            "unique": true,
+            "columnNames": [
+              "conversation_id",
+              "sequence_number"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_messages_conversation_id_sequence_number` ON `${TABLE_NAME}` (`conversation_id`, `sequence_number`)"
+          },
+          {
+            "name": "index_messages_created_at",
+            "unique": false,
+            "columnNames": [
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_created_at` ON `${TABLE_NAME}` (`created_at`)"
+          },
+          {
+            "name": "index_messages_provider_request_id",
+            "unique": false,
+            "columnNames": [
+              "provider_request_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_provider_request_id` ON `${TABLE_NAME}` (`provider_request_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "conversations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "conversation_id"
+            ],
+            "referencedColumns": [
+              "conversation_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "entities",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`entity_id` TEXT NOT NULL, `kind` TEXT NOT NULL, `display_name` TEXT NOT NULL, `normalized_name` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`entity_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "entity_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "normalizedName",
+            "columnName": "normalized_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "entity_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_entities_normalized_name",
+            "unique": false,
+            "columnNames": [
+              "normalized_name"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_entities_normalized_name` ON `${TABLE_NAME}` (`normalized_name`)"
+          },
+          {
+            "name": "index_entities_kind",
+            "unique": false,
+            "columnNames": [
+              "kind"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_entities_kind` ON `${TABLE_NAME}` (`kind`)"
+          }
+        ]
+      },
+      {
+        "tableName": "experiences",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`experience_id` TEXT NOT NULL, `event_order` INTEGER NOT NULL, `experience_type` TEXT NOT NULL, `actor` TEXT NOT NULL, `actor_entity_id` TEXT, `source_content` TEXT, `occurred_at` INTEGER NOT NULL, `recorded_at` INTEGER NOT NULL, `sensitivity` TEXT NOT NULL, `availability` TEXT NOT NULL, PRIMARY KEY(`experience_id`), FOREIGN KEY(`actor_entity_id`) REFERENCES `entities`(`entity_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventOrder",
+            "columnName": "event_order",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "experienceType",
+            "columnName": "experience_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actor",
+            "columnName": "actor",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actorEntityId",
+            "columnName": "actor_entity_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceContent",
+            "columnName": "source_content",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurred_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordedAt",
+            "columnName": "recorded_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sensitivity",
+            "columnName": "sensitivity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "availability",
+            "columnName": "availability",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "experience_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_experiences_event_order",
+            "unique": true,
+            "columnNames": [
+              "event_order"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_experiences_event_order` ON `${TABLE_NAME}` (`event_order`)"
+          },
+          {
+            "name": "index_experiences_occurred_at",
+            "unique": false,
+            "columnNames": [
+              "occurred_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_experiences_occurred_at` ON `${TABLE_NAME}` (`occurred_at`)"
+          },
+          {
+            "name": "index_experiences_experience_type",
+            "unique": false,
+            "columnNames": [
+              "experience_type"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_experiences_experience_type` ON `${TABLE_NAME}` (`experience_type`)"
+          },
+          {
+            "name": "index_experiences_actor_entity_id",
+            "unique": false,
+            "columnNames": [
+              "actor_entity_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_experiences_actor_entity_id` ON `${TABLE_NAME}` (`actor_entity_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "entities",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "actor_entity_id"
+            ],
+            "referencedColumns": [
+              "entity_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "experience_message_sources",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`experience_id` TEXT NOT NULL, `message_id` TEXT NOT NULL, `source_order` INTEGER NOT NULL, `source_role` TEXT NOT NULL, `character_start` INTEGER, `character_end` INTEGER, `created_at` INTEGER NOT NULL, PRIMARY KEY(`experience_id`, `message_id`), FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "experienceId",
+            "columnName": "experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageId",
+            "columnName": "message_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceOrder",
+            "columnName": "source_order",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceRole",
+            "columnName": "source_role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "characterStart",
+            "columnName": "character_start",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "characterEnd",
+            "columnName": "character_end",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "experience_id",
+            "message_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_experience_message_sources_experience_id_source_order",
+            "unique": true,
+            "columnNames": [
+              "experience_id",
+              "source_order"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_experience_message_sources_experience_id_source_order` ON `${TABLE_NAME}` (`experience_id`, `source_order`)"
+          },
+          {
+            "name": "index_experience_message_sources_message_id",
+            "unique": false,
+            "columnNames": [
+              "message_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_experience_message_sources_message_id` ON `${TABLE_NAME}` (`message_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "experiences",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          },
+          {
+            "table": "messages",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "message_id"
+            ],
+            "referencedColumns": [
+              "message_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "memories",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`memory_id` TEXT NOT NULL, `kind` TEXT NOT NULL, `scope` TEXT NOT NULL, `meaning` TEXT NOT NULL, `epistemic_basis` TEXT NOT NULL, `certainty` TEXT NOT NULL, `truth_state` TEXT NOT NULL, `retention_state` TEXT NOT NULL, `lifecycle_state` TEXT NOT NULL, `temporal_state` TEXT NOT NULL, `learned_at` INTEGER NOT NULL, `valid_from` INTEGER, `valid_until` INTEGER, `last_confirmed_at` INTEGER, `autobiographical_significance` TEXT, `relationship_significance` TEXT, `emotional_significance` TEXT, `practical_significance` TEXT, `identity_significance` TEXT, `sensitivity` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`memory_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "meaning",
+            "columnName": "meaning",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "epistemicBasis",
+            "columnName": "epistemic_basis",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "certainty",
+            "columnName": "certainty",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "truthState",
+            "columnName": "truth_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retentionState",
+            "columnName": "retention_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lifecycleState",
+            "columnName": "lifecycle_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "temporalState",
+            "columnName": "temporal_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "learnedAt",
+            "columnName": "learned_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "valid_from",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "validUntil",
+            "columnName": "valid_until",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastConfirmedAt",
+            "columnName": "last_confirmed_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "autobiographicalSignificance",
+            "columnName": "autobiographical_significance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "relationshipSignificance",
+            "columnName": "relationship_significance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "emotionalSignificance",
+            "columnName": "emotional_significance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "practicalSignificance",
+            "columnName": "practical_significance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "identitySignificance",
+            "columnName": "identity_significance",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sensitivity",
+            "columnName": "sensitivity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "memory_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_memories_kind_scope",
+            "unique": false,
+            "columnNames": [
+              "kind",
+              "scope"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memories_kind_scope` ON `${TABLE_NAME}` (`kind`, `scope`)"
+          },
+          {
+            "name": "index_memories_truth_state_retention_state_lifecycle_state",
+            "unique": false,
+            "columnNames": [
+              "truth_state",
+              "retention_state",
+              "lifecycle_state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memories_truth_state_retention_state_lifecycle_state` ON `${TABLE_NAME}` (`truth_state`, `retention_state`, `lifecycle_state`)"
+          },
+          {
+            "name": "index_memories_temporal_state_valid_from_valid_until",
+            "unique": false,
+            "columnNames": [
+              "temporal_state",
+              "valid_from",
+              "valid_until"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memories_temporal_state_valid_from_valid_until` ON `${TABLE_NAME}` (`temporal_state`, `valid_from`, `valid_until`)"
+          },
+          {
+            "name": "index_memories_created_at",
+            "unique": false,
+            "columnNames": [
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memories_created_at` ON `${TABLE_NAME}` (`created_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "memory_evidence",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`memory_id` TEXT NOT NULL, `experience_id` TEXT NOT NULL, `role` TEXT NOT NULL, `epistemic_basis` TEXT NOT NULL, `source_certainty` TEXT NOT NULL, `lineage_key` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`memory_id`, `experience_id`), FOREIGN KEY(`memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "memoryId",
+            "columnName": "memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "experienceId",
+            "columnName": "experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "epistemicBasis",
+            "columnName": "epistemic_basis",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceCertainty",
+            "columnName": "source_certainty",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lineageKey",
+            "columnName": "lineage_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "memory_id",
+            "experience_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_memory_evidence_experience_id",
+            "unique": false,
+            "columnNames": [
+              "experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_evidence_experience_id` ON `${TABLE_NAME}` (`experience_id`)"
+          },
+          {
+            "name": "index_memory_evidence_lineage_key",
+            "unique": false,
+            "columnNames": [
+              "lineage_key"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_evidence_lineage_key` ON `${TABLE_NAME}` (`lineage_key`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "memories",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "memory_relationships",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`source_memory_id` TEXT NOT NULL, `target_memory_id` TEXT NOT NULL, `relationship_type` TEXT NOT NULL, `created_by_experience_id` TEXT, `created_at` INTEGER NOT NULL, PRIMARY KEY(`source_memory_id`, `target_memory_id`, `relationship_type`), FOREIGN KEY(`source_memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE RESTRICT , FOREIGN KEY(`target_memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE RESTRICT , FOREIGN KEY(`created_by_experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "sourceMemoryId",
+            "columnName": "source_memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetMemoryId",
+            "columnName": "target_memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relationshipType",
+            "columnName": "relationship_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdByExperienceId",
+            "columnName": "created_by_experience_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "source_memory_id",
+            "target_memory_id",
+            "relationship_type"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_memory_relationships_target_memory_id",
+            "unique": false,
+            "columnNames": [
+              "target_memory_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_relationships_target_memory_id` ON `${TABLE_NAME}` (`target_memory_id`)"
+          },
+          {
+            "name": "index_memory_relationships_created_by_experience_id",
+            "unique": false,
+            "columnNames": [
+              "created_by_experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_relationships_created_by_experience_id` ON `${TABLE_NAME}` (`created_by_experience_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "memories",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "source_memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          },
+          {
+            "table": "memories",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "target_memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "created_by_experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "memory_entity_links",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`memory_id` TEXT NOT NULL, `entity_id` TEXT NOT NULL, `role` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`memory_id`, `entity_id`, `role`), FOREIGN KEY(`memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`entity_id`) REFERENCES `entities`(`entity_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "memoryId",
+            "columnName": "memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entityId",
+            "columnName": "entity_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "memory_id",
+            "entity_id",
+            "role"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_memory_entity_links_entity_id",
+            "unique": false,
+            "columnNames": [
+              "entity_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_entity_links_entity_id` ON `${TABLE_NAME}` (`entity_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "memories",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          },
+          {
+            "table": "entities",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "entity_id"
+            ],
+            "referencedColumns": [
+              "entity_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "experience_entity_links",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`experience_id` TEXT NOT NULL, `entity_id` TEXT NOT NULL, `role` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`experience_id`, `entity_id`, `role`), FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`entity_id`) REFERENCES `entities`(`entity_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "experienceId",
+            "columnName": "experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entityId",
+            "columnName": "entity_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "experience_id",
+            "entity_id",
+            "role"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_experience_entity_links_entity_id",
+            "unique": false,
+            "columnNames": [
+              "entity_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_experience_entity_links_entity_id` ON `${TABLE_NAME}` (`entity_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "experiences",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          },
+          {
+            "table": "entities",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "entity_id"
+            ],
+            "referencedColumns": [
+              "entity_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "candidate_memories",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`candidate_memory_id` TEXT NOT NULL, `proposed_kind` TEXT NOT NULL, `proposed_scope` TEXT NOT NULL, `proposed_meaning` TEXT NOT NULL, `proposed_epistemic_basis` TEXT NOT NULL, `proposed_certainty` TEXT NOT NULL, `state` TEXT NOT NULL, `sensitivity` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`candidate_memory_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "candidate_memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "proposedKind",
+            "columnName": "proposed_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "proposedScope",
+            "columnName": "proposed_scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "proposedMeaning",
+            "columnName": "proposed_meaning",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "proposedEpistemicBasis",
+            "columnName": "proposed_epistemic_basis",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "proposedCertainty",
+            "columnName": "proposed_certainty",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sensitivity",
+            "columnName": "sensitivity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "candidate_memory_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_candidate_memories_state_created_at",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_candidate_memories_state_created_at` ON `${TABLE_NAME}` (`state`, `created_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "candidate_memory_evidence",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`candidate_memory_id` TEXT NOT NULL, `experience_id` TEXT NOT NULL, `evidence_order` INTEGER NOT NULL, `role` TEXT NOT NULL, `lineage_key` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`candidate_memory_id`, `experience_id`), FOREIGN KEY(`candidate_memory_id`) REFERENCES `candidate_memories`(`candidate_memory_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "candidateMemoryId",
+            "columnName": "candidate_memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "experienceId",
+            "columnName": "experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evidenceOrder",
+            "columnName": "evidence_order",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lineageKey",
+            "columnName": "lineage_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "candidate_memory_id",
+            "experience_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_candidate_memory_evidence_candidate_memory_id_evidence_order",
+            "unique": true,
+            "columnNames": [
+              "candidate_memory_id",
+              "evidence_order"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_candidate_memory_evidence_candidate_memory_id_evidence_order` ON `${TABLE_NAME}` (`candidate_memory_id`, `evidence_order`)"
+          },
+          {
+            "name": "index_candidate_memory_evidence_experience_id",
+            "unique": false,
+            "columnNames": [
+              "experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_candidate_memory_evidence_experience_id` ON `${TABLE_NAME}` (`experience_id`)"
+          },
+          {
+            "name": "index_candidate_memory_evidence_lineage_key",
+            "unique": false,
+            "columnNames": [
+              "lineage_key"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_candidate_memory_evidence_lineage_key` ON `${TABLE_NAME}` (`lineage_key`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "candidate_memories",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "candidate_memory_id"
+            ],
+            "referencedColumns": [
+              "candidate_memory_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "open_loops",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`open_loop_id` TEXT NOT NULL, `creation_experience_id` TEXT NOT NULL, `resolution_experience_id` TEXT, `related_memory_id` TEXT, `title` TEXT NOT NULL, `description` TEXT, `state` TEXT NOT NULL, `opened_at` INTEGER NOT NULL, `due_at` INTEGER, `closed_at` INTEGER, `sensitivity` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`open_loop_id`), FOREIGN KEY(`creation_experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT , FOREIGN KEY(`resolution_experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT , FOREIGN KEY(`related_memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "open_loop_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "creationExperienceId",
+            "columnName": "creation_experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resolutionExperienceId",
+            "columnName": "resolution_experience_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "relatedMemoryId",
+            "columnName": "related_memory_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "openedAt",
+            "columnName": "opened_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dueAt",
+            "columnName": "due_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "closedAt",
+            "columnName": "closed_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sensitivity",
+            "columnName": "sensitivity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "open_loop_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_open_loops_creation_experience_id",
+            "unique": false,
+            "columnNames": [
+              "creation_experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_open_loops_creation_experience_id` ON `${TABLE_NAME}` (`creation_experience_id`)"
+          },
+          {
+            "name": "index_open_loops_resolution_experience_id",
+            "unique": false,
+            "columnNames": [
+              "resolution_experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_open_loops_resolution_experience_id` ON `${TABLE_NAME}` (`resolution_experience_id`)"
+          },
+          {
+            "name": "index_open_loops_related_memory_id",
+            "unique": true,
+            "columnNames": [
+              "related_memory_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_open_loops_related_memory_id` ON `${TABLE_NAME}` (`related_memory_id`)"
+          },
+          {
+            "name": "index_open_loops_state_due_at",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "due_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_open_loops_state_due_at` ON `${TABLE_NAME}` (`state`, `due_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "creation_experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "resolution_experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          },
+          {
+            "table": "memories",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "related_memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "open_loop_entity_links",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`open_loop_id` TEXT NOT NULL, `entity_id` TEXT NOT NULL, `role` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`open_loop_id`, `entity_id`, `role`), FOREIGN KEY(`open_loop_id`) REFERENCES `open_loops`(`open_loop_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`entity_id`) REFERENCES `entities`(`entity_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "openLoopId",
+            "columnName": "open_loop_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entityId",
+            "columnName": "entity_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "role",
+            "columnName": "role",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "open_loop_id",
+            "entity_id",
+            "role"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_open_loop_entity_links_entity_id",
+            "unique": false,
+            "columnNames": [
+              "entity_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_open_loop_entity_links_entity_id` ON `${TABLE_NAME}` (`entity_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "open_loops",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "open_loop_id"
+            ],
+            "referencedColumns": [
+              "open_loop_id"
+            ]
+          },
+          {
+            "table": "entities",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "entity_id"
+            ],
+            "referencedColumns": [
+              "entity_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "suppression_tombstones",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`tombstone_id` TEXT NOT NULL, `kind` TEXT NOT NULL, `source_lineage_hash` TEXT NOT NULL, `is_active` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `expires_at` INTEGER, `format_version` INTEGER NOT NULL, PRIMARY KEY(`tombstone_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "tombstone_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceLineageHash",
+            "columnName": "source_lineage_hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isActive",
+            "columnName": "is_active",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expires_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "formatVersion",
+            "columnName": "format_version",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "tombstone_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_suppression_tombstones_source_lineage_hash",
+            "unique": true,
+            "columnNames": [
+              "source_lineage_hash"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_suppression_tombstones_source_lineage_hash` ON `${TABLE_NAME}` (`source_lineage_hash`)"
+          },
+          {
+            "name": "index_suppression_tombstones_is_active_created_at",
+            "unique": false,
+            "columnNames": [
+              "is_active",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_suppression_tombstones_is_active_created_at` ON `${TABLE_NAME}` (`is_active`, `created_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "derived_artifacts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`derived_artifact_id` TEXT NOT NULL, `artifact_type` TEXT NOT NULL, `state` TEXT NOT NULL, `producer_version` TEXT NOT NULL, `source_revision` INTEGER NOT NULL, `artifact_hash` TEXT, `created_at` INTEGER NOT NULL, `invalidated_at` INTEGER, PRIMARY KEY(`derived_artifact_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "derived_artifact_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artifactType",
+            "columnName": "artifact_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "producerVersion",
+            "columnName": "producer_version",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceRevision",
+            "columnName": "source_revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artifactHash",
+            "columnName": "artifact_hash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "invalidatedAt",
+            "columnName": "invalidated_at",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "derived_artifact_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_derived_artifacts_artifact_type_state",
+            "unique": false,
+            "columnNames": [
+              "artifact_type",
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_derived_artifacts_artifact_type_state` ON `${TABLE_NAME}` (`artifact_type`, `state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "derived_artifact_memory_dependencies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`derived_artifact_id` TEXT NOT NULL, `memory_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`derived_artifact_id`, `memory_id`), FOREIGN KEY(`derived_artifact_id`) REFERENCES `derived_artifacts`(`derived_artifact_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "derivedArtifactId",
+            "columnName": "derived_artifact_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "memoryId",
+            "columnName": "memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "derived_artifact_id",
+            "memory_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_derived_artifact_memory_dependencies_memory_id",
+            "unique": false,
+            "columnNames": [
+              "memory_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_derived_artifact_memory_dependencies_memory_id` ON `${TABLE_NAME}` (`memory_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "derived_artifacts",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "derived_artifact_id"
+            ],
+            "referencedColumns": [
+              "derived_artifact_id"
+            ]
+          },
+          {
+            "table": "memories",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "derived_artifact_experience_dependencies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`derived_artifact_id` TEXT NOT NULL, `experience_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`derived_artifact_id`, `experience_id`), FOREIGN KEY(`derived_artifact_id`) REFERENCES `derived_artifacts`(`derived_artifact_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "derivedArtifactId",
+            "columnName": "derived_artifact_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "experienceId",
+            "columnName": "experience_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "derived_artifact_id",
+            "experience_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_derived_artifact_experience_dependencies_experience_id",
+            "unique": false,
+            "columnNames": [
+              "experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_derived_artifact_experience_dependencies_experience_id` ON `${TABLE_NAME}` (`experience_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "derived_artifacts",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "derived_artifact_id"
+            ],
+            "referencedColumns": [
+              "derived_artifact_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "derived_artifact_message_dependencies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`derived_artifact_id` TEXT NOT NULL, `message_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`derived_artifact_id`, `message_id`), FOREIGN KEY(`derived_artifact_id`) REFERENCES `derived_artifacts`(`derived_artifact_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "derivedArtifactId",
+            "columnName": "derived_artifact_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageId",
+            "columnName": "message_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "derived_artifact_id",
+            "message_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_derived_artifact_message_dependencies_message_id",
+            "unique": false,
+            "columnNames": [
+              "message_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_derived_artifact_message_dependencies_message_id` ON `${TABLE_NAME}` (`message_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "derived_artifacts",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "derived_artifact_id"
+            ],
+            "referencedColumns": [
+              "derived_artifact_id"
+            ]
+          },
+          {
+            "table": "messages",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "message_id"
+            ],
+            "referencedColumns": [
+              "message_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "derived_artifact_open_loop_dependencies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`derived_artifact_id` TEXT NOT NULL, `open_loop_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`derived_artifact_id`, `open_loop_id`), FOREIGN KEY(`derived_artifact_id`) REFERENCES `derived_artifacts`(`derived_artifact_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`open_loop_id`) REFERENCES `open_loops`(`open_loop_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "derivedArtifactId",
+            "columnName": "derived_artifact_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "openLoopId",
+            "columnName": "open_loop_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "derived_artifact_id",
+            "open_loop_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_derived_artifact_open_loop_dependencies_open_loop_id",
+            "unique": false,
+            "columnNames": [
+              "open_loop_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_derived_artifact_open_loop_dependencies_open_loop_id` ON `${TABLE_NAME}` (`open_loop_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "derived_artifacts",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "derived_artifact_id"
+            ],
+            "referencedColumns": [
+              "derived_artifact_id"
+            ]
+          },
+          {
+            "table": "open_loops",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "open_loop_id"
+            ],
+            "referencedColumns": [
+              "open_loop_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "repair_jobs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`repair_job_id` TEXT NOT NULL, `job_type` TEXT NOT NULL, `state` TEXT NOT NULL, `target_type` TEXT NOT NULL, `target_id` TEXT NOT NULL, `attempt_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `last_error_code` TEXT, PRIMARY KEY(`repair_job_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "repair_job_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jobType",
+            "columnName": "job_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetType",
+            "columnName": "target_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetId",
+            "columnName": "target_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptCount",
+            "columnName": "attempt_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastErrorCode",
+            "columnName": "last_error_code",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "repair_job_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_repair_jobs_state_created_at",
+            "unique": false,
+            "columnNames": [
+              "state",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_repair_jobs_state_created_at` ON `${TABLE_NAME}` (`state`, `created_at`)"
+          },
+          {
+            "name": "index_repair_jobs_target_type_target_id",
+            "unique": false,
+            "columnNames": [
+              "target_type",
+              "target_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_repair_jobs_target_type_target_id` ON `${TABLE_NAME}` (`target_type`, `target_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "memory_audit_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`memory_audit_id` TEXT NOT NULL, `memory_id` TEXT NOT NULL, `action` TEXT NOT NULL, `triggering_experience_id` TEXT, `from_truth_state` TEXT, `to_truth_state` TEXT, `from_retention_state` TEXT, `to_retention_state` TEXT, `from_certainty` TEXT, `to_certainty` TEXT, `from_lifecycle_state` TEXT, `to_lifecycle_state` TEXT, `occurred_at` INTEGER NOT NULL, PRIMARY KEY(`memory_audit_id`), FOREIGN KEY(`memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE RESTRICT , FOREIGN KEY(`triggering_experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "memory_audit_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "memoryId",
+            "columnName": "memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "triggeringExperienceId",
+            "columnName": "triggering_experience_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fromTruthState",
+            "columnName": "from_truth_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "toTruthState",
+            "columnName": "to_truth_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fromRetentionState",
+            "columnName": "from_retention_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "toRetentionState",
+            "columnName": "to_retention_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fromCertainty",
+            "columnName": "from_certainty",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "toCertainty",
+            "columnName": "to_certainty",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fromLifecycleState",
+            "columnName": "from_lifecycle_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "toLifecycleState",
+            "columnName": "to_lifecycle_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurred_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "memory_audit_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_memory_audit_history_memory_id_occurred_at",
+            "unique": false,
+            "columnNames": [
+              "memory_id",
+              "occurred_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_audit_history_memory_id_occurred_at` ON `${TABLE_NAME}` (`memory_id`, `occurred_at`)"
+          },
+          {
+            "name": "index_memory_audit_history_triggering_experience_id",
+            "unique": false,
+            "columnNames": [
+              "triggering_experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_memory_audit_history_triggering_experience_id` ON `${TABLE_NAME}` (`triggering_experience_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "memories",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "memory_id"
+            ],
+            "referencedColumns": [
+              "memory_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "triggering_experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "open_loop_audit_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`open_loop_audit_id` TEXT NOT NULL, `open_loop_id` TEXT NOT NULL, `action` TEXT NOT NULL, `triggering_experience_id` TEXT, `from_state` TEXT, `to_state` TEXT, `occurred_at` INTEGER NOT NULL, PRIMARY KEY(`open_loop_audit_id`), FOREIGN KEY(`open_loop_id`) REFERENCES `open_loops`(`open_loop_id`) ON UPDATE CASCADE ON DELETE RESTRICT , FOREIGN KEY(`triggering_experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "open_loop_audit_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "openLoopId",
+            "columnName": "open_loop_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "triggeringExperienceId",
+            "columnName": "triggering_experience_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fromState",
+            "columnName": "from_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "toState",
+            "columnName": "to_state",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "occurredAt",
+            "columnName": "occurred_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "open_loop_audit_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_open_loop_audit_history_open_loop_id_occurred_at",
+            "unique": false,
+            "columnNames": [
+              "open_loop_id",
+              "occurred_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_open_loop_audit_history_open_loop_id_occurred_at` ON `${TABLE_NAME}` (`open_loop_id`, `occurred_at`)"
+          },
+          {
+            "name": "index_open_loop_audit_history_triggering_experience_id",
+            "unique": false,
+            "columnNames": [
+              "triggering_experience_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_open_loop_audit_history_triggering_experience_id` ON `${TABLE_NAME}` (`triggering_experience_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "open_loops",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "open_loop_id"
+            ],
+            "referencedColumns": [
+              "open_loop_id"
+            ]
+          },
+          {
+            "table": "experiences",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "triggering_experience_id"
+            ],
+            "referencedColumns": [
+              "experience_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "message_parent_edges",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`child_message_id` TEXT NOT NULL, `parent_message_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`child_message_id`), FOREIGN KEY(`child_message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`parent_message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "childMessageId",
+            "columnName": "child_message_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentMessageId",
+            "columnName": "parent_message_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "child_message_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_message_parent_edges_parent_message_id",
+            "unique": false,
+            "columnNames": [
+              "parent_message_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_parent_edges_parent_message_id` ON `${TABLE_NAME}` (`parent_message_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "child_message_id"
+            ],
+            "referencedColumns": [
+              "message_id"
+            ]
+          },
+          {
+            "table": "messages",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "parent_message_id"
+            ],
+            "referencedColumns": [
+              "message_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "conversation_timeline_heads",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`conversation_id` TEXT NOT NULL, `active_head_message_id` TEXT, `timeline_revision` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`conversation_id`), FOREIGN KEY(`conversation_id`) REFERENCES `conversations`(`conversation_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`active_head_message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "conversationId",
+            "columnName": "conversation_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeHeadMessageId",
+            "columnName": "active_head_message_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "timelineRevision",
+            "columnName": "timeline_revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "conversation_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_conversation_timeline_heads_active_head_message_id",
+            "unique": false,
+            "columnNames": [
+              "active_head_message_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_conversation_timeline_heads_active_head_message_id` ON `${TABLE_NAME}` (`active_head_message_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "conversations",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "conversation_id"
+            ],
+            "referencedColumns": [
+              "conversation_id"
+            ]
+          },
+          {
+            "table": "messages",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "active_head_message_id"
+            ],
+            "referencedColumns": [
+              "message_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "shai_system_instructions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`instruction_id` TEXT NOT NULL, `content` TEXT NOT NULL, `is_enabled` INTEGER NOT NULL, `revision` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`instruction_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "instruction_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "content",
+            "columnName": "content",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isEnabled",
+            "columnName": "is_enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "instruction_id"
+          ]
+        }
+      },
+      {
+        "tableName": "attachments",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`attachment_id` TEXT NOT NULL, `kind` TEXT NOT NULL, `mime_type` TEXT NOT NULL, `state` TEXT NOT NULL, `storage_key` TEXT NOT NULL, `byte_size` INTEGER, `content_sha256` TEXT, `source` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`attachment_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "attachment_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mime_type",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "storageKey",
+            "columnName": "storage_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "byteSize",
+            "columnName": "byte_size",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "contentSha256",
+            "columnName": "content_sha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "attachment_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_attachments_storage_key",
+            "unique": true,
+            "columnNames": [
+              "storage_key"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_attachments_storage_key` ON `${TABLE_NAME}` (`storage_key`)"
+          }
+        ]
+      },
+      {
+        "tableName": "message_attachments",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`message_id` TEXT NOT NULL, `attachment_id` TEXT NOT NULL, `attachment_order` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`message_id`, `attachment_id`), FOREIGN KEY(`message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`attachment_id`) REFERENCES `attachments`(`attachment_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "messageId",
+            "columnName": "message_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attachmentId",
+            "columnName": "attachment_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attachmentOrder",
+            "columnName": "attachment_order",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "message_id",
+            "attachment_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_message_attachments_attachment_id",
+            "unique": false,
+            "columnNames": [
+              "attachment_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_attachments_attachment_id` ON `${TABLE_NAME}` (`attachment_id`)"
+          },
+          {
+            "name": "index_message_attachments_message_id_attachment_order",
+            "unique": true,
+            "columnNames": [
+              "message_id",
+              "attachment_order"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_message_attachments_message_id_attachment_order` ON `${TABLE_NAME}` (`message_id`, `attachment_order`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "message_id"
+            ],
+            "referencedColumns": [
+              "message_id"
+            ]
+          },
+          {
+            "table": "attachments",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "attachment_id"
+            ],
+            "referencedColumns": [
+              "attachment_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "generated_media_provenance",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`attachment_id` TEXT NOT NULL, `generation_kind` TEXT NOT NULL, `generator_provider` TEXT, `generator_model` TEXT, `provider_request_id` TEXT, `appearance_authority` TEXT, `appearance_authority_fingerprint` TEXT, `request_fingerprint` TEXT, `generated_at` INTEGER NOT NULL, PRIMARY KEY(`attachment_id`), FOREIGN KEY(`attachment_id`) REFERENCES `attachments`(`attachment_id`) ON UPDATE CASCADE ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "attachmentId",
+            "columnName": "attachment_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generationKind",
+            "columnName": "generation_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generatorProvider",
+            "columnName": "generator_provider",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "generatorModel",
+            "columnName": "generator_model",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "providerRequestId",
+            "columnName": "provider_request_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "appearanceAuthority",
+            "columnName": "appearance_authority",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "appearanceAuthorityFingerprint",
+            "columnName": "appearance_authority_fingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "requestFingerprint",
+            "columnName": "request_fingerprint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "generatedAt",
+            "columnName": "generated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "attachment_id"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "attachments",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "attachment_id"
+            ],
+            "referencedColumns": [
+              "attachment_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "derived_artifact_attachment_dependencies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`derived_artifact_id` TEXT NOT NULL, `attachment_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`derived_artifact_id`, `attachment_id`), FOREIGN KEY(`derived_artifact_id`) REFERENCES `derived_artifacts`(`derived_artifact_id`) ON UPDATE CASCADE ON DELETE CASCADE , FOREIGN KEY(`attachment_id`) REFERENCES `attachments`(`attachment_id`) ON UPDATE CASCADE ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "derivedArtifactId",
+            "columnName": "derived_artifact_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attachmentId",
+            "columnName": "attachment_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "derived_artifact_id",
+            "attachment_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_derived_artifact_attachment_dependencies_attachment_id",
+            "unique": false,
+            "columnNames": [
+              "attachment_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_derived_artifact_attachment_dependencies_attachment_id` ON `${TABLE_NAME}` (`attachment_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "derived_artifacts",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "derived_artifact_id"
+            ],
+            "referencedColumns": [
+              "derived_artifact_id"
+            ]
+          },
+          {
+            "table": "attachments",
+            "onDelete": "RESTRICT",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "attachment_id"
+            ],
+            "referencedColumns": [
+              "attachment_id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "provider_profiles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`profile_id` TEXT NOT NULL, `display_name` TEXT NOT NULL, `adapter_id` TEXT NOT NULL, `endpoint_base_url` TEXT NOT NULL, `model_id` TEXT NOT NULL, `credential_slot_id` TEXT, `is_enabled` INTEGER NOT NULL, `revision` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`profile_id`))",
+        "fields": [
+          {
+            "fieldPath": "profileId",
+            "columnName": "profile_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "display_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "adapterId",
+            "columnName": "adapter_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endpointBaseUrl",
+            "columnName": "endpoint_base_url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "model_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "credentialSlotId",
+            "columnName": "credential_slot_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isEnabled",
+            "columnName": "is_enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "profile_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_provider_profiles_adapter_id",
+            "unique": false,
+            "columnNames": [
+              "adapter_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_provider_profiles_adapter_id` ON `${TABLE_NAME}` (`adapter_id`)"
+          },
+          {
+            "name": "index_provider_profiles_credential_slot_id",
+            "unique": false,
+            "columnNames": [
+              "credential_slot_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_provider_profiles_credential_slot_id` ON `${TABLE_NAME}` (`credential_slot_id`)"
+          },
+          {
+            "name": "index_provider_profiles_is_enabled",
+            "unique": false,
+            "columnNames": [
+              "is_enabled"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_provider_profiles_is_enabled` ON `${TABLE_NAME}` (`is_enabled`)"
+          }
+        ]
+      },
+      {
+        "tableName": "provider_profile_capabilities",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`profile_id` TEXT NOT NULL, `capability` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`profile_id`, `capability`), FOREIGN KEY(`profile_id`) REFERENCES `provider_profiles`(`profile_id`) ON UPDATE CASCADE ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "profileId",
+            "columnName": "profile_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capability",
+            "columnName": "capability",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "profile_id",
+            "capability"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_provider_profile_capabilities_capability",
+            "unique": false,
+            "columnNames": [
+              "capability"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_provider_profile_capabilities_capability` ON `${TABLE_NAME}` (`capability`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "provider_profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "profile_id"
+            ],
+            "referencedColumns": [
+              "profile_id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c80e94ece604a0dab9d07e7a10856987')"
+    ]
+  }
+}

@@ -391,7 +391,111 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun migrationOneToFourChainsTimelineInstructionsAndAttachmentFoundation() {
+    fun migrationFourToFivePreservesVersionFourDataAndCreatesEmptyProviderTables() {
+        migrationHelper.createDatabase(4).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-v4', 10, 20, 'ACTIVE', 'Version four conversation')",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    message_id, conversation_id, sequence_number, role, delivery_state,
+                    content, created_at, updated_at
+                ) VALUES (
+                    'message-v4', 'conversation-v4', 1, 'USER', 'PERSISTED',
+                    'Preserved version four message', 11, 11
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO conversation_timeline_heads VALUES " +
+                    "('conversation-v4', 'message-v4', 5, 20)",
+            )
+            execSQL(
+                """
+                INSERT INTO memories (
+                    memory_id, kind, scope, meaning, epistemic_basis, certainty,
+                    truth_state, retention_state, lifecycle_state, temporal_state,
+                    learned_at, sensitivity, created_at, updated_at
+                ) VALUES (
+                    'memory-v4', 'SEMANTIC', 'SHAI', 'Preserved version four memory',
+                    'DIRECT_USER_STATEMENT', 'CERTAIN', 'SUPPORTED', 'ACTIVE',
+                    'VALIDATED', 'CURRENT', 11, 'STANDARD', 11, 11
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO shai_system_instructions VALUES " +
+                    "('PRIMARY', 'Preserved version four instructions', 1, 8, 12, 13)",
+            )
+            execSQL(
+                """
+                INSERT INTO attachments (
+                    attachment_id, kind, mime_type, state, storage_key, byte_size,
+                    content_sha256, source, created_at, updated_at
+                ) VALUES (
+                    'attachment-v4', 'IMAGE', 'image/png', 'AVAILABLE', 'blob-v4', 3,
+                    'abc123', 'RIVEN_GENERATED', 14, 14
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                "INSERT INTO message_attachments VALUES " +
+                    "('message-v4', 'attachment-v4', 0, 14)",
+            )
+            execSQL(
+                """
+                INSERT INTO generated_media_provenance (
+                    attachment_id, generation_kind, generator_provider, generator_model,
+                    provider_request_id, appearance_authority,
+                    appearance_authority_fingerprint, request_fingerprint, generated_at
+                ) VALUES (
+                    'attachment-v4', 'GENERATED_IMAGE', 'provider-v4', 'model-v4',
+                    'request-v4', 'appearance-v4', 'appearance-hash-v4',
+                    'request-hash-v4', 14
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 5,
+            migrations = listOf(MIGRATION_4_5),
+        )
+
+        assertEquals("message-v4", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v4'",
+        ))
+        assertEquals(5L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v4'",
+        ))
+        assertEquals("Preserved version four memory", migrated.singleString(
+            "SELECT meaning FROM memories WHERE memory_id = 'memory-v4'",
+        ))
+        assertEquals("Preserved version four instructions", migrated.singleString(
+            "SELECT content FROM shai_system_instructions WHERE instruction_id = 'PRIMARY'",
+        ))
+        assertEquals("blob-v4", migrated.singleString(
+            "SELECT storage_key FROM attachments WHERE attachment_id = 'attachment-v4'",
+        ))
+        assertEquals("attachment-v4", migrated.singleString(
+            "SELECT attachment_id FROM message_attachments WHERE message_id = 'message-v4'",
+        ))
+        assertEquals("provider-v4", migrated.singleString(
+            "SELECT generator_provider FROM generated_media_provenance " +
+                "WHERE attachment_id = 'attachment-v4'",
+        ))
+        assertEquals(0L, migrated.rowCount("provider_profiles"))
+        assertEquals(0L, migrated.rowCount("provider_profile_capabilities"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationOneToFiveChainsAllFoundationMigrations() {
         migrationHelper.createDatabase(1).apply {
             execSQL(
                 "INSERT INTO conversations VALUES " +
@@ -424,8 +528,8 @@ class RivenMigrationTest {
         }
 
         val migrated = migrationHelper.runMigrationsAndValidate(
-            version = 4,
-            migrations = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4),
+            version = 5,
+            migrations = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5),
         )
 
         assertEquals(listOf("full-1", "full-2"), migrated.activePath("full-2"))
@@ -445,6 +549,8 @@ class RivenMigrationTest {
         assertEquals(0L, migrated.rowCount("message_attachments"))
         assertEquals(0L, migrated.rowCount("generated_media_provenance"))
         assertEquals(0L, migrated.rowCount("derived_artifact_attachment_dependencies"))
+        assertEquals(0L, migrated.rowCount("provider_profiles"))
+        assertEquals(0L, migrated.rowCount("provider_profile_capabilities"))
         migrated.close()
     }
 
