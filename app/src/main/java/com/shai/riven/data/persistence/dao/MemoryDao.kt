@@ -63,11 +63,26 @@ interface MemoryDao {
     @Query("SELECT COUNT(*) FROM experiences WHERE experience_id = :experienceId")
     fun experienceCount(experienceId: String): Int
 
+    @Query("SELECT * FROM experiences WHERE experience_id = :experienceId")
+    fun experience(experienceId: String): ExperienceEntity?
+
+    @Query("SELECT MAX(event_order) FROM experiences")
+    fun maximumEventOrder(): Long?
+
+    @Query("SELECT COUNT(*) FROM experiences")
+    fun experienceCount(): Int
+
+    @Query("SELECT COUNT(*) FROM candidate_memories")
+    fun candidateMemoryCount(): Int
+
     @Query("SELECT COUNT(*) FROM memory_evidence WHERE memory_id = :memoryId")
     fun memoryEvidenceCount(memoryId: String): Int
 
     @Query("SELECT COUNT(*) FROM memory_entity_links WHERE memory_id = :memoryId")
     fun memoryEntityLinkCount(memoryId: String): Int
+
+    @Query("SELECT * FROM memory_entity_links WHERE memory_id = :memoryId ORDER BY entity_id, role")
+    fun entityLinksForMemory(memoryId: String): List<MemoryEntityLinkEntity>
 
     @Query("SELECT * FROM experience_message_sources WHERE experience_id = :experienceId ORDER BY source_order")
     fun messageSourcesForExperience(experienceId: String): List<ExperienceMessageSourceEntity>

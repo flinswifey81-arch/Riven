@@ -50,6 +50,12 @@ enum class ExperienceType {
     SHARED_EVENT,
     CORRECTION,
     REMINDER_STATE,
+    /**
+     * Explicit Shai-controlled Memory evidence that has already been consumed by a manual
+     * Remember or Correct operation. Future automatic candidate extraction must not independently
+     * re-extract this Experience into a duplicate Candidate Memory.
+     */
+    MANUAL_MEMORY_INTENT,
     OTHER,
 }
 

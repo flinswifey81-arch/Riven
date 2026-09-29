@@ -16,6 +16,7 @@ import com.shai.riven.data.persistence.model.TemporalState
 enum class MemoryWriteOperation {
     ADD_CANDIDATE_EVIDENCE,
     ADMIT_CANDIDATE,
+    CREATE_VALIDATED,
     REINFORCE,
     CORRECT,
     SUPERSEDE,

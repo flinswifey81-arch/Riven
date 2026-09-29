@@ -159,37 +159,32 @@ class MemoryTransactionService(
         }
 
     suspend fun correct(input: CorrectMemoryInput): MemoryWriteResult =
-        execute(MemoryWriteOperation.CORRECT) {
-            val old = requireMemory(input.inaccurateMemoryId)
-            requireMutableUnderstanding(old, MemoryWriteOperation.CORRECT)
-            requireTriggeringExperience(input.triggeringExperienceId)
-            val replacement = input.replacement.copy(temporalState = TemporalState.CURRENT)
-            insertValidatedMemory(replacement, input.occurredAt)
+        execute(MemoryWriteOperation.CORRECT) { correctInCurrentTransactionOrThrow(input) }
 
-            val corrected = old.copy(
-                truthState = MemoryTruthState.CORRECTED_FALSE,
-                updatedAt = input.occurredAt,
-            )
-            memoryDao.updateMemory(corrected)
-            memoryDao.insertMemoryRelationship(
-                MemoryRelationshipEntity(
-                    sourceMemoryId = replacement.memoryId,
-                    targetMemoryId = old.id,
-                    relationshipType = MemoryRelationshipType.CORRECTS,
-                    createdByExperienceId = input.triggeringExperienceId,
-                    createdAt = input.occurredAt,
-                ),
-            )
-            insertAudit(
-                memoryId = old.id,
-                action = MemoryAuditAction.CORRECTED,
-                triggeringExperienceId = input.triggeringExperienceId,
-                fromTruthState = old.truthState,
-                toTruthState = corrected.truthState,
-                occurredAt = input.occurredAt,
-            )
-            invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.PROPAGATE_CORRECTION)
-            MemoryWriteResult.Success(MemoryWriteOperation.CORRECT, setOf(old.id, replacement.memoryId))
+    /**
+     * Inserts an already-validated Memory while the caller owns the surrounding Room transaction.
+     * This is the shared canonical insertion path used by explicit manual Remember; it deliberately
+     * does not create or admit a Candidate Memory.
+     */
+    internal fun createValidatedInCurrentTransaction(
+        input: ValidatedMemoryInput,
+        occurredAt: Long,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.CREATE_VALIDATED) {
+        insertValidatedMemory(input, occurredAt)
+        MemoryWriteResult.Success(
+            operation = MemoryWriteOperation.CREATE_VALIDATED,
+            affectedMemoryIds = setOf(input.memoryId),
+        )
+    }
+
+    /**
+     * Runs canonical correction mutation rules inside a transaction already owned by the caller.
+     * Manual Correct uses this so its provenance Experience and the complete correction either both
+     * commit or both roll back.
+     */
+    internal fun correctInCurrentTransaction(input: CorrectMemoryInput): MemoryWriteResult =
+        executeInCurrentTransaction(MemoryWriteOperation.CORRECT) {
+            correctInCurrentTransactionOrThrow(input)
         }
 
     suspend fun supersede(input: SupersedeMemoryInput): MemoryWriteResult =
@@ -533,6 +528,42 @@ class MemoryTransactionService(
         )
     }
 
+    private fun correctInCurrentTransactionOrThrow(input: CorrectMemoryInput): MemoryWriteResult.Success {
+        val old = requireMemory(input.inaccurateMemoryId)
+        requireMutableUnderstanding(old, MemoryWriteOperation.CORRECT)
+        requireTriggeringExperience(input.triggeringExperienceId)
+        val replacement = input.replacement.copy(temporalState = TemporalState.CURRENT)
+        insertValidatedMemory(replacement, input.occurredAt)
+
+        val corrected = old.copy(
+            truthState = MemoryTruthState.CORRECTED_FALSE,
+            updatedAt = input.occurredAt,
+        )
+        memoryDao.updateMemory(corrected)
+        memoryDao.insertMemoryRelationship(
+            MemoryRelationshipEntity(
+                sourceMemoryId = replacement.memoryId,
+                targetMemoryId = old.id,
+                relationshipType = MemoryRelationshipType.CORRECTS,
+                createdByExperienceId = input.triggeringExperienceId,
+                createdAt = input.occurredAt,
+            ),
+        )
+        insertAudit(
+            memoryId = old.id,
+            action = MemoryAuditAction.CORRECTED,
+            triggeringExperienceId = input.triggeringExperienceId,
+            fromTruthState = old.truthState,
+            toTruthState = corrected.truthState,
+            occurredAt = input.occurredAt,
+        )
+        invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.PROPAGATE_CORRECTION)
+        return MemoryWriteResult.Success(
+            MemoryWriteOperation.CORRECT,
+            setOf(old.id, replacement.memoryId),
+        )
+    }
+
     private fun insertAudit(
         memoryId: String,
         action: MemoryAuditAction,
@@ -668,6 +699,21 @@ class MemoryTransactionService(
         block: suspend () -> MemoryWriteResult.Success,
     ): MemoryWriteResult = try {
         database.withTransaction { block() }
+    } catch (abort: MemoryWriteAbort) {
+        MemoryWriteResult.Failure(abort.error)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (constraint: SQLiteConstraintException) {
+        MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, constraint::class.java.simpleName))
+    } catch (failure: Exception) {
+        MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, failure::class.java.simpleName))
+    }
+
+    private fun executeInCurrentTransaction(
+        operation: MemoryWriteOperation,
+        block: () -> MemoryWriteResult.Success,
+    ): MemoryWriteResult = try {
+        block()
     } catch (abort: MemoryWriteAbort) {
         MemoryWriteResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
