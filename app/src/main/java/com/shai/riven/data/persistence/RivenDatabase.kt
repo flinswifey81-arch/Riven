@@ -110,12 +110,29 @@ abstract class RivenDatabase : RoomDatabase() {
         const val DATABASE_NAME = "riven.db"
 
         fun build(context: Context): RivenDatabase =
-            Room.databaseBuilder(
+            builder(
                 context.applicationContext,
-                RivenDatabase::class.java,
                 DATABASE_NAME,
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
+
+        internal fun buildNamedForRestoreValidation(
+            context: Context,
+            databaseNameOrAbsolutePath: String,
+        ): RivenDatabase = builder(
+            context.applicationContext,
+            databaseNameOrAbsolutePath,
+        )
+            .allowMainThreadQueries()
+            .build()
+
+        private fun builder(
+            context: Context,
+            databaseNameOrAbsolutePath: String,
+        ): RoomDatabase.Builder<RivenDatabase> = Room.databaseBuilder(
+            context,
+            RivenDatabase::class.java,
+            databaseNameOrAbsolutePath,
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
     }
 }

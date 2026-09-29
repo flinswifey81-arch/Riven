@@ -3,6 +3,7 @@ package com.shai.riven.data.background
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.shai.riven.data.archive.RivenRestoreGate
 import kotlinx.coroutines.CancellationException
 
 class RivenBackgroundWorker(
@@ -10,6 +11,7 @@ class RivenBackgroundWorker(
     workerParameters: WorkerParameters,
 ) : CoroutineWorker(applicationContext, workerParameters) {
     override suspend fun doWork(): Result {
+        if (RivenRestoreGate.isPending(applicationContext)) return Result.retry()
         val kind = inputData.getString(RivenBackgroundWorkData.KIND)
             ?.let { encoded ->
                 runCatching { RivenBackgroundWorkKind.valueOf(encoded) }.getOrNull()

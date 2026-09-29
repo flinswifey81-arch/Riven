@@ -27,6 +27,9 @@ interface AttachmentDao {
     @Query("SELECT * FROM attachments WHERE attachment_id = :attachmentId")
     fun attachment(attachmentId: String): AttachmentEntity?
 
+    @Query("SELECT * FROM attachments ORDER BY attachment_id")
+    fun allAttachments(): List<AttachmentEntity>
+
     @Query(
         """
         SELECT *

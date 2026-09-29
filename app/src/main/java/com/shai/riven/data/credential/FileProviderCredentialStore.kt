@@ -13,6 +13,8 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
 
+internal const val PROVIDER_CREDENTIAL_DIRECTORY_NAME = "riven_provider_credentials"
+
 internal class FileProviderCredentialStore(
     internal val rootDirectory: File,
     private val cipher: ProviderCredentialCipher,
@@ -195,7 +197,7 @@ internal class FileProviderCredentialStore(
         )
 
     internal companion object {
-        const val DIRECTORY_NAME = "riven_provider_credentials"
+        const val DIRECTORY_NAME = PROVIDER_CREDENTIAL_DIRECTORY_NAME
         const val CREDENTIAL_FILE_SUFFIX = ".cred"
         const val AAD_PREFIX = "RIVEN_PROVIDER_CREDENTIAL_V1:"
         const val MAX_CREDENTIAL_SLOT_ID_LENGTH = 200

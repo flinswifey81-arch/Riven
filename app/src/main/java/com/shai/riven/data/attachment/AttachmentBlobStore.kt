@@ -84,18 +84,32 @@ class FileAttachmentBlobStore(
         }
     }
 
-    private fun resolve(storageKey: String): File {
+    private fun resolve(storageKey: String): File = AttachmentStorageKey.resolve(root, storageKey)
+
+    companion object {
+        fun fromContext(context: Context): FileAttachmentBlobStore =
+            FileAttachmentBlobStore(File(context.filesDir, "riven_attachments"))
+    }
+}
+
+internal object AttachmentStorageKey {
+    fun resolve(rootDirectory: File, storageKey: String): File {
         require(storageKey.isNotBlank()) { "Storage key is blank" }
+        require('\\' !in storageKey) { "Storage key must use forward slashes" }
+        val components = storageKey.split('/')
+        require(components.none { it.isBlank() || it == "." || it == ".." }) {
+            "Storage key has an unsafe component"
+        }
         val candidate = File(storageKey)
         require(!candidate.isAbsolute) { "Storage key must be relative" }
+        val root = rootDirectory.canonicalFile
         val resolved = File(root, storageKey).canonicalFile
         val rootPrefix = root.path + File.separator
         require(resolved.path.startsWith(rootPrefix)) { "Storage key escapes attachment root" }
         return resolved
     }
 
-    companion object {
-        fun fromContext(context: Context): FileAttachmentBlobStore =
-            FileAttachmentBlobStore(File(context.filesDir, "riven_attachments"))
-    }
+    fun isSafe(storageKey: String): Boolean = runCatching {
+        resolve(File("/riven-attachment-validation-root"), storageKey)
+    }.isSuccess
 }
