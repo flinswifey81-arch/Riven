@@ -82,6 +82,7 @@ sealed interface RivenArchiveRestoreError {
     data class DatabaseIntegrityFailure(val check: String) : RivenArchiveRestoreError
     data class AttachmentIntegrityFailure(val attachmentId: String) : RivenArchiveRestoreError
     data object RestoreAlreadyPending : RivenArchiveRestoreError
+    data object FactoryResetPending : RivenArchiveRestoreError
     data class RestoreStagingFailure(val causeType: String) : RivenArchiveRestoreError
     data class RestoreInstallFailure(val causeType: String) : RivenArchiveRestoreError
     data class RestoreVerificationFailure(val causeType: String) : RivenArchiveRestoreError

@@ -11,6 +11,8 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.UUID
 
+internal const val RIVEN_ATTACHMENT_DIRECTORY_NAME = "riven_attachments"
+
 data class AttachmentBlobWriteResult(
     val byteSize: Long,
     val contentSha256: String,
@@ -88,7 +90,12 @@ class FileAttachmentBlobStore(
 
     companion object {
         fun fromContext(context: Context): FileAttachmentBlobStore =
-            FileAttachmentBlobStore(File(context.filesDir, "riven_attachments"))
+            FileAttachmentBlobStore(rootForContext(context))
+
+        internal fun rootForContext(context: Context): File = File(
+            context.applicationContext.filesDir,
+            RIVEN_ATTACHMENT_DIRECTORY_NAME,
+        )
     }
 }
 

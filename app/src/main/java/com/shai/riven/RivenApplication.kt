@@ -9,6 +9,8 @@ import com.shai.riven.data.background.RivenBackgroundBootstrapResult
 import com.shai.riven.data.background.RivenBackgroundWorkBootstrap
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.WorkManagerRivenBackgroundWorkScheduler
+import com.shai.riven.data.reset.FactoryResetBootstrapResult
+import com.shai.riven.data.reset.RivenResetBootstrap
 
 class RivenApplication : Application(), Configuration.Provider {
     override val workManagerConfiguration: Configuration
@@ -16,7 +18,8 @@ class RivenApplication : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
-        settleRestoreThenBootstrap(
+        settleStartupMutationsThenBootstrap(
+            reset = { RivenResetBootstrap(this).recoverAndApply() },
             restore = { RivenRestoreBootstrap(this).recoverAndApply() },
             scheduler = WorkManagerRivenBackgroundWorkScheduler(WorkManager.getInstance(this)),
         )
@@ -25,14 +28,32 @@ class RivenApplication : Application(), Configuration.Provider {
     internal fun settleRestoreThenBootstrap(
         restore: () -> RivenRestoreBootstrapResult,
         scheduler: RivenBackgroundWorkScheduler,
+    ): RivenApplicationStartupResult = settleStartupMutationsThenBootstrap(
+        reset = { FactoryResetBootstrapResult.NoPendingReset },
+        restore = restore,
+        scheduler = scheduler,
+    )
+
+    internal fun settleStartupMutationsThenBootstrap(
+        reset: () -> FactoryResetBootstrapResult,
+        restore: () -> RivenRestoreBootstrapResult,
+        scheduler: RivenBackgroundWorkScheduler,
     ): RivenApplicationStartupResult {
+        val resetResult = reset()
+        if (resetResult is FactoryResetBootstrapResult.Failure) {
+            return RivenApplicationStartupResult(
+                reset = resetResult,
+                restore = null,
+                background = null,
+            )
+        }
         val restoreResult = restore()
         val background = if (restoreResult is RivenRestoreBootstrapResult.Failure) {
             null
         } else {
             bootstrapBackgroundWork(scheduler)
         }
-        return RivenApplicationStartupResult(restoreResult, background)
+        return RivenApplicationStartupResult(resetResult, restoreResult, background)
     }
 
     internal fun bootstrapBackgroundWork(
@@ -41,6 +62,7 @@ class RivenApplication : Application(), Configuration.Provider {
 }
 
 internal data class RivenApplicationStartupResult(
-    val restore: RivenRestoreBootstrapResult,
+    val reset: FactoryResetBootstrapResult,
+    val restore: RivenRestoreBootstrapResult?,
     val background: RivenBackgroundBootstrapResult?,
 )

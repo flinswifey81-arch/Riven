@@ -6,6 +6,8 @@ import com.shai.riven.data.attachment.AttachmentStorageKey
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.reset.RivenResetGate
+import com.shai.riven.data.reset.RivenResetPaths
 import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
@@ -24,12 +26,20 @@ class RivenArchiveRestoreService(
         context.applicationContext.noBackupFilesDir,
         RivenRestorePaths.RESTORE_DIRECTORY,
     ),
+    resetRoot: File = File(
+        context.applicationContext.noBackupFilesDir,
+        RivenResetPaths.RESET_DIRECTORY,
+    ),
 ) {
     private val appContext = context.applicationContext
     private val paths = RivenRestorePaths(appContext, restoreRoot)
+    private val resetRootPath = resetRoot
     private val journal = RivenRestoreJournal(paths.journalFile)
 
     fun stageRestore(input: StageRivenRestoreInput): StageRivenRestoreResult {
+        if (RivenResetGate.isPending(appContext, resetRootPath)) {
+            return StageRivenRestoreResult.Failure(RivenArchiveRestoreError.FactoryResetPending)
+        }
         if (journal.exists() || paths.rollbackRoot.exists()) {
             return StageRivenRestoreResult.Failure(RivenArchiveRestoreError.RestoreAlreadyPending)
         }

@@ -13,11 +13,16 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.CancellationException
 
+internal const val RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME = "riven_archive_staging"
+
 class RivenArchiveExportService(
     context: Context,
     private val database: RivenDatabase,
     private val blobStore: FileAttachmentBlobStore = FileAttachmentBlobStore.fromContext(context),
-    private val stagingRoot: File = File(context.applicationContext.noBackupFilesDir, EXPORT_STAGING_DIRECTORY),
+    private val stagingRoot: File = File(
+        context.applicationContext.noBackupFilesDir,
+        RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME,
+    ),
 ) {
     fun export(input: ExportRivenArchiveInput): ExportRivenArchiveResult {
         val working = File(stagingRoot, UUID.randomUUID().toString())
@@ -213,7 +218,4 @@ class RivenArchiveExportService(
 
     private class ExportAbort(val error: RivenArchiveExportError) : RuntimeException()
 
-    private companion object {
-        const val EXPORT_STAGING_DIRECTORY = "riven_archive_staging"
-    }
 }
