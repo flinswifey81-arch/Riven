@@ -91,6 +91,10 @@ sealed interface ConversationTimelineError {
     ) : ConversationTimelineError
 
     data class DuplicateCanonicalExperience(val messageId: String) : ConversationTimelineError
+    data class InvalidCanonicalExperience(
+        val messageId: String,
+        val reasonCode: String,
+    ) : ConversationTimelineError
     data object ExperienceOrderOverflow : ConversationTimelineError
     data class ConversationExperienceStorageFailure(
         val messageId: String,

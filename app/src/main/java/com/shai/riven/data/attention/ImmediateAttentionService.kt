@@ -6,6 +6,7 @@ import com.shai.riven.data.conversation.ConversationTimelineService
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
+import com.shai.riven.data.persistence.entity.ExperienceMessageSourceEntity
 import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.AttentionSignal
 import com.shai.riven.data.persistence.model.AttentionSignalPolarity
@@ -193,16 +194,11 @@ class ImmediateAttentionService(
         var sourceMessage: AttentionSourceMessage? = null
         var context = emptyList<AttentionContextMessage>()
         var timelineRevision: Long? = null
+        if (experience.experienceType == ExperienceType.CONVERSATION_MESSAGE && sources.isEmpty()) {
+            abort(ImmediateAttentionError.InvalidConversationSourceProvenance(experienceId))
+        }
         if (sources.isNotEmpty()) {
-            val source = sources.singleOrNull()
-                ?: abort(ImmediateAttentionError.InvalidConversationSourceProvenance(experienceId))
-            if (source.sourceOrder != 0 ||
-                source.sourceRole != ExperienceMessageSourceRole.PRIMARY ||
-                source.characterStart != null ||
-                source.characterEnd != null
-            ) {
-                abort(ImmediateAttentionError.InvalidConversationSourceProvenance(experienceId))
-            }
+            val source = requireValidConversationSource(experienceId, sources)
             val message = timelineDao.message(source.messageId)
                 ?: abort(ImmediateAttentionError.MissingConversationSource(experienceId, source.messageId))
             val timeline = activeTimeline(message.conversationId)
@@ -252,7 +248,18 @@ class ImmediateAttentionService(
         if (experience.experienceType == ExperienceType.MANUAL_MEMORY_INTENT) {
             abort(ImmediateAttentionError.AlreadyConsumedManualMemoryIntent(snapshot.experienceId))
         }
-        val source = snapshot.sourceMessage ?: return
+        val storedSources = memoryDao.messageSourcesForExperience(snapshot.experienceId)
+        val source = snapshot.sourceMessage
+        if (source == null) {
+            if (experience.experienceType == ExperienceType.CONVERSATION_MESSAGE || storedSources.isNotEmpty()) {
+                abort(ImmediateAttentionError.InvalidConversationSourceProvenance(snapshot.experienceId))
+            }
+            return
+        }
+        val storedSource = requireValidConversationSource(snapshot.experienceId, storedSources)
+        if (storedSource.messageId != source.messageId) {
+            abort(ImmediateAttentionError.InvalidConversationSourceProvenance(snapshot.experienceId))
+        }
         val currentMessage = timelineDao.message(source.messageId)
             ?: abort(ImmediateAttentionError.MissingConversationSource(snapshot.experienceId, source.messageId))
         val timeline = activeTimeline(currentMessage.conversationId)
@@ -270,10 +277,22 @@ class ImmediateAttentionService(
         if (timeline.messages.none { it.id == source.messageId }) {
             abort(ImmediateAttentionError.InactiveConversationSource(snapshot.experienceId, source.messageId))
         }
-        val storedSources = memoryDao.messageSourcesForExperience(snapshot.experienceId)
-        if (storedSources.size != 1 || storedSources.single().messageId != source.messageId) {
-            abort(ImmediateAttentionError.InvalidConversationSourceProvenance(snapshot.experienceId))
+    }
+
+    private fun requireValidConversationSource(
+        experienceId: String,
+        sources: List<ExperienceMessageSourceEntity>,
+    ): ExperienceMessageSourceEntity {
+        val source = sources.singleOrNull()
+        if (source == null ||
+            source.sourceOrder != 0 ||
+            source.sourceRole != ExperienceMessageSourceRole.PRIMARY ||
+            source.characterStart != null ||
+            source.characterEnd != null
+        ) {
+            abort(ImmediateAttentionError.InvalidConversationSourceProvenance(experienceId))
         }
+        return source
     }
 
     private fun activeTimeline(conversationId: String): ConversationTimelineService.ActiveTimelineSnapshot = try {

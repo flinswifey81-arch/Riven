@@ -93,8 +93,6 @@ interface MemoryDao {
         INNER JOIN experience_message_sources
             ON experience_message_sources.experience_id = experiences.experience_id
         WHERE experience_message_sources.message_id = :messageId
-          AND experience_message_sources.source_order = 0
-          AND experience_message_sources.source_role = 'PRIMARY'
           AND experiences.experience_type IN ('CONVERSATION_MESSAGE', 'TOOL_RESULT')
         ORDER BY experiences.event_order
         """,

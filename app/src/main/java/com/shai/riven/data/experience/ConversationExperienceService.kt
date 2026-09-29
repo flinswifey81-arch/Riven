@@ -32,22 +32,18 @@ class ConversationExperienceService(
 
     suspend fun conversationExperienceForMessage(messageId: String): ConversationExperienceLookupResult = try {
         database.withTransaction {
-            if (timelineDao.message(messageId) == null) {
+            val message = timelineDao.message(messageId)
+            if (message == null) {
                 return@withTransaction ConversationExperienceLookupResult.Failure(
                     ConversationExperienceError.MissingMessage(messageId),
                 )
             }
-            when (val experiences = canonicalExperiences(messageId)) {
-                emptyList<ExperienceEntity>() -> ConversationExperienceLookupResult.NotRecorded(messageId)
-                else -> if (experiences.size == 1) {
-                    ConversationExperienceLookupResult.Found(experiences.single())
-                } else {
-                    ConversationExperienceLookupResult.Failure(
-                        ConversationExperienceError.DuplicateCanonicalExperience(messageId),
-                    )
-                }
-            }
+            canonicalExperienceOrNull(message, mapping(message))
+                ?.let(ConversationExperienceLookupResult::Found)
+                ?: ConversationExperienceLookupResult.NotRecorded(messageId)
         }
+    } catch (abort: ConversationExperienceAbort) {
+        ConversationExperienceLookupResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (failure: Exception) {
@@ -64,7 +60,7 @@ class ConversationExperienceService(
         recordedAt: Long,
         limit: Int,
     ): EnsureConversationExperiencesResult {
-        if (limit !in 1..MAX_ACTIVE_EXPERIENCE_CATCH_UP_MESSAGES) {
+        if (limit !in 1..MAX_ACTIVE_EXPERIENCE_CATCH_UP_CREATIONS) {
             return EnsureConversationExperiencesResult.Failure(ConversationExperienceError.InvalidLimit(limit))
         }
         return try {
@@ -76,20 +72,29 @@ class ConversationExperienceService(
                 }
                 val created = mutableListOf<String>()
                 val existing = mutableListOf<String>()
-                val inspected = timeline.messages.take(limit)
-                inspected.forEach { message ->
-                    when (val result = recordMessageInCurrentTransaction(message, recordedAt)) {
-                        is ConversationExperienceRecordResult.Created -> created += result.experience.id
-                        is ConversationExperienceRecordResult.AlreadyRecorded -> existing += result.experience.id
-                        is ConversationExperienceRecordResult.NotEligible -> Unit
+                var inspectedMessageCount = 0
+                var truncated = false
+                for (message in timeline.messages) {
+                    inspectedMessageCount += 1
+                    val expected = mapping(message)
+                    val alreadyRecorded = canonicalExperienceOrNull(message, expected)
+                    if (alreadyRecorded != null) {
+                        if (existing.size < limit) existing += alreadyRecorded.id
+                        continue
                     }
+                    if (expected == null) continue
+                    if (created.size == limit) {
+                        truncated = true
+                        break
+                    }
+                    created += insertCanonicalExperience(message, recordedAt, expected).id
                 }
                 EnsureConversationExperiencesResult.Ensured(
                     conversationId = conversationId,
                     createdExperienceIds = created,
                     alreadyRecordedExperienceIds = existing,
-                    inspectedMessageCount = inspected.size,
-                    truncated = timeline.messages.size > inspected.size,
+                    inspectedMessageCount = inspectedMessageCount,
+                    truncated = truncated,
                 )
             }
         } catch (abort: ConversationExperienceAbort) {
@@ -110,15 +115,21 @@ class ConversationExperienceService(
         message: MessageEntity,
         recordedAt: Long,
     ): ConversationExperienceRecordResult {
-        val mapping = mapping(message) ?: return ConversationExperienceRecordResult.NotEligible(message.id)
-        val existing = canonicalExperiences(message.id)
-        if (existing.size > 1) {
-            throw ConversationExperienceAbort(
-                ConversationExperienceError.DuplicateCanonicalExperience(message.id),
-            )
+        val mapping = mapping(message)
+        canonicalExperienceOrNull(message, mapping)?.let {
+            return ConversationExperienceRecordResult.AlreadyRecorded(it)
         }
-        existing.singleOrNull()?.let { return ConversationExperienceRecordResult.AlreadyRecorded(it) }
+        if (mapping == null) return ConversationExperienceRecordResult.NotEligible(message.id)
+        return ConversationExperienceRecordResult.Created(
+            insertCanonicalExperience(message, recordedAt, mapping),
+        )
+    }
 
+    private fun insertCanonicalExperience(
+        message: MessageEntity,
+        recordedAt: Long,
+        mapping: Pair<ExperienceType, ExperienceActor>,
+    ): ExperienceEntity {
         val eventOrder = try {
             orderAllocator.next()
         } catch (_: ExperienceOrderOverflowException) {
@@ -172,11 +183,73 @@ class ConversationExperienceService(
                 ),
             )
         }
-        return ConversationExperienceRecordResult.Created(experience)
+        return experience
     }
 
     private fun canonicalExperiences(messageId: String): List<ExperienceEntity> =
         memoryDao.canonicalConversationExperiencesForMessage(messageId)
+
+    private fun canonicalExperienceOrNull(
+        message: MessageEntity,
+        expected: Pair<ExperienceType, ExperienceActor>?,
+    ): ExperienceEntity? {
+        val experiences = canonicalExperiences(message.id)
+        if (experiences.size > 1) {
+            throw ConversationExperienceAbort(
+                ConversationExperienceError.DuplicateCanonicalExperience(message.id),
+            )
+        }
+        return experiences.singleOrNull()?.also { experience ->
+            if (expected == null) {
+                throw ConversationExperienceAbort(
+                    ConversationExperienceError.InvalidCanonicalExperience(
+                        message.id,
+                        InvalidCanonicalExperienceReason.MESSAGE_NOT_ELIGIBLE,
+                    ),
+                )
+            }
+            validateCanonicalExperience(message, experience, expected)
+        }
+    }
+
+    private fun validateCanonicalExperience(
+        message: MessageEntity,
+        experience: ExperienceEntity,
+        expected: Pair<ExperienceType, ExperienceActor>,
+    ) {
+        val reason = when {
+            experience.experienceType != expected.first -> InvalidCanonicalExperienceReason.TYPE_MISMATCH
+            experience.actor != expected.second -> InvalidCanonicalExperienceReason.ACTOR_MISMATCH
+            experience.sourceContent != message.content -> InvalidCanonicalExperienceReason.SOURCE_CONTENT_MISMATCH
+            experience.occurredAt != message.createdAt -> InvalidCanonicalExperienceReason.OCCURRED_AT_MISMATCH
+            experience.actorEntityId != null -> InvalidCanonicalExperienceReason.ACTOR_ENTITY_MISMATCH
+            experience.sensitivity != SensitivityLevel.STANDARD -> InvalidCanonicalExperienceReason.SENSITIVITY_MISMATCH
+            else -> {
+                val sources = memoryDao.messageSourcesForExperience(experience.id)
+                if (sources.size != 1) {
+                    InvalidCanonicalExperienceReason.SOURCE_COUNT_MISMATCH
+                } else {
+                    val source = sources.single()
+                    if (source.messageId != message.id ||
+                        source.sourceOrder != 0 ||
+                        source.sourceRole != ExperienceMessageSourceRole.PRIMARY ||
+                        source.characterStart != null ||
+                        source.characterEnd != null ||
+                        source.createdAt != experience.recordedAt
+                    ) {
+                        InvalidCanonicalExperienceReason.SOURCE_SHAPE_MISMATCH
+                    } else {
+                        null
+                    }
+                }
+            }
+        }
+        if (reason != null) {
+            throw ConversationExperienceAbort(
+                ConversationExperienceError.InvalidCanonicalExperience(message.id, reason),
+            )
+        }
+    }
 
     private fun mapping(message: MessageEntity): Pair<ExperienceType, ExperienceActor>? {
         if (message.deliveryState != MessageDeliveryState.PERSISTED &&

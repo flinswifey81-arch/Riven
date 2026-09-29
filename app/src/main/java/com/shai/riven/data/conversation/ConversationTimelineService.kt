@@ -448,6 +448,13 @@ class ConversationTimelineService(
             when (val error = experienceAbort.error) {
                 is ConversationExperienceError.DuplicateCanonicalExperience ->
                     abort(ConversationTimelineError.DuplicateCanonicalExperience(error.messageId))
+                is ConversationExperienceError.InvalidCanonicalExperience ->
+                    abort(
+                        ConversationTimelineError.InvalidCanonicalExperience(
+                            messageId = error.messageId,
+                            reasonCode = error.reason.name,
+                        ),
+                    )
                 ConversationExperienceError.ExperienceOrderOverflow ->
                     abort(ConversationTimelineError.ExperienceOrderOverflow)
                 is ConversationExperienceError.StorageFailure ->

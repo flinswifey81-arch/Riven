@@ -175,6 +175,18 @@ class ImmediateAttentionServiceTest {
     }
 
     @Test
+    fun conversationExperienceWithoutMessageSourceIsRejected() = runBlocking {
+        val id = insertExperience("source-less", ExperienceType.CONVERSATION_MESSAGE)
+
+        val error = failure(assess(id))
+
+        assertEquals(ImmediateAttentionError.InvalidConversationSourceProvenance(id), error)
+        assertTrue(analyzer.snapshots.isEmpty())
+        assertEquals(0L, rowCount("experience_attention_assessments"))
+        assertEquals(0L, rowCount("experience_attention_signals"))
+    }
+
+    @Test
     fun analyzerFailureIsTypedAndPersistsNothing() = runBlocking {
         val id = sourceExperience()
         analyzer.failure = IllegalStateException("must not escape")
@@ -326,6 +338,23 @@ class ImmediateAttentionServiceTest {
         }
         assertTrue(failure(assess(id)) is ImmediateAttentionError.StaleAttentionContext)
         assertEquals(0L, rowCount("experience_attention_assessments"))
+    }
+
+    @Test
+    fun provenanceChangeDuringAnalyzerIsRejectedWithoutAssessmentMutation() = runBlocking {
+        val id = sourceExperience()
+        analyzer.beforeReturn = {
+            database.openHelper.writableDatabase.execSQL(
+                "UPDATE experience_message_sources SET source_role='SUPPORTING' WHERE experience_id='$id'",
+            )
+        }
+
+        val error = failure(assess(id))
+
+        assertEquals(ImmediateAttentionError.InvalidConversationSourceProvenance(id), error)
+        assertEquals(1, analyzer.snapshots.size)
+        assertEquals(0L, rowCount("experience_attention_assessments"))
+        assertEquals(0L, rowCount("experience_attention_signals"))
     }
 
     @Test

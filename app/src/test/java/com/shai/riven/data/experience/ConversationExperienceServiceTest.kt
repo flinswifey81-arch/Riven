@@ -21,6 +21,7 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntity
+import com.shai.riven.data.persistence.entity.ExperienceMessageSourceEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
@@ -251,6 +252,121 @@ class ConversationExperienceServiceTest {
     }
 
     @Test
+    fun catchUpProgressesAcrossMultipleBatches() = runBlocking {
+        createHistoricalConversation(*(1..5).map { message("message-$it", at = it.toLong()) }.toTypedArray())
+
+        val first = ensured(limit = 2)
+        val second = ensured(limit = 2)
+        val third = ensured(limit = 2)
+        val fourth = ensured(limit = 2)
+
+        assertEquals(2, first.createdExperienceIds.size)
+        assertTrue(first.truncated)
+        assertEquals(2, second.createdExperienceIds.size)
+        assertTrue(second.truncated)
+        assertEquals(1, third.createdExperienceIds.size)
+        assertTrue(!third.truncated)
+        assertTrue(fourth.createdExperienceIds.isEmpty())
+        assertTrue(!fourth.truncated)
+        val canonical = (1..5).map { database.memoryDao().canonicalConversationExperiencesForMessage("message-$it").single() }
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L), canonical.map { it.eventOrder })
+        canonical.forEachIndexed { index, experience ->
+            val sources = database.memoryDao().messageSourcesForExperience(experience.id)
+            assertEquals("message-${index + 1}", sources.single().messageId)
+        }
+    }
+
+    @Test
+    fun catchUpSkippedPrefixDoesNotStarveLaterMissingMessages() = runBlocking {
+        createHistoricalConversation(
+            message("already", at = 1),
+            message("system", role = MessageRole.SYSTEM, at = 2),
+            message("pending", delivery = MessageDeliveryState.PENDING, at = 3),
+            message("later-one", at = 4),
+            message("later-two", at = 5),
+        )
+
+        assertTrue(ensured(limit = 1).truncated)
+        val second = ensured(limit = 1)
+        val third = ensured(limit = 1)
+
+        assertEquals(listOf("later-one"), second.createdExperienceIds.map(::messageIdForExperience))
+        assertTrue(second.truncated)
+        assertEquals(listOf("later-two"), third.createdExperienceIds.map(::messageIdForExperience))
+        assertTrue(!third.truncated)
+        assertTrue(second.inspectedMessageCount > 1)
+        assertEquals(3, database.memoryDao().experienceCount())
+    }
+
+    @Test
+    fun existingCanonicalExperienceWithWrongActorFailsLookupAndCatchUpTyped() = runBlocking {
+        createHistoricalConversation(message("message", at = 1))
+        insertApparentCanonical("message", actor = ExperienceActor.RIVEN)
+
+        assertInvalidCanonical("message", InvalidCanonicalExperienceReason.ACTOR_MISMATCH)
+        val catchUp = experiences.ensureActiveConversationExperiences("conversation", 10, 1)
+            as EnsureConversationExperiencesResult.Failure
+        assertEquals(
+            ConversationExperienceError.InvalidCanonicalExperience(
+                "message",
+                InvalidCanonicalExperienceReason.ACTOR_MISMATCH,
+            ),
+            catchUp.error,
+        )
+        assertEquals(1, database.memoryDao().experienceCount())
+    }
+
+    @Test
+    fun existingCanonicalExperienceWithWrongTypeFailsTyped() = runBlocking {
+        createHistoricalConversation(message("message", at = 1))
+        insertApparentCanonical("message", type = ExperienceType.TOOL_RESULT)
+        assertInvalidCanonical("message", InvalidCanonicalExperienceReason.TYPE_MISMATCH)
+    }
+
+    @Test
+    fun existingCanonicalExperienceWithWrongSourceContentFailsTyped() = runBlocking {
+        createHistoricalConversation(message("message", content = "exact", at = 1))
+        insertApparentCanonical("message", sourceContent = "different")
+        assertInvalidCanonical("message", InvalidCanonicalExperienceReason.SOURCE_CONTENT_MISMATCH)
+    }
+
+    @Test
+    fun existingCanonicalExperienceWithExtraSourceRowFailsTyped() = runBlocking {
+        createHistoricalConversation(message("message", at = 1), message("extra", at = 2))
+        insertApparentCanonical("message", extraMessageId = "extra")
+        assertInvalidCanonical("message", InvalidCanonicalExperienceReason.SOURCE_COUNT_MISMATCH)
+    }
+
+    @Test
+    fun deletedValidCanonicalExperienceIsAcceptedWithoutResurrection() = runBlocking {
+        createHistoricalConversation(message("message", at = 1))
+        insertApparentCanonical("message", availability = ExperienceAvailability.DELETED)
+
+        val lookup = experiences.conversationExperienceForMessage("message")
+        assertTrue(lookup is ConversationExperienceLookupResult.Found)
+        val catchUp = ensured(limit = 1)
+        assertTrue(catchUp.createdExperienceIds.isEmpty())
+        assertEquals(1, database.memoryDao().experienceCount())
+    }
+
+    @Test
+    fun ineligibleMessageWithApparentCanonicalExperienceFailsTyped() = runBlocking {
+        createHistoricalConversation(message("message", delivery = MessageDeliveryState.PENDING, at = 1))
+        insertApparentCanonical("message")
+
+        assertInvalidCanonical("message", InvalidCanonicalExperienceReason.MESSAGE_NOT_ELIGIBLE)
+        val catchUp = experiences.ensureActiveConversationExperiences("conversation", 10, 1)
+            as EnsureConversationExperiencesResult.Failure
+        assertEquals(
+            ConversationExperienceError.InvalidCanonicalExperience(
+                "message",
+                InvalidCanonicalExperienceReason.MESSAGE_NOT_ELIGIBLE,
+            ),
+            catchUp.error,
+        )
+    }
+
+    @Test
     fun catchUpIgnoresInactiveBranch() = runBlocking {
         createHistoricalConversation(message("root", at = 1), message("active", at = 2))
         database.conversationTimelineDao().insertMessage(message("inactive", at = 3).toEntity(3))
@@ -353,6 +469,65 @@ class ConversationExperienceServiceTest {
         val result = experiences.conversationExperienceForMessage(messageId)
         assertTrue("Expected Experience for $messageId but was $result", result is ConversationExperienceLookupResult.Found)
         return (result as ConversationExperienceLookupResult.Found).experience
+    }
+
+    private suspend fun ensured(limit: Int): EnsureConversationExperiencesResult.Ensured =
+        experiences.ensureActiveConversationExperiences("conversation", recordedAt = 10, limit = limit)
+            as EnsureConversationExperiencesResult.Ensured
+
+    private fun messageIdForExperience(experienceId: String): String =
+        database.memoryDao().messageSourcesForExperience(experienceId).single().messageId
+
+    private suspend fun assertInvalidCanonical(
+        messageId: String,
+        reason: InvalidCanonicalExperienceReason,
+    ) {
+        val result = experiences.conversationExperienceForMessage(messageId)
+            as ConversationExperienceLookupResult.Failure
+        assertEquals(ConversationExperienceError.InvalidCanonicalExperience(messageId, reason), result.error)
+    }
+
+    private fun insertApparentCanonical(
+        messageId: String,
+        type: ExperienceType = ExperienceType.CONVERSATION_MESSAGE,
+        actor: ExperienceActor = ExperienceActor.SHAI,
+        sourceContent: String = messageId,
+        availability: ExperienceAvailability = ExperienceAvailability.AVAILABLE,
+        extraMessageId: String? = null,
+    ) {
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = "apparent-$messageId",
+                eventOrder = 1,
+                experienceType = type,
+                actor = actor,
+                sourceContent = sourceContent,
+                occurredAt = 1,
+                recordedAt = 10,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = availability,
+            ),
+        )
+        database.memoryDao().insertExperienceMessageSource(
+            ExperienceMessageSourceEntity(
+                experienceId = "apparent-$messageId",
+                messageId = messageId,
+                sourceOrder = 0,
+                sourceRole = ExperienceMessageSourceRole.PRIMARY,
+                createdAt = 10,
+            ),
+        )
+        extraMessageId?.let {
+            database.memoryDao().insertExperienceMessageSource(
+                ExperienceMessageSourceEntity(
+                    experienceId = "apparent-$messageId",
+                    messageId = it,
+                    sourceOrder = 1,
+                    sourceRole = ExperienceMessageSourceRole.SUPPORTING,
+                    createdAt = 10,
+                ),
+            )
+        }
     }
 
     private fun experience(id: String, order: Long) = ExperienceEntity(
