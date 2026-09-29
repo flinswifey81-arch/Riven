@@ -13,13 +13,16 @@ internal data class RivenRestoreBootstrapHooks(
     val beforeDatabaseInstall: () -> Unit = {},
     val beforeAttachmentInstall: () -> Unit = {},
     val beforePostInstallVerification: () -> Unit = {},
+    val afterRollbackAttachmentsRestored: () -> Unit = {},
 )
 
 /**
  * Deterministic recovery policy:
  * - STAGED applies only while current state is untouched; partial moves converge by rolling back.
  * - CURRENT_MOVED_ASIDE, NEW_INSTALLED, and VERIFIED keep a fully verifiable installed state.
+ * - ROLLING_BACK always resumes rollback; it can never be reinterpreted as a successful install.
  * - Any unverifiable installed state rolls back when a known-good database exists.
+ * - An interrupted fresh install converges toward staged state when no known-good database exists.
  * - Missing journal/known-good material is fatal and leaves the restore gate in place.
  */
 class RivenRestoreBootstrap(
@@ -55,6 +58,10 @@ class RivenRestoreBootstrap(
                 RivenRestoreJournalStage.NEW_INSTALLED,
                 RivenRestoreJournalStage.VERIFIED,
                 -> recoverInstalledOrRollback(record)
+                RivenRestoreJournalStage.ROLLING_BACK -> rollback(
+                    record,
+                    RivenArchiveRestoreError.RecoveryFailure("ROLLBACK_RESUMED"),
+                )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -117,6 +124,11 @@ class RivenRestoreBootstrap(
             if (!verifyState(paths.canonicalDatabase, paths.canonicalAttachments) ||
                 paths.canonicalCredentials.exists()
             ) {
+                if (!activeRecord.hadDatabase) {
+                    return RivenRestoreBootstrapResult.Failure(
+                        RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_STATE_INVALID"),
+                    )
+                }
                 return rollback(
                     activeRecord,
                     RivenArchiveRestoreError.RestoreVerificationFailure("POST_INSTALL"),
@@ -139,6 +151,17 @@ class RivenRestoreBootstrap(
             } else {
                 RivenArchiveRestoreError.RestoreInstallFailure(failure.safeCauseType())
             }
+            if (!activeRecord.hadDatabase) {
+                return RivenRestoreBootstrapResult.Failure(
+                    RivenArchiveRestoreError.RecoveryFailure(
+                        if (verifying) {
+                            "FRESH_INSTALL_VERIFICATION_${failure.safeCauseType()}"
+                        } else {
+                            "FRESH_INSTALL_${failure.safeCauseType()}"
+                        },
+                    ),
+                )
+            }
             return rollback(activeRecord, trigger)
         }
     }
@@ -146,6 +169,9 @@ class RivenRestoreBootstrap(
     private fun recoverInstalledOrRollback(
         record: RivenRestoreJournalRecord,
     ): RivenRestoreBootstrapResult {
+        if (record.stage == RivenRestoreJournalStage.CURRENT_MOVED_ASIDE && !record.hadDatabase) {
+            return resumeFreshInstall(record)
+        }
         if (verifyState(paths.canonicalDatabase, paths.canonicalAttachments) &&
             !paths.canonicalCredentials.exists()
         ) {
@@ -153,10 +179,46 @@ class RivenRestoreBootstrap(
             finishSuccessfulRestore()
             return RivenRestoreBootstrapResult.RestoreApplied
         }
+        if (!record.hadDatabase) {
+            return RivenRestoreBootstrapResult.Failure(
+                RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_STATE_INVALID"),
+            )
+        }
         return rollback(
             record,
             RivenArchiveRestoreError.RecoveryFailure("INSTALLED_STATE_INVALID"),
         )
+    }
+
+    private fun resumeFreshInstall(
+        record: RivenRestoreJournalRecord,
+    ): RivenRestoreBootstrapResult {
+        if (!paths.canonicalDatabase.isFile) {
+            if (!paths.pendingDatabase.isFile) {
+                return RivenRestoreBootstrapResult.Failure(
+                    RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_DATABASE_MISSING"),
+                )
+            }
+            paths.canonicalDatabase.parentFile?.mkdirs()
+            moveReplacing(paths.pendingDatabase, paths.canonicalDatabase)
+        }
+        deletePath(paths.canonicalWal)
+        deletePath(paths.canonicalShm)
+        if (!paths.canonicalAttachments.exists() && paths.pendingAttachmentRoot.exists()) {
+            moveReplacing(paths.pendingAttachmentRoot, paths.canonicalAttachments)
+        }
+        deletePath(paths.canonicalCredentials)
+        journal.write(record.copy(stage = RivenRestoreJournalStage.NEW_INSTALLED))
+        if (!verifyState(paths.canonicalDatabase, paths.canonicalAttachments) ||
+            paths.canonicalCredentials.exists()
+        ) {
+            return RivenRestoreBootstrapResult.Failure(
+                RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_STATE_INVALID"),
+            )
+        }
+        journal.write(record.copy(stage = RivenRestoreJournalStage.VERIFIED))
+        finishSuccessfulRestore()
+        return RivenRestoreBootstrapResult.RestoreApplied
     }
 
     private fun rollback(
@@ -169,10 +231,12 @@ class RivenRestoreBootstrap(
             )
         }
         return try {
+            journal.write(record.copy(stage = RivenRestoreJournalStage.ROLLING_BACK))
             restoreComponent(record.hadDatabase, paths.rollbackDatabase, paths.canonicalDatabase)
             restoreComponent(record.hadWal, paths.rollbackWal, paths.canonicalWal)
             restoreComponent(record.hadShm, paths.rollbackShm, paths.canonicalShm)
             restoreComponent(record.hadAttachments, paths.rollbackAttachments, paths.canonicalAttachments)
+            hooks.afterRollbackAttachmentsRestored()
             restoreComponent(record.hadCredentials, paths.rollbackCredentials, paths.canonicalCredentials)
             if (!verifyState(paths.canonicalDatabase, paths.canonicalAttachments)) {
                 return RivenRestoreBootstrapResult.Failure(

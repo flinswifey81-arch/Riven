@@ -11,6 +11,7 @@ internal enum class RivenRestoreJournalStage {
     CURRENT_MOVED_ASIDE,
     NEW_INSTALLED,
     VERIFIED,
+    ROLLING_BACK,
 }
 
 internal data class RivenRestoreJournalRecord(

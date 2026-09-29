@@ -12,12 +12,15 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
+import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.DerivedArtifactType
 import com.shai.riven.data.persistence.model.GeneratedMediaKind
+import com.shai.riven.data.persistence.model.RepairJobState
+import com.shai.riven.data.persistence.model.RepairJobType
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -444,6 +447,78 @@ class RivenArchiveExportAndStageTest {
             assertEquals(DerivedArtifactState.REBUILD_PENDING, artifact.state)
             assertNull(artifact.artifactHash)
             assertEquals(777L, artifact.invalidatedAt)
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun stageRequeuesOnlyRunningRepairJobsWithoutExecutingHandlers() {
+        val jobs = listOf(
+            RepairJobEntity(
+                id = "pending",
+                jobType = RepairJobType.REASSESS_PROVENANCE,
+                state = RepairJobState.PENDING,
+                targetType = "memory",
+                targetId = "pending-target",
+                attemptCount = 1,
+                createdAt = 11,
+                updatedAt = 12,
+                lastErrorCode = "PENDING_ERROR",
+            ),
+            RepairJobEntity(
+                id = "running",
+                jobType = RepairJobType.INVALIDATE_DERIVED,
+                state = RepairJobState.RUNNING,
+                targetType = "memory",
+                targetId = "running-target",
+                attemptCount = 2,
+                createdAt = 21,
+                updatedAt = 22,
+                lastErrorCode = "OLD_RUNNING_ERROR",
+            ),
+            RepairJobEntity(
+                id = "succeeded",
+                jobType = RepairJobType.REBUILD_DERIVED,
+                state = RepairJobState.SUCCEEDED,
+                targetType = "artifact",
+                targetId = "succeeded-target",
+                attemptCount = 3,
+                createdAt = 31,
+                updatedAt = 32,
+                lastErrorCode = null,
+            ),
+            RepairJobEntity(
+                id = "failed",
+                jobType = RepairJobType.PROPAGATE_CORRECTION,
+                state = RepairJobState.FAILED,
+                targetType = "memory",
+                targetId = "failed-target",
+                attemptCount = 4,
+                createdAt = 41,
+                updatedAt = 42,
+                lastErrorCode = "PERMANENT_FAILURE",
+            ),
+        )
+        jobs.forEach(database.maintenanceDao()::insertRepairJob)
+
+        assertTrue(stage(validArchive(), occurredAt = 777) is StageRivenRestoreResult.RestoreStaged)
+        val staged = RivenDatabase.buildNamedForRestoreValidation(
+            context,
+            RivenRestorePaths(context, File(root, "restore")).pendingDatabase.absolutePath,
+        )
+        try {
+            assertEquals(jobs[0], staged.maintenanceDao().repairJob("pending"))
+            assertEquals(
+                jobs[1].copy(
+                    state = RepairJobState.PENDING,
+                    updatedAt = 777,
+                    lastErrorCode = "RESTORE_REQUEUED",
+                ),
+                staged.maintenanceDao().repairJob("running"),
+            )
+            assertEquals(jobs[2], staged.maintenanceDao().repairJob("succeeded"))
+            assertEquals(jobs[3], staged.maintenanceDao().repairJob("failed"))
         } finally {
             staged.close()
         }

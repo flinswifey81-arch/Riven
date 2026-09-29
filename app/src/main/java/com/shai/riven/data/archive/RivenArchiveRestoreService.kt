@@ -301,6 +301,14 @@ class RivenArchiveRestoreService(
                     "SET state = 'REBUILD_PENDING', artifact_hash = NULL, invalidated_at = ?",
                 arrayOf(occurredAt),
             )
+            // WorkManager execution state is intentionally not portable. Requeue only jobs that
+            // were RUNNING in the archived database without counting restore as another attempt.
+            sqlite.execSQL(
+                "UPDATE repair_jobs " +
+                    "SET state = 'PENDING', updated_at = ?, last_error_code = 'RESTORE_REQUEUED' " +
+                    "WHERE state = 'RUNNING'",
+                arrayOf(occurredAt),
+            )
             restored.attachmentDao().allAttachments()
         } catch (cancelled: CancellationException) {
             throw cancelled

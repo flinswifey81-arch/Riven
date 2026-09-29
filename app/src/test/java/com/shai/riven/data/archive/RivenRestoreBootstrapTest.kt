@@ -199,6 +199,43 @@ class RivenRestoreBootstrapTest {
     }
 
     @Test
+    fun recoveryResumesRollbackAfterDatabaseAndAttachmentsWereAlreadyRestored() {
+        prepareOldState(withAttachment = true, withCredential = true)
+        stageValidArchive()
+        val interrupted = bootstrap().apply {
+            hooks = RivenRestoreBootstrapHooks(
+                beforePostInstallVerification = { error("force rollback") },
+                afterRollbackAttachmentsRestored = { error("simulate process death") },
+            )
+        }
+
+        assertTrue(interrupted.recoverAndApply() is RivenRestoreBootstrapResult.Failure)
+        assertEquals(RivenRestoreJournalStage.ROLLING_BACK, checkNotNull(journal().read()).stage)
+        assertTrue(canonicalConversationExists("old-conversation"))
+        assertFalse(canonicalConversationExists("new-conversation"))
+        assertEquals("old attachment", File(paths.canonicalAttachments, "old.txt").readText())
+        assertFalse(paths.canonicalCredentials.exists())
+        assertTrue(paths.rollbackCredentials.exists())
+
+        val resumed = bootstrap().recoverAndApply()
+
+        assertEquals(
+            RivenRestoreBootstrapResult.PreviousStateRestored(
+                RivenArchiveRestoreError.RecoveryFailure("ROLLBACK_RESUMED"),
+            ),
+            resumed,
+        )
+        assertTrue(canonicalConversationExists("old-conversation"))
+        assertFalse(canonicalConversationExists("new-conversation"))
+        assertEquals("old attachment", File(paths.canonicalAttachments, "old.txt").readText())
+        assertEquals("old-credential", File(paths.canonicalCredentials, "old.cred").readText())
+        assertFalse(paths.rollbackRoot.exists())
+        assertFalse(paths.pendingRoot.exists())
+        assertFalse(paths.journalFile.exists())
+        assertFalse(RivenRestoreGate.isPending(context, restoreRoot))
+    }
+
+    @Test
     fun recoveryFromStagedJournalAppliesRestore() {
         prepareOldState()
         stageValidArchive()
@@ -255,7 +292,46 @@ class RivenRestoreBootstrapTest {
     }
 
     @Test
-    fun unrecoverableStateReturnsTypedFatalErrorAndKeepsGate() {
+    fun freshInstallRecoveryAfterCurrentMovedAsideInstallsPendingState() {
+        stageValidArchive()
+        val record = checkNotNull(journal().read())
+        journal().write(record.copy(stage = RivenRestoreJournalStage.CURRENT_MOVED_ASIDE))
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertTrue(canonicalConversationExists("new-conversation"))
+        assertArrayEquals(
+            "restored attachment bytes".toByteArray(),
+            File(paths.canonicalAttachments, "attachments/new-attachment.blob").readBytes(),
+        )
+        assertFalse(paths.canonicalCredentials.exists())
+        assertFalse(paths.journalFile.exists())
+        assertFalse(RivenRestoreGate.isPending(context, restoreRoot))
+    }
+
+    @Test
+    fun freshInstallRecoveryInstallsPendingAttachmentsAfterDatabaseWasInstalled() {
+        stageValidArchive()
+        val record = checkNotNull(journal().read())
+        paths.canonicalDatabase.parentFile?.mkdirs()
+        moveReplacing(paths.pendingDatabase, paths.canonicalDatabase)
+        journal().write(record.copy(stage = RivenRestoreJournalStage.CURRENT_MOVED_ASIDE))
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertTrue(canonicalConversationExists("new-conversation"))
+        assertArrayEquals(
+            "restored attachment bytes".toByteArray(),
+            File(paths.canonicalAttachments, "attachments/new-attachment.blob").readBytes(),
+        )
+        assertFalse(paths.journalFile.exists())
+        assertFalse(RivenRestoreGate.isPending(context, restoreRoot))
+    }
+
+    @Test
+    fun freshInstallRecoveryWithMissingDatabaseReturnsTypedFailureAndKeepsGate() {
         stageValidArchive()
         val record = checkNotNull(journal().read())
         paths.pendingDatabase.delete()
@@ -265,12 +341,36 @@ class RivenRestoreBootstrapTest {
 
         assertEquals(
             RivenRestoreBootstrapResult.Failure(
-                RivenArchiveRestoreError.RecoveryFailure("NO_KNOWN_GOOD_DATABASE"),
+                RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_DATABASE_MISSING"),
             ),
             result,
         )
         assertTrue(paths.journalFile.isFile)
         assertFalse(paths.canonicalDatabase.exists())
+        assertTrue(RivenRestoreGate.isPending(context, restoreRoot))
+    }
+
+    @Test
+    fun invalidNewInstalledFreshStateReturnsTypedFailureAndKeepsGate() {
+        stageValidArchive()
+        val record = checkNotNull(journal().read())
+        paths.canonicalDatabase.parentFile?.mkdirs()
+        moveReplacing(paths.pendingDatabase, paths.canonicalDatabase)
+        moveReplacing(paths.pendingAttachmentRoot, paths.canonicalAttachments)
+        journal().write(record.copy(stage = RivenRestoreJournalStage.NEW_INSTALLED))
+        assertTrue(paths.canonicalDatabase.delete())
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(
+            RivenRestoreBootstrapResult.Failure(
+                RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_STATE_INVALID"),
+            ),
+            result,
+        )
+        assertTrue(paths.journalFile.isFile)
+        assertFalse(paths.canonicalDatabase.exists())
+        assertTrue(RivenRestoreGate.isPending(context, restoreRoot))
     }
 
     @Test
