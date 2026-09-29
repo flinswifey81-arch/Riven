@@ -66,7 +66,7 @@ class RivenResetBootstrapTest {
         val fresh = openCanonicalDatabase()
         try {
             val counts = applicationTableCounts(fresh)
-            assertEquals(34, counts.size)
+            assertEquals(36, counts.size)
             assertTrue(counts.values.all { it == 0L })
         } finally {
             fresh.close()
@@ -97,11 +97,50 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun emptyDatabaseVerifierAcceptsFreshThirtyFourTableVersionSixDatabase() {
+    fun emptyDatabaseVerifierAcceptsFreshThirtySixTableVersionSevenDatabase() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         fresh.close()
 
+        assertTrue(
+            RivenEmptyDatabaseVerifier.verify(
+                context,
+                context.getDatabasePath(RivenDatabase.DATABASE_NAME),
+            ),
+        )
+    }
+
+    @Test
+    fun factoryResetClearsAttentionAssessmentAndSignalTables() {
+        seedCanonicalState()
+        val seeded = openCanonicalDatabase()
+        try {
+            assertEquals(1L, applicationTableCounts(seeded).getValue("experience_attention_assessments"))
+            assertEquals(1L, applicationTableCounts(seeded).getValue("experience_attention_signals"))
+        } finally {
+            seeded.close()
+        }
+        stageReset()
+
+        assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
+        val fresh = openCanonicalDatabase()
+        try {
+            assertEquals(0L, applicationTableCounts(fresh).getValue("experience_attention_assessments"))
+            assertEquals(0L, applicationTableCounts(fresh).getValue("experience_attention_signals"))
+        } finally {
+            fresh.close()
+        }
+    }
+
+    @Test
+    fun freshVersionSevenResetDatabaseHasExactlyThirtySixEmptyApplicationTables() {
+        val fresh = openCanonicalDatabase()
+        fresh.openHelper.writableDatabase
+        val counts = applicationTableCounts(fresh)
+        fresh.close()
+
+        assertEquals(36, counts.size)
+        assertTrue(counts.values.all { it == 0L })
         assertTrue(
             RivenEmptyDatabaseVerifier.verify(
                 context,

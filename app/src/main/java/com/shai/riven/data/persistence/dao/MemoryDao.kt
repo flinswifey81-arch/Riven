@@ -87,6 +87,23 @@ interface MemoryDao {
     @Query("SELECT * FROM experience_message_sources WHERE experience_id = :experienceId ORDER BY source_order")
     fun messageSourcesForExperience(experienceId: String): List<ExperienceMessageSourceEntity>
 
+    @Query(
+        """
+        SELECT experiences.* FROM experiences
+        INNER JOIN experience_message_sources
+            ON experience_message_sources.experience_id = experiences.experience_id
+        WHERE experience_message_sources.message_id = :messageId
+          AND experience_message_sources.source_order = 0
+          AND experience_message_sources.source_role = 'PRIMARY'
+          AND experiences.experience_type IN ('CONVERSATION_MESSAGE', 'TOOL_RESULT')
+        ORDER BY experiences.event_order
+        """,
+    )
+    fun canonicalConversationExperiencesForMessage(messageId: String): List<ExperienceEntity>
+
+    @Query("SELECT * FROM experience_entity_links WHERE experience_id = :experienceId ORDER BY entity_id, role")
+    fun entityLinksForExperience(experienceId: String): List<ExperienceEntityLinkEntity>
+
     @Query("SELECT COUNT(*) FROM candidate_memory_evidence WHERE candidate_memory_id = :candidateMemoryId")
     fun candidateMemoryEvidenceCount(candidateMemoryId: String): Int
 

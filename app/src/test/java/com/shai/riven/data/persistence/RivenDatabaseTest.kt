@@ -117,6 +117,8 @@ class RivenDatabaseTest {
             "provider_profile_capabilities",
             "conversation_drafts",
             "draft_attachments",
+            "experience_attention_assessments",
+            "experience_attention_signals",
         )
 
         val actualTables = database.openHelper.writableDatabase

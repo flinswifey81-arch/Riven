@@ -21,6 +21,8 @@ import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationDraftEntity
 import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileCapabilityEntity
@@ -29,6 +31,9 @@ import com.shai.riven.data.persistence.entity.ShaiSystemInstructionsEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.AttentionOutcome
+import com.shai.riven.data.persistence.model.AttentionSignal
+import com.shai.riven.data.persistence.model.AttentionSignalPolarity
 import com.shai.riven.data.persistence.model.ConversationStatus
 import com.shai.riven.data.persistence.model.EpistemicBasis
 import com.shai.riven.data.persistence.model.ExperienceActor
@@ -141,6 +146,23 @@ internal fun seedRepresentativeState(database: RivenDatabase) {
             recordedAt = 1,
             sensitivity = SensitivityLevel.STANDARD,
             availability = ExperienceAvailability.AVAILABLE,
+        ),
+    )
+    database.experienceAttentionDao().insertAssessment(
+        ExperienceAttentionAssessmentEntity(
+            experienceId = "experience",
+            outcome = AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+            revision = 1,
+            createdAt = 1,
+            updatedAt = 1,
+        ),
+    )
+    database.experienceAttentionDao().insertSignal(
+        ExperienceAttentionSignalEntity(
+            experienceId = "experience",
+            signal = AttentionSignal.IDENTITY,
+            polarity = AttentionSignalPolarity.POSITIVE,
+            createdAt = 1,
         ),
     )
     database.memoryDao().insertMemory(

@@ -177,7 +177,7 @@ class RivenResetBootstrap(
 }
 
 internal object RivenEmptyDatabaseVerifier {
-    private const val EXPECTED_APPLICATION_TABLE_COUNT = 34
+    private const val EXPECTED_APPLICATION_TABLE_COUNT = 36
 
     fun verify(context: Context, databaseFile: File): Boolean = runCatching {
         require(databaseFile.isFile)

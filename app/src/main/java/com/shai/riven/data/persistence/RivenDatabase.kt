@@ -8,6 +8,7 @@ import androidx.room.TypeConverters
 import com.shai.riven.data.persistence.dao.ConversationDao
 import com.shai.riven.data.persistence.dao.ConversationDraftDao
 import com.shai.riven.data.persistence.dao.ConversationTimelineDao
+import com.shai.riven.data.persistence.dao.ExperienceAttentionDao
 import com.shai.riven.data.persistence.dao.AttachmentDao
 import com.shai.riven.data.persistence.dao.MaintenanceDao
 import com.shai.riven.data.persistence.dao.MemoryDao
@@ -29,6 +30,8 @@ import com.shai.riven.data.persistence.entity.DerivedArtifactMemoryDependencyEnt
 import com.shai.riven.data.persistence.entity.DerivedArtifactMessageDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactOpenLoopDependencyEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntityLinkEntity
 import com.shai.riven.data.persistence.entity.ExperienceMessageSourceEntity
 import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
@@ -88,8 +91,10 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         ProviderProfileCapabilityEntity::class,
         ConversationDraftEntity::class,
         DraftAttachmentEntity::class,
+        ExperienceAttentionAssessmentEntity::class,
+        ExperienceAttentionSignalEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -100,6 +105,8 @@ abstract class RivenDatabase : RoomDatabase() {
     abstract fun conversationDraftDao(): ConversationDraftDao
 
     abstract fun memoryDao(): MemoryDao
+
+    abstract fun experienceAttentionDao(): ExperienceAttentionDao
 
     abstract fun openLoopDao(): OpenLoopDao
 
@@ -146,6 +153,7 @@ abstract class RivenDatabase : RoomDatabase() {
             MIGRATION_3_4,
             MIGRATION_4_5,
             MIGRATION_5_6,
+            MIGRATION_6_7,
         )
     }
 }

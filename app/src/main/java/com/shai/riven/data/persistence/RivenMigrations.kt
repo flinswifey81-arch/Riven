@@ -270,3 +270,37 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
         )
     }
 }
+
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `experience_attention_assessments` (
+                `experience_id` TEXT NOT NULL,
+                `outcome` TEXT NOT NULL,
+                `revision` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`experience_id`),
+                FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `experience_attention_signals` (
+                `experience_id` TEXT NOT NULL,
+                `signal` TEXT NOT NULL,
+                `polarity` TEXT NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                PRIMARY KEY(`experience_id`, `signal`, `polarity`),
+                FOREIGN KEY(`experience_id`) REFERENCES `experience_attention_assessments`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_experience_attention_signals_signal` " +
+                "ON `experience_attention_signals` (`signal`)",
+        )
+    }
+}

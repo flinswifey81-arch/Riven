@@ -645,13 +645,86 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun historicalSchemaExportsOneThroughFiveRemainByteIdentical() {
+    fun migrationSixToSevenPreservesCanonicalRowsAndCreatesEmptyAttentionTables() {
+        migrationHelper.createDatabase(6).apply {
+            execSQL(
+                "INSERT INTO experiences (experience_id, event_order, experience_type, actor, " +
+                    "occurred_at, recorded_at, sensitivity, availability) VALUES " +
+                    "('experience-v6', 1, 'OTHER', 'OTHER', 1, 1, 'STANDARD', 'AVAILABLE')",
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 7,
+            migrations = listOf(MIGRATION_6_7),
+        )
+
+        assertEquals(1L, migrated.rowCount("experiences"))
+        assertEquals(0L, migrated.rowCount("experience_attention_assessments"))
+        assertEquals(0L, migrated.rowCount("experience_attention_signals"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationOneToSevenRunsCanonicalFullChainWithoutInventingAttention() {
+        migrationHelper.createDatabase(1).apply {
+            execSQL("INSERT INTO conversations VALUES ('conversation-v1-v7', 1, 1, 'ACTIVE', 'Preserved')")
+            execSQL(
+                "INSERT INTO messages (message_id, conversation_id, sequence_number, role, delivery_state, " +
+                    "content, created_at, updated_at) VALUES " +
+                    "('message-v1-v7', 'conversation-v1-v7', 1, 'USER', 'PERSISTED', 'Exact', 1, 1)",
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 7,
+            migrations = listOf(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+            ),
+        )
+
+        assertEquals("Exact", migrated.singleString("SELECT content FROM messages WHERE message_id='message-v1-v7'"))
+        assertEquals(0L, migrated.rowCount("experience_attention_assessments"))
+        assertEquals(0L, migrated.rowCount("experience_attention_signals"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationSixToSevenCreatesRequiredAttentionForeignKeysAndSignalIndex() {
+        migrationHelper.createDatabase(6).close()
+        val migrated = migrationHelper.runMigrationsAndValidate(7, listOf(MIGRATION_6_7))
+
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('experience_attention_assessments') " +
+                "WHERE `table`='experiences' AND on_delete='CASCADE' AND on_update='CASCADE'",
+        ))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('experience_attention_signals') " +
+                "WHERE `table`='experience_attention_assessments' AND on_delete='CASCADE' AND on_update='CASCADE'",
+        ))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_index_list('experience_attention_signals') " +
+                "WHERE name='index_experience_attention_signals_signal'",
+        ))
+        migrated.close()
+    }
+
+    @Test
+    fun historicalSchemaExportsOneThroughSixRemainByteIdentical() {
         val expected = mapOf(
             1 to "8021b472cb9147553b9d9fda9e89716f82e927d7",
             2 to "c0242ecce351766e8c084026bf7750904409d8ac",
             3 to "5e642593a2b92ea167f4fb171a2446216dfbf104",
             4 to "761805095ce31a2ac81adcff4f3620aeb81c22c0",
             5 to "85eaaa7d2f6e9d2a6be7d6b63b8b9e0d1428929f",
+            6 to "fc9a21739fb265eee6472b0e242714539194cfed",
         )
         val assets = InstrumentationRegistry.getInstrumentation().targetContext.assets
 
@@ -686,6 +759,21 @@ class RivenMigrationTest {
         )
 
         assertEquals(34L, count)
+        created.close()
+    }
+
+    @Test
+    fun databaseVersionSevenHasExactlyThirtySixApplicationTables() {
+        val created = migrationHelper.createDatabase(7)
+        val count = created.singleLong(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT IN ('android_metadata', 'room_master_table')
+              AND name NOT LIKE 'sqlite_%'
+            """.trimIndent(),
+        )
+        assertEquals(36L, count)
         created.close()
     }
 

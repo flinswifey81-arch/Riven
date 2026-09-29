@@ -741,7 +741,8 @@ class AttachmentServiceTest {
     ) = NewTimelineMessageInput(
         messageId = messageId,
         role = role,
-        deliveryState = MessageDeliveryState.PERSISTED,
+        // Attachment tests use an ineligible operational fixture unless cognition is installed explicitly.
+        deliveryState = MessageDeliveryState.PENDING,
         content = "content-$messageId",
         createdAt = occurredAt,
         updatedAt = occurredAt,

@@ -8,6 +8,8 @@ import com.shai.riven.data.deletion.DeleteMemoryInput
 import com.shai.riven.data.deletion.MemoryDeleteResult
 import com.shai.riven.data.deletion.SafeDeleteError
 import com.shai.riven.data.deletion.SafeDeleteService
+import com.shai.riven.data.experience.ExperienceOrderAllocator
+import com.shai.riven.data.experience.ExperienceOrderOverflowException
 import com.shai.riven.data.memory.CorrectMemoryInput
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
@@ -41,6 +43,7 @@ class ManualMemoryIntentService(
     private val afterExperienceInserted: (ManualMemoryIntentKind) -> Unit = {},
 ) {
     private val memoryDao = database.memoryDao()
+    private val experienceOrderAllocator = ExperienceOrderAllocator(memoryDao)
 
     suspend fun remember(input: ManualRememberMemoryInput): ManualMemoryIntentResult {
         validateMeaning(input.meaning)?.let { return failure(it) }
@@ -277,9 +280,11 @@ class ManualMemoryIntentService(
     }
 
     private fun allocateEventOrder(): Long {
-        val maximum = memoryDao.maximumEventOrder() ?: return 1L
-        if (maximum == Long.MAX_VALUE) abort(ManualMemoryIntentError.EventOrderOverflow)
-        return maximum + 1L
+        return try {
+            experienceOrderAllocator.next()
+        } catch (_: ExperienceOrderOverflowException) {
+            abort(ManualMemoryIntentError.EventOrderOverflow)
+        }
     }
 
     private fun insertManualExperience(

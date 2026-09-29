@@ -79,6 +79,38 @@ enum class ExperienceMessageSourceRole {
     CORRECTING,
 }
 
+/** Immediate Attention is workflow state, not a Memory truth or importance score. */
+enum class AttentionOutcome {
+    FORWARD_FOR_INTERPRETATION,
+    NO_CANDIDATE,
+    DEFER_FOR_CONTEXT,
+}
+
+enum class AttentionSignal {
+    IDENTITY,
+    PREFERENCE,
+    RELATIONSHIP,
+    AUTOBIOGRAPHICAL_EVENT,
+    SELF_DEVELOPMENT,
+    OPEN_LOOP,
+    CORRECTION_OR_REVISION,
+    REPETITION,
+    EMOTIONAL_SIGNIFICANCE,
+    PRACTICAL_SIGNIFICANCE,
+    SHARED_CULTURE,
+    CONVERSATIONAL_FILLER,
+    ONE_OFF_INCIDENTAL_DETAIL,
+    TEMPORARY_STATE_NO_CONTINUING_RELEVANCE,
+    MODEL_GENERATED_ASSUMPTION,
+    DRAMATIC_OR_NONLITERAL_LANGUAGE,
+    DUPLICATE_RESTATEMENT,
+}
+
+enum class AttentionSignalPolarity {
+    POSITIVE,
+    ANTI_SIGNAL,
+}
+
 enum class EntityKind {
     PERSON,
     PLACE,

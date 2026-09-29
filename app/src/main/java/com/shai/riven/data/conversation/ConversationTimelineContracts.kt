@@ -90,6 +90,13 @@ sealed interface ConversationTimelineError {
         val sequenceNumber: Long,
     ) : ConversationTimelineError
 
+    data class DuplicateCanonicalExperience(val messageId: String) : ConversationTimelineError
+    data object ExperienceOrderOverflow : ConversationTimelineError
+    data class ConversationExperienceStorageFailure(
+        val messageId: String,
+        val causeType: String,
+    ) : ConversationTimelineError
+
     data class StorageFailure(
         val operation: TimelineOperation,
         val causeType: String,

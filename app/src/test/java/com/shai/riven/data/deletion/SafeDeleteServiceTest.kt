@@ -914,7 +914,8 @@ class SafeDeleteServiceTest {
                 message = NewTimelineMessageInput(
                     messageId = messageId,
                     role = role,
-                    deliveryState = MessageDeliveryState.PERSISTED,
+                    // These fixtures install their own explicit provenance Experiences below.
+                    deliveryState = MessageDeliveryState.PENDING,
                     content = "content-$messageId",
                     createdAt = occurredAt,
                     updatedAt = occurredAt,
@@ -940,7 +941,8 @@ class SafeDeleteServiceTest {
                 replacement = NewTimelineMessageInput(
                     messageId = replacementMessageId,
                     role = MessageRole.ASSISTANT,
-                    deliveryState = MessageDeliveryState.PERSISTED,
+                    // These fixtures install their own explicit provenance Experiences below.
+                    deliveryState = MessageDeliveryState.PENDING,
                     content = "content-$replacementMessageId",
                     createdAt = occurredAt,
                     updatedAt = occurredAt,

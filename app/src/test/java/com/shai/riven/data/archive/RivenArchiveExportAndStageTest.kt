@@ -16,17 +16,27 @@ import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
+import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.AttentionOutcome
+import com.shai.riven.data.persistence.model.AttentionSignal
+import com.shai.riven.data.persistence.model.AttentionSignalPolarity
 import com.shai.riven.data.persistence.model.ConversationStatus
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.DerivedArtifactType
 import com.shai.riven.data.persistence.model.GeneratedMediaKind
+import com.shai.riven.data.persistence.model.ExperienceActor
+import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.persistence.model.ExperienceType
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
+import com.shai.riven.data.persistence.model.SensitivityLevel
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -107,7 +117,7 @@ class RivenArchiveExportAndStageTest {
         val manifest = checkNotNull(RivenArchiveManifestJson.decode(entries.single { it.first == ARCHIVE_MANIFEST_PATH }.second))
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
-        assertEquals(6, manifest.databaseSchemaVersion)
+        assertEquals(7, manifest.databaseSchemaVersion)
         assertFalse(manifest.secretsIncluded)
     }
 
@@ -380,18 +390,18 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(4, result.sourceDatabaseVersion)
-        assertEquals(6, result.resultingDatabaseVersion)
+        assertEquals(7, result.resultingDatabaseVersion)
     }
 
     @Test
     fun stageRejectsDatabaseNewerThanCurrentVersion() {
-        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 7") }
+        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 8") }
 
         val result = stage(archive)
 
         assertTrue(result is StageRivenRestoreResult.Failure)
         assertEquals(
-            RivenArchiveRestoreError.DatabaseTooNew(7, 6),
+            RivenArchiveRestoreError.DatabaseTooNew(8, 7),
             (result as StageRivenRestoreResult.Failure).error,
         )
     }
@@ -545,7 +555,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionFiveArchiveRestoresIntoVersionSixWithoutInventingDraftRows() {
+    fun versionFiveArchiveRestoresIntoVersionSevenWithoutInventingDraftRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(5).apply {
             execSQL(
@@ -561,11 +571,94 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(5, result.sourceDatabaseVersion)
-        assertEquals(6, result.resultingDatabaseVersion)
+        assertEquals(7, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertTrue(staged.conversationDraftDao().allDrafts().isEmpty())
             assertEquals(0, staged.conversationDraftDao().draftReferenceCount("anything"))
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun versionSixArchiveRestoresIntoVersionSevenWithoutInventingAttentionRows() {
+        context.deleteDatabase(MIGRATION_DATABASE_NAME)
+        migrationHelper.createDatabase(6).apply {
+            execSQL(
+                "INSERT INTO experiences (experience_id, event_order, experience_type, actor, " +
+                    "occurred_at, recorded_at, sensitivity, availability) VALUES " +
+                    "('v6-experience', 1, 'OTHER', 'OTHER', 1, 1, 'STANDARD', 'AVAILABLE')",
+            )
+            close()
+        }
+        val archive = archiveForDatabase(context.getDatabasePath(MIGRATION_DATABASE_NAME), 6)
+
+        val result = stage(archive) as StageRivenRestoreResult.RestoreStaged
+        assertEquals(6, result.sourceDatabaseVersion)
+        assertEquals(7, result.resultingDatabaseVersion)
+        val staged = openStagedDatabase()
+        try {
+            assertEquals(1, staged.memoryDao().experienceCount())
+            assertEquals(0, staged.experienceAttentionDao().signals("v6-experience").size)
+            assertNull(staged.experienceAttentionDao().assessment("v6-experience"))
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun versionSevenArchivePreservesAttentionAssessmentAndSignalsExactly() {
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = "attention-experience",
+                eventOrder = 1,
+                experienceType = ExperienceType.OTHER,
+                actor = ExperienceActor.OTHER,
+                sourceContent = "evidence",
+                occurredAt = 1,
+                recordedAt = 2,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = ExperienceAvailability.AVAILABLE,
+            ),
+        )
+        database.experienceAttentionDao().insertAssessment(
+            ExperienceAttentionAssessmentEntity(
+                "attention-experience",
+                AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+                3,
+                4,
+                5,
+            ),
+        )
+        database.experienceAttentionDao().insertSignal(
+            ExperienceAttentionSignalEntity(
+                "attention-experience",
+                AttentionSignal.IDENTITY,
+                AttentionSignalPolarity.POSITIVE,
+                5,
+            ),
+        )
+        database.experienceAttentionDao().insertSignal(
+            ExperienceAttentionSignalEntity(
+                "attention-experience",
+                AttentionSignal.DUPLICATE_RESTATEMENT,
+                AttentionSignalPolarity.ANTI_SIGNAL,
+                5,
+            ),
+        )
+
+        assertTrue(stage(validArchive()) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            assertEquals(
+                database.experienceAttentionDao().assessment("attention-experience"),
+                staged.experienceAttentionDao().assessment("attention-experience"),
+            )
+            assertEquals(
+                database.experienceAttentionDao().signals("attention-experience"),
+                staged.experienceAttentionDao().signals("attention-experience"),
+            )
         } finally {
             staged.close()
         }

@@ -2,6 +2,9 @@ package com.shai.riven.data.conversation
 
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
+import com.shai.riven.data.experience.ConversationExperienceAbort
+import com.shai.riven.data.experience.ConversationExperienceError
+import com.shai.riven.data.experience.ConversationExperienceService
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
@@ -14,10 +17,15 @@ import kotlinx.coroutines.CancellationException
 
 class ConversationTimelineService(
     private val database: RivenDatabase,
+    private val afterConversationExperienceWrite: (String) -> Unit = {},
     private val afterMessageGraphWrite: (TimelineOperation) -> Unit = {},
 ) {
     private val timelineDao = database.conversationTimelineDao()
     private val attachmentDao = database.attachmentDao()
+    private val conversationExperiences = ConversationExperienceService(
+        database = database,
+        afterExperienceInserted = afterConversationExperienceWrite,
+    )
 
     suspend fun createConversationWithTimeline(
         input: CreateTimelineConversationInput,
@@ -72,6 +80,7 @@ class ConversationTimelineService(
         }
         insertMessageAttachments(message.id, input.message.attachmentIds, input.occurredAt)
         afterMessageGraphWrite(TimelineOperation.APPEND_MESSAGE)
+        recordConversationExperience(message, input.occurredAt)
         val nextRevision = nextRevision(head)
         timelineDao.updateTimelineHead(
             head.copy(
@@ -201,6 +210,7 @@ class ConversationTimelineService(
         insertValidatedParentEdge(replacement.id, originalParent.parentMessageId, input.occurredAt)
         insertMessageAttachments(replacement.id, input.replacement.attachmentIds, input.occurredAt)
         afterMessageGraphWrite(TimelineOperation.REGENERATE_ASSISTANT)
+        recordConversationExperience(replacement, input.occurredAt)
         val nextRevision = nextRevision(head)
         timelineDao.updateTimelineHead(
             head.copy(
@@ -268,6 +278,16 @@ class ConversationTimelineService(
             }
             current = next
         }
+    }
+
+    internal fun activeTimelineInCurrentTransaction(conversationId: String): ActiveTimelineSnapshot {
+        requireConversation(conversationId)
+        val head = requireTimelineHead(conversationId)
+        return ActiveTimelineSnapshot(
+            conversationId = conversationId,
+            timelineRevision = head.timelineRevision,
+            messages = walkActivePath(head),
+        )
     }
 
     private fun walkActivePath(head: ConversationTimelineHeadEntity): List<MessageEntity> {
@@ -421,6 +441,32 @@ class ConversationTimelineService(
         errorCode = errorCode,
     )
 
+    private fun recordConversationExperience(message: MessageEntity, recordedAt: Long) {
+        try {
+            conversationExperiences.recordMessageInCurrentTransaction(message, recordedAt)
+        } catch (experienceAbort: ConversationExperienceAbort) {
+            when (val error = experienceAbort.error) {
+                is ConversationExperienceError.DuplicateCanonicalExperience ->
+                    abort(ConversationTimelineError.DuplicateCanonicalExperience(error.messageId))
+                ConversationExperienceError.ExperienceOrderOverflow ->
+                    abort(ConversationTimelineError.ExperienceOrderOverflow)
+                is ConversationExperienceError.StorageFailure ->
+                    abort(
+                        ConversationTimelineError.ConversationExperienceStorageFailure(
+                            messageId = message.id,
+                            causeType = error.causeType,
+                        ),
+                    )
+                else -> abort(
+                    ConversationTimelineError.ConversationExperienceStorageFailure(
+                        messageId = message.id,
+                        causeType = error::class.java.simpleName,
+                    ),
+                )
+            }
+        }
+    }
+
     private suspend fun executeWrite(
         operation: TimelineOperation,
         block: suspend () -> TimelineWriteResult,
@@ -458,6 +504,12 @@ class ConversationTimelineService(
     private fun abort(error: ConversationTimelineError): Nothing = throw TimelineAbort(error)
 
     internal class TimelineAbort(val error: ConversationTimelineError) : RuntimeException()
+
+    internal data class ActiveTimelineSnapshot(
+        val conversationId: String,
+        val timelineRevision: Long,
+        val messages: List<MessageEntity>,
+    )
 
     private companion object {
         const val INITIAL_TIMELINE_REVISION = 0L
