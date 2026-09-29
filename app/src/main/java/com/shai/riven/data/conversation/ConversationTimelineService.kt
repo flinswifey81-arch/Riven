@@ -47,36 +47,47 @@ class ConversationTimelineService(
 
     suspend fun appendMessage(input: AppendTimelineMessageInput): TimelineWriteResult =
         executeWrite(TimelineOperation.APPEND_MESSAGE) {
-            val conversation = requireConversation(input.conversationId)
-            val head = requireTimelineHead(input.conversationId)
-            requireExpectedRevision(head, input.expectedTimelineRevision)
-            walkActivePath(head)
-            requireNewMessageId(input.message.messageId)
-            requireAvailableAttachments(input.message.attachmentIds)
-            val sequenceNumber = nextSequenceNumber(input.conversationId)
-            val message = input.message.toEntity(input.conversationId, sequenceNumber)
-            timelineDao.insertMessage(message)
-            head.activeHeadMessageId?.let { parentId ->
-                insertValidatedParentEdge(message.id, parentId, input.occurredAt)
-            }
-            insertMessageAttachments(message.id, input.message.attachmentIds, input.occurredAt)
-            afterMessageGraphWrite(TimelineOperation.APPEND_MESSAGE)
-            val nextRevision = nextRevision(head)
-            timelineDao.updateTimelineHead(
-                head.copy(
-                    activeHeadMessageId = message.id,
-                    timelineRevision = nextRevision,
-                    updatedAt = input.occurredAt,
-                ),
-            )
-            timelineDao.updateConversation(conversation.copy(updatedAt = input.occurredAt))
-            TimelineWriteResult.MessageAppended(
-                conversationId = input.conversationId,
-                messageId = message.id,
-                sequenceNumber = sequenceNumber,
-                timelineRevision = nextRevision,
-            )
+            appendMessageInCurrentTransaction(input)
         }
+
+    /**
+     * Canonical append implementation for callers that already own the Room transaction.
+     * It deliberately performs no transaction management and throws [TimelineAbort] for
+     * typed timeline failures so an outer operation can roll back its complete mutation.
+     */
+    internal fun appendMessageInCurrentTransaction(
+        input: AppendTimelineMessageInput,
+    ): TimelineWriteResult.MessageAppended {
+        val conversation = requireConversation(input.conversationId)
+        val head = requireTimelineHead(input.conversationId)
+        requireExpectedRevision(head, input.expectedTimelineRevision)
+        walkActivePath(head)
+        requireNewMessageId(input.message.messageId)
+        requireAvailableAttachments(input.message.attachmentIds)
+        val sequenceNumber = nextSequenceNumber(input.conversationId)
+        val message = input.message.toEntity(input.conversationId, sequenceNumber)
+        timelineDao.insertMessage(message)
+        head.activeHeadMessageId?.let { parentId ->
+            insertValidatedParentEdge(message.id, parentId, input.occurredAt)
+        }
+        insertMessageAttachments(message.id, input.message.attachmentIds, input.occurredAt)
+        afterMessageGraphWrite(TimelineOperation.APPEND_MESSAGE)
+        val nextRevision = nextRevision(head)
+        timelineDao.updateTimelineHead(
+            head.copy(
+                activeHeadMessageId = message.id,
+                timelineRevision = nextRevision,
+                updatedAt = input.occurredAt,
+            ),
+        )
+        timelineDao.updateConversation(conversation.copy(updatedAt = input.occurredAt))
+        return TimelineWriteResult.MessageAppended(
+            conversationId = input.conversationId,
+            messageId = message.id,
+            sequenceNumber = sequenceNumber,
+            timelineRevision = nextRevision,
+        )
+    }
 
     suspend fun activeTimeline(conversationId: String): TimelineReadResult =
         executeRead(TimelineOperation.READ_ACTIVE_TIMELINE) {
@@ -446,7 +457,7 @@ class ConversationTimelineService(
 
     private fun abort(error: ConversationTimelineError): Nothing = throw TimelineAbort(error)
 
-    private class TimelineAbort(val error: ConversationTimelineError) : RuntimeException()
+    internal class TimelineAbort(val error: ConversationTimelineError) : RuntimeException()
 
     private companion object {
         const val INITIAL_TIMELINE_REVISION = 0L

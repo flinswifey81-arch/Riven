@@ -4,6 +4,7 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.driver.AndroidSQLiteDriver
 import androidx.test.platform.app.InstrumentationRegistry
+import java.security.MessageDigest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Rule
@@ -552,6 +553,140 @@ class RivenMigrationTest {
         assertEquals(0L, migrated.rowCount("provider_profiles"))
         assertEquals(0L, migrated.rowCount("provider_profile_capabilities"))
         migrated.close()
+    }
+
+    @Test
+    fun migrationFiveToSixPreservesCanonicalDataAndCreatesEmptyDraftTablesWithRequiredSchema() {
+        migrationHelper.createDatabase(5).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-v5', 10, 20, 'ACTIVE', 'Version five conversation')",
+            )
+            execSQL(
+                "INSERT INTO conversation_timeline_heads VALUES " +
+                    "('conversation-v5', NULL, 7, 20)",
+            )
+            execSQL(
+                "INSERT INTO provider_profiles VALUES " +
+                    "('profile-v5', 'Provider', 'adapter', 'https://example.invalid', " +
+                    "'model', NULL, 1, 1, 10, 20)",
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 6,
+            migrations = listOf(MIGRATION_5_6),
+        )
+
+        assertEquals(1L, migrated.rowCount("conversations"))
+        assertEquals(7L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v5'",
+        ))
+        assertEquals(1L, migrated.rowCount("provider_profiles"))
+        assertEquals(0L, migrated.rowCount("conversation_drafts"))
+        assertEquals(0L, migrated.rowCount("draft_attachments"))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_index_list('draft_attachments') " +
+                "WHERE name = 'index_draft_attachments_attachment_id'",
+        ))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_index_list('draft_attachments') " +
+                "WHERE name = 'index_draft_attachments_conversation_id_attachment_order' " +
+                "AND `unique` = 1",
+        ))
+        assertEquals(2L, migrated.singleLong("SELECT COUNT(*) FROM pragma_foreign_key_list('draft_attachments')"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationOneToSixRunsCanonicalFullChainWithoutInventingDrafts() {
+        migrationHelper.createDatabase(1).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('conversation-v1-v6', 10, 20, 'ACTIVE', 'Full chain v6')",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    message_id, conversation_id, sequence_number, role, delivery_state,
+                    content, created_at, updated_at
+                ) VALUES (
+                    'message-v1-v6', 'conversation-v1-v6', 1, 'USER', 'PERSISTED',
+                    'Preserved', 11, 11
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 6,
+            migrations = listOf(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+            ),
+        )
+
+        assertEquals("message-v1-v6", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id = 'conversation-v1-v6'",
+        ))
+        assertEquals("Preserved", migrated.singleString(
+            "SELECT content FROM messages WHERE message_id = 'message-v1-v6'",
+        ))
+        assertEquals(0L, migrated.rowCount("conversation_drafts"))
+        assertEquals(0L, migrated.rowCount("draft_attachments"))
+        migrated.close()
+    }
+
+    @Test
+    fun historicalSchemaExportsOneThroughFiveRemainByteIdentical() {
+        val expected = mapOf(
+            1 to "8021b472cb9147553b9d9fda9e89716f82e927d7",
+            2 to "c0242ecce351766e8c084026bf7750904409d8ac",
+            3 to "5e642593a2b92ea167f4fb171a2446216dfbf104",
+            4 to "761805095ce31a2ac81adcff4f3620aeb81c22c0",
+            5 to "85eaaa7d2f6e9d2a6be7d6b63b8b9e0d1428929f",
+        )
+        val assets = InstrumentationRegistry.getInstrumentation().targetContext.assets
+
+        expected.forEach { (version, expectedGitBlobSha) ->
+            val bytes = assets.open(
+                "com.shai.riven.data.persistence.RivenDatabase/$version.json",
+            ).use { input ->
+                input.readBytes()
+                    .toString(Charsets.UTF_8)
+                    .replace("\r\n", "\n")
+                    .toByteArray(Charsets.UTF_8)
+            }
+            val header = "blob ${bytes.size}\u0000".toByteArray(Charsets.UTF_8)
+            val actual = MessageDigest.getInstance("SHA-1")
+                .digest(header + bytes)
+                .joinToString("") { byte -> "%02x".format(byte) }
+            assertEquals("Historical schema v$version changed", expectedGitBlobSha, actual)
+        }
+    }
+
+    @Test
+    fun databaseVersionSixHasExactlyThirtyFourApplicationTables() {
+        val created = migrationHelper.createDatabase(6)
+
+        val count = created.singleLong(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT IN ('android_metadata', 'room_master_table')
+              AND name NOT LIKE 'sqlite_%'
+            """.trimIndent(),
+        )
+
+        assertEquals(34L, count)
+        created.close()
     }
 
     private fun SQLiteConnection.execSQL(sql: String) {

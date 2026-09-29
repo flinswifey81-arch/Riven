@@ -54,7 +54,9 @@ class SafeDeleteService(
             val accumulator = DeleteAccumulator(input.occurredAt)
 
             dao.attachmentIdsForMessage(plan.messageId).forEach { attachmentId ->
-                if (dao.messageReferenceCountForAttachment(attachmentId) == 1) {
+                if (dao.messageReferenceCountForAttachment(attachmentId) == 1 &&
+                    dao.draftReferenceCountForAttachment(attachmentId) == 0
+                ) {
                     val attachment = dao.attachment(attachmentId)
                         ?: abort(SafeDeleteError.StorageFailure(
                             SafeDeleteOperation.DELETE_TIMELINE_MESSAGE,

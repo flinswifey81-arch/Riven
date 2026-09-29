@@ -18,6 +18,8 @@ import com.shai.riven.data.credential.ReadProviderCredentialResult
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
+import com.shai.riven.data.persistence.entity.ConversationDraftEntity
+import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
@@ -191,6 +193,23 @@ internal fun seedRepresentativeState(database: RivenDatabase) {
             source = AttachmentSource.SHAI_IMPORT,
             createdAt = 1,
             updatedAt = 1,
+        ),
+    )
+    database.conversationDraftDao().insertDraft(
+        ConversationDraftEntity(
+            conversationId = "conversation",
+            content = "private unsent draft",
+            revision = 1,
+            createdAt = 1,
+            updatedAt = 1,
+        ),
+    )
+    database.conversationDraftDao().insertDraftAttachment(
+        DraftAttachmentEntity(
+            conversationId = "conversation",
+            attachmentId = "attachment",
+            attachmentOrder = 0,
+            createdAt = 1,
         ),
     )
 }

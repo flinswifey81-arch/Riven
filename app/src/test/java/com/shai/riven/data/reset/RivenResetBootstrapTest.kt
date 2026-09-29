@@ -66,11 +66,48 @@ class RivenResetBootstrapTest {
         val fresh = openCanonicalDatabase()
         try {
             val counts = applicationTableCounts(fresh)
-            assertEquals(32, counts.size)
+            assertEquals(34, counts.size)
             assertTrue(counts.values.all { it == 0L })
         } finally {
             fresh.close()
         }
+    }
+
+    @Test
+    fun factoryResetClearsConversationDraftAndDraftAttachmentTables() {
+        seedCanonicalState()
+        val seeded = openCanonicalDatabase()
+        try {
+            assertEquals(1L, applicationTableCounts(seeded).getValue("conversation_drafts"))
+            assertEquals(1L, applicationTableCounts(seeded).getValue("draft_attachments"))
+        } finally {
+            seeded.close()
+        }
+        stageReset()
+
+        assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
+
+        val fresh = openCanonicalDatabase()
+        try {
+            assertEquals(0L, applicationTableCounts(fresh).getValue("conversation_drafts"))
+            assertEquals(0L, applicationTableCounts(fresh).getValue("draft_attachments"))
+        } finally {
+            fresh.close()
+        }
+    }
+
+    @Test
+    fun emptyDatabaseVerifierAcceptsFreshThirtyFourTableVersionSixDatabase() {
+        val fresh = openCanonicalDatabase()
+        fresh.openHelper.writableDatabase
+        fresh.close()
+
+        assertTrue(
+            RivenEmptyDatabaseVerifier.verify(
+                context,
+                context.getDatabasePath(RivenDatabase.DATABASE_NAME),
+            ),
+        )
     }
 
     @Test

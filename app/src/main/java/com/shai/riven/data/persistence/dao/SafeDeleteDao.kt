@@ -65,6 +65,9 @@ interface SafeDeleteDao {
     @Query("SELECT COUNT(*) FROM message_attachments WHERE attachment_id = :attachmentId")
     fun messageReferenceCountForAttachment(attachmentId: String): Int
 
+    @Query("SELECT COUNT(*) FROM draft_attachments WHERE attachment_id = :attachmentId")
+    fun draftReferenceCountForAttachment(attachmentId: String): Int
+
     @Query("SELECT * FROM attachments WHERE attachment_id = :attachmentId")
     fun attachment(attachmentId: String): AttachmentEntity?
 

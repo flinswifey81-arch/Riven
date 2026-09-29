@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import com.shai.riven.data.persistence.dao.ConversationDao
+import com.shai.riven.data.persistence.dao.ConversationDraftDao
 import com.shai.riven.data.persistence.dao.ConversationTimelineDao
 import com.shai.riven.data.persistence.dao.AttachmentDao
 import com.shai.riven.data.persistence.dao.MaintenanceDao
@@ -18,8 +19,10 @@ import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
+import com.shai.riven.data.persistence.entity.ConversationDraftEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactAttachmentDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactExperienceDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactMemoryDependencyEntity
@@ -83,14 +86,18 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         DerivedArtifactAttachmentDependencyEntity::class,
         ProviderProfileEntity::class,
         ProviderProfileCapabilityEntity::class,
+        ConversationDraftEntity::class,
+        DraftAttachmentEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
 
     abstract fun conversationTimelineDao(): ConversationTimelineDao
+
+    abstract fun conversationDraftDao(): ConversationDraftDao
 
     abstract fun memoryDao(): MemoryDao
 
@@ -133,6 +140,12 @@ abstract class RivenDatabase : RoomDatabase() {
             context,
             RivenDatabase::class.java,
             databaseNameOrAbsolutePath,
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+        ).addMigrations(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+        )
     }
 }

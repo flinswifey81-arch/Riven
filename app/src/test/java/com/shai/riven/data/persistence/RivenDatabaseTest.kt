@@ -115,6 +115,8 @@ class RivenDatabaseTest {
             "derived_artifact_attachment_dependencies",
             "provider_profiles",
             "provider_profile_capabilities",
+            "conversation_drafts",
+            "draft_attachments",
         )
 
         val actualTables = database.openHelper.writableDatabase

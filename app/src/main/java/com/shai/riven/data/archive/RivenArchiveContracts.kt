@@ -122,7 +122,7 @@ sealed interface RivenRestoreBootstrapResult {
     data class Failure(val error: RivenArchiveRestoreError) : RivenRestoreBootstrapResult
 }
 
-internal const val CURRENT_RIVEN_DATABASE_VERSION = 5
+internal const val CURRENT_RIVEN_DATABASE_VERSION = 6
 internal const val ARCHIVE_MANIFEST_PATH = "manifest.json"
 internal const val ARCHIVE_DATABASE_PATH = "database/riven.db"
 internal const val ARCHIVE_ATTACHMENT_PREFIX = "attachments/"

@@ -231,3 +231,42 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         )
     }
 }
+
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `conversation_drafts` (
+                `conversation_id` TEXT NOT NULL,
+                `content` TEXT NOT NULL,
+                `revision` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`conversation_id`),
+                FOREIGN KEY(`conversation_id`) REFERENCES `conversations`(`conversation_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `draft_attachments` (
+                `conversation_id` TEXT NOT NULL,
+                `attachment_id` TEXT NOT NULL,
+                `attachment_order` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                PRIMARY KEY(`conversation_id`, `attachment_id`),
+                FOREIGN KEY(`conversation_id`) REFERENCES `conversation_drafts`(`conversation_id`) ON UPDATE CASCADE ON DELETE CASCADE,
+                FOREIGN KEY(`attachment_id`) REFERENCES `attachments`(`attachment_id`) ON UPDATE CASCADE ON DELETE RESTRICT
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_draft_attachments_attachment_id` " +
+                "ON `draft_attachments` (`attachment_id`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_draft_attachments_conversation_id_attachment_order` " +
+                "ON `draft_attachments` (`conversation_id`, `attachment_order`)",
+        )
+    }
+}

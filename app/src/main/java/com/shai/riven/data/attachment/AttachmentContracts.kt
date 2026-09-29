@@ -28,6 +28,7 @@ sealed interface AttachmentError {
     data class AttachmentStillReferenced(
         val attachmentId: String,
         val messageReferenceCount: Int,
+        val draftReferenceCount: Int,
     ) : AttachmentError
 
     data class AttachmentHasDerivedDependencies(val attachmentId: String) : AttachmentError

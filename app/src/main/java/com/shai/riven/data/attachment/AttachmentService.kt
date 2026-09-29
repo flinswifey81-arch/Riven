@@ -244,9 +244,16 @@ class AttachmentService(
                 if (current.state != requiredState) {
                     abort(AttachmentError.AttachmentUnavailable(attachmentId, current.state))
                 }
-                val references = dao.messageReferenceCount(attachmentId)
-                if (references != 0) {
-                    abort(AttachmentError.AttachmentStillReferenced(attachmentId, references))
+                val messageReferences = dao.messageReferenceCount(attachmentId)
+                val draftReferences = dao.draftReferenceCount(attachmentId)
+                if (messageReferences != 0 || draftReferences != 0) {
+                    abort(
+                        AttachmentError.AttachmentStillReferenced(
+                            attachmentId = attachmentId,
+                            messageReferenceCount = messageReferences,
+                            draftReferenceCount = draftReferences,
+                        ),
+                    )
                 }
                 if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
                     abort(AttachmentError.AttachmentHasDerivedDependencies(attachmentId))
@@ -288,9 +295,16 @@ class AttachmentService(
                 if (current.state != AttachmentState.DELETE_PENDING) {
                     abort(AttachmentError.AttachmentUnavailable(attachmentId, current.state))
                 }
-                val currentReferences = dao.messageReferenceCount(attachmentId)
-                if (currentReferences != 0) {
-                    abort(AttachmentError.AttachmentStillReferenced(attachmentId, currentReferences))
+                val currentMessageReferences = dao.messageReferenceCount(attachmentId)
+                val currentDraftReferences = dao.draftReferenceCount(attachmentId)
+                if (currentMessageReferences != 0 || currentDraftReferences != 0) {
+                    abort(
+                        AttachmentError.AttachmentStillReferenced(
+                            attachmentId = attachmentId,
+                            messageReferenceCount = currentMessageReferences,
+                            draftReferenceCount = currentDraftReferences,
+                        ),
+                    )
                 }
                 if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
                     abort(AttachmentError.AttachmentHasDerivedDependencies(attachmentId))

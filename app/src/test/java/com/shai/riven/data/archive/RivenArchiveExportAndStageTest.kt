@@ -3,6 +3,7 @@ package com.shai.riven.data.archive
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.testing.MigrationTestHelper
+import androidx.sqlite.SQLiteConnection
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.sqlite.driver.AndroidSQLiteDriver
@@ -10,12 +11,17 @@ import com.shai.riven.data.attachment.AttachmentByteSource
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.ConversationDraftEntity
+import com.shai.riven.data.persistence.entity.ConversationEntity
+import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
 import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.ConversationStatus
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.DerivedArtifactType
 import com.shai.riven.data.persistence.model.GeneratedMediaKind
@@ -101,7 +107,7 @@ class RivenArchiveExportAndStageTest {
         val manifest = checkNotNull(RivenArchiveManifestJson.decode(entries.single { it.first == ARCHIVE_MANIFEST_PATH }.second))
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
-        assertEquals(5, manifest.databaseSchemaVersion)
+        assertEquals(6, manifest.databaseSchemaVersion)
         assertFalse(manifest.secretsIncluded)
     }
 
@@ -374,18 +380,18 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(4, result.sourceDatabaseVersion)
-        assertEquals(5, result.resultingDatabaseVersion)
+        assertEquals(6, result.resultingDatabaseVersion)
     }
 
     @Test
     fun stageRejectsDatabaseNewerThanCurrentVersion() {
-        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 6") }
+        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 7") }
 
         val result = stage(archive)
 
         assertTrue(result is StageRivenRestoreResult.Failure)
         assertEquals(
-            RivenArchiveRestoreError.DatabaseTooNew(6, 5),
+            RivenArchiveRestoreError.DatabaseTooNew(7, 6),
             (result as StageRivenRestoreResult.Failure).error,
         )
     }
@@ -538,6 +544,109 @@ class RivenArchiveExportAndStageTest {
         assertArrayEquals(bytes, restored.readBytes())
     }
 
+    @Test
+    fun versionFiveArchiveRestoresIntoVersionSixWithoutInventingDraftRows() {
+        context.deleteDatabase(MIGRATION_DATABASE_NAME)
+        migrationHelper.createDatabase(5).apply {
+            execSQL(
+                "INSERT INTO conversations VALUES " +
+                    "('v5-conversation', 1, 1, 'ACTIVE', 'Version five')",
+            )
+            close()
+        }
+        val archive = archiveForDatabase(context.getDatabasePath(MIGRATION_DATABASE_NAME), 5)
+
+        val result = stage(archive)
+
+        assertTrue(result is StageRivenRestoreResult.RestoreStaged)
+        result as StageRivenRestoreResult.RestoreStaged
+        assertEquals(5, result.sourceDatabaseVersion)
+        assertEquals(6, result.resultingDatabaseVersion)
+        val staged = openStagedDatabase()
+        try {
+            assertTrue(staged.conversationDraftDao().allDrafts().isEmpty())
+            assertEquals(0, staged.conversationDraftDao().draftReferenceCount("anything"))
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun versionSixArchivePreservesExactDraftAndAttachmentOrder() {
+        insertDraftConversation("draft-conversation")
+        insertAttachment("draft-a", AttachmentState.AVAILABLE, "a".toByteArray())
+        insertAttachment("draft-b", AttachmentState.AVAILABLE, "b".toByteArray())
+        database.conversationDraftDao().insertDraft(
+            ConversationDraftEntity(
+                conversationId = "draft-conversation",
+                content = "  exact archived draft\n  ",
+                revision = 7,
+                createdAt = 11,
+                updatedAt = 22,
+            ),
+        )
+        listOf("draft-b", "draft-a").forEachIndexed { index, attachmentId ->
+            database.conversationDraftDao().insertDraftAttachment(
+                DraftAttachmentEntity("draft-conversation", attachmentId, index, 22),
+            )
+        }
+
+        assertTrue(stage(validArchive()) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            val draft = checkNotNull(staged.conversationDraftDao().draft("draft-conversation"))
+            assertEquals("  exact archived draft\n  ", draft.content)
+            assertEquals(7L, draft.revision)
+            assertEquals(11L, draft.createdAt)
+            assertEquals(22L, draft.updatedAt)
+            assertEquals(
+                listOf("draft-b", "draft-a"),
+                staged.conversationDraftDao().attachmentIdsForDraft("draft-conversation"),
+            )
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun draftOnlyAvailableAttachmentIsExportedAndRestoredWithDraftOwnership() {
+        val bytes = "draft-only durable blob".toByteArray()
+        insertDraftConversation("draft-only-conversation")
+        insertAttachment("draft-only", AttachmentState.AVAILABLE, bytes)
+        database.conversationDraftDao().insertDraft(
+            ConversationDraftEntity("draft-only-conversation", "attachment", 1, 1, 1),
+        )
+        database.conversationDraftDao().insertDraftAttachment(
+            DraftAttachmentEntity("draft-only-conversation", "draft-only", 0, 1),
+        )
+        assertEquals(0, database.attachmentDao().messageReferenceCount("draft-only"))
+        assertEquals(1, database.conversationDraftDao().draftReferenceCount("draft-only"))
+
+        val archive = validArchive()
+        assertTrue(
+            readZip(archive).any {
+                it.first == RivenArchivePath.attachmentPath("draft-only")
+            },
+        )
+        assertTrue(stage(archive) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            assertEquals(
+                listOf("draft-only"),
+                staged.conversationDraftDao().attachmentIdsForDraft("draft-only-conversation"),
+            )
+            assertEquals(1, staged.conversationDraftDao().draftReferenceCount("draft-only"))
+            assertEquals(0, staged.attachmentDao().messageReferenceCount("draft-only"))
+            val restored = File(
+                RivenRestorePaths(context, File(root, "restore")).pendingAttachmentRoot,
+                "attachments/draft-only.blob",
+            )
+            assertArrayEquals(bytes, restored.readBytes())
+        } finally {
+            staged.close()
+        }
+    }
+
     private fun insertAttachment(
         id: String,
         state: AttachmentState,
@@ -565,6 +674,25 @@ class RivenArchiveExportAndStageTest {
             ),
         )
     }
+
+    private fun SQLiteConnection.execSQL(sql: String) {
+        prepare(sql).use { statement -> statement.step() }
+    }
+
+    private fun insertDraftConversation(conversationId: String) {
+        database.conversationTimelineDao().insertConversation(
+            ConversationEntity(conversationId, 1, 1, ConversationStatus.ACTIVE),
+        )
+        database.conversationTimelineDao().insertTimelineHead(
+            ConversationTimelineHeadEntity(conversationId, null, 0, 1),
+        )
+    }
+
+    private fun openStagedDatabase(): RivenDatabase =
+        RivenDatabase.buildNamedForRestoreValidation(
+            context,
+            RivenRestorePaths(context, File(root, "restore")).pendingDatabase.absolutePath,
+        ).also { it.openHelper.writableDatabase }
 
     private fun validArchive(): ByteArray {
         val output = ByteArrayOutputStream()
@@ -646,7 +774,7 @@ class RivenArchiveExportAndStageTest {
                     it.getInt(0)
                 }
             }
-        }.getOrDefault(5)
+        }.getOrDefault(6)
         return entries.map { (name, bytes) ->
             if (name == ARCHIVE_MANIFEST_PATH) {
                 val json = JSONObject(bytes.toString(Charsets.UTF_8))

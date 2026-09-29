@@ -79,6 +79,9 @@ interface AttachmentDao {
     @Query("SELECT COUNT(*) FROM message_attachments WHERE attachment_id = :attachmentId")
     fun messageReferenceCount(attachmentId: String): Int
 
+    @Query("SELECT COUNT(*) FROM draft_attachments WHERE attachment_id = :attachmentId")
+    fun draftReferenceCount(attachmentId: String): Int
+
     @Query(
         """
         DELETE FROM attachments
@@ -87,6 +90,10 @@ interface AttachmentDao {
           AND NOT EXISTS (
               SELECT 1 FROM message_attachments
               WHERE message_attachments.attachment_id = attachments.attachment_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM draft_attachments
+              WHERE draft_attachments.attachment_id = attachments.attachment_id
           )
         """,
     )
