@@ -252,6 +252,124 @@ class CandidateExtractionServiceTest {
     }
 
     @Test
+    fun shaiExplicitCorrectionIsAllowedForGroundedUserSource() = runBlocking {
+        createConversation()
+        append("shai-correction", role = MessageRole.USER)
+        val experienceId = experienceId("shai-correction")
+        insertAttention(
+            experienceId,
+            signals = listOf(AttentionSignal.CORRECTION_OR_REVISION to AttentionSignalPolarity.POSITIVE),
+        )
+        extractor.proposal = extraction(proposal(basis = EpistemicBasis.EXPLICIT_CORRECTION))
+
+        val candidateId = extracted(extract(experienceId)).createdCandidateIds.single()
+
+        assertEquals(
+            EpistemicBasis.EXPLICIT_CORRECTION,
+            database.memoryDao().candidateMemory(candidateId)!!.proposedEpistemicBasis,
+        )
+    }
+
+    @Test
+    fun rivenExplicitSelfCorrectionIsAllowedForGroundedAssistantSource() = runBlocking {
+        createConversation()
+        append(
+            "riven-correction",
+            role = MessageRole.ASSISTANT,
+            delivery = MessageDeliveryState.SUCCEEDED,
+        )
+        val experienceId = experienceId("riven-correction")
+        insertAttention(
+            experienceId,
+            signals = listOf(AttentionSignal.CORRECTION_OR_REVISION to AttentionSignalPolarity.POSITIVE),
+        )
+        extractor.proposal = extraction(
+            proposal(
+                basis = EpistemicBasis.EXPLICIT_CORRECTION,
+                scope = MemoryScope.RIVEN,
+                state = CandidateMemoryState.TENTATIVE,
+            ),
+        )
+
+        val candidateId = extracted(extract(experienceId)).createdCandidateIds.single()
+        val candidate = database.memoryDao().candidateMemory(candidateId)!!
+        val seed = database.memoryDao().candidateEvidence(candidateId).single()
+
+        assertEquals(EpistemicBasis.EXPLICIT_CORRECTION, candidate.proposedEpistemicBasis)
+        assertEquals(experienceId, seed.experienceId)
+        assertEquals(CandidateEvidenceRole.SEED, seed.role)
+        assertEquals(0L, rowCount("memories"))
+    }
+
+    @Test
+    fun rivenExplicitCorrectionWithoutSignalIsRejected() = runBlocking {
+        createConversation()
+        append(
+            "riven-no-signal",
+            role = MessageRole.ASSISTANT,
+            delivery = MessageDeliveryState.SUCCEEDED,
+        )
+        val experienceId = experienceId("riven-no-signal")
+        insertAttention(
+            experienceId,
+            signals = listOf(AttentionSignal.PREFERENCE to AttentionSignalPolarity.POSITIVE),
+        )
+        extractor.proposal = extraction(
+            proposal(
+                basis = EpistemicBasis.EXPLICIT_CORRECTION,
+                scope = MemoryScope.RIVEN,
+                state = CandidateMemoryState.TENTATIVE,
+            ),
+        )
+
+        val error = failure(extract(experienceId)) as CandidateExtractionError.InvalidEpistemicBasis
+
+        assertEquals(InvalidEpistemicBasisReason.CORRECTION_SIGNAL_REQUIRED, error.reason)
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun toolExplicitCorrectionIsRejectedEvenWithCorrectionSignal() = runBlocking {
+        forwardExperience(
+            actor = ExperienceActor.TOOL,
+            type = ExperienceType.TOOL_RESULT,
+            signals = listOf(AttentionSignal.CORRECTION_OR_REVISION to AttentionSignalPolarity.POSITIVE),
+        )
+        extractor.proposal = extraction(proposal(basis = EpistemicBasis.EXPLICIT_CORRECTION))
+
+        val error = failure(extract()) as CandidateExtractionError.InvalidEpistemicBasis
+
+        assertEquals(InvalidEpistemicBasisReason.SOURCE_ACTOR_MISMATCH, error.reason)
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun mismatchedRivenActorAndUserSourceIsRejected() = runBlocking {
+        createConversation()
+        append("mismatched-source", role = MessageRole.USER)
+        val experienceId = experienceId("mismatched-source")
+        database.openHelper.writableDatabase.execSQL(
+            "UPDATE experiences SET actor='RIVEN' WHERE experience_id='$experienceId'",
+        )
+        insertAttention(
+            experienceId,
+            signals = listOf(AttentionSignal.CORRECTION_OR_REVISION to AttentionSignalPolarity.POSITIVE),
+        )
+        extractor.proposal = extraction(
+            proposal(
+                basis = EpistemicBasis.EXPLICIT_CORRECTION,
+                scope = MemoryScope.RIVEN,
+                state = CandidateMemoryState.TENTATIVE,
+            ),
+        )
+
+        val error = failure(extract(experienceId)) as CandidateExtractionError.InvalidEpistemicBasis
+
+        assertEquals(InvalidEpistemicBasisReason.SOURCE_ACTOR_MISMATCH, error.reason)
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
     fun inferenceRemainsInferenceAndDoesNotBecomeDirectEvidence() = runBlocking {
         forwardExperience()
         extractor.proposal = extraction(proposal(basis = EpistemicBasis.INFERENCE))

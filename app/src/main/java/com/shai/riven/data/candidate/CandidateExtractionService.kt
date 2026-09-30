@@ -255,7 +255,7 @@ class CandidateExtractionService(
                 InvalidEpistemicBasisReason.SOURCE_ACTOR_MISMATCH
             }
             EpistemicBasis.EXPLICIT_CORRECTION -> when {
-                !shaiGrounded -> InvalidEpistemicBasisReason.SOURCE_ACTOR_MISMATCH
+                !shaiGrounded && !rivenGrounded -> InvalidEpistemicBasisReason.SOURCE_ACTOR_MISMATCH
                 PositiveAttentionSignal.CORRECTION_OR_REVISION !in snapshot.positiveSignals -> {
                     InvalidEpistemicBasisReason.CORRECTION_SIGNAL_REQUIRED
                 }
