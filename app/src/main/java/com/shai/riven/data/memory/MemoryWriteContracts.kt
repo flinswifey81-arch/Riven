@@ -13,7 +13,12 @@ import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.TemporalState
 
+const val MAX_CANDIDATE_ID_CHARS = 128
+const val MAX_CANDIDATE_MEANING_CHARS = 4_096
+const val MAX_CANDIDATE_LINEAGE_KEY_CHARS = 128
+
 enum class MemoryWriteOperation {
+    CREATE_CANDIDATE,
     ADD_CANDIDATE_EVIDENCE,
     ADMIT_CANDIDATE,
     CREATE_VALIDATED,
@@ -38,6 +43,7 @@ sealed interface MemoryWriteResult {
 }
 
 sealed interface MemoryWriteError {
+    data class CandidateAlreadyExists(val candidateId: String) : MemoryWriteError
     data class CandidateNotFound(val candidateId: String) : MemoryWriteError
     data class InvalidCandidateState(
         val candidateId: String,
@@ -52,9 +58,14 @@ sealed interface MemoryWriteError {
         val experienceId: String,
     ) : MemoryWriteError
 
+    data class InvalidCandidateCreation(
+        val reason: InvalidCandidateCreationReason,
+    ) : MemoryWriteError
+
     data class MemoryNotFound(val memoryId: String) : MemoryWriteError
     data class MemoryAlreadyExists(val memoryId: String) : MemoryWriteError
     data class ExperienceNotFound(val experienceId: String) : MemoryWriteError
+    data class ExperienceUnavailable(val experienceId: String) : MemoryWriteError
     data class EntityNotFound(val entityId: String) : MemoryWriteError
     data class RelatedMemoryNotFound(val memoryId: String) : MemoryWriteError
     data class ZeroEvidence(val memoryId: String) : MemoryWriteError
@@ -84,6 +95,32 @@ sealed interface MemoryWriteError {
         val causeType: String,
     ) : MemoryWriteError
 }
+
+enum class InvalidCandidateCreationReason {
+    BLANK_ID,
+    ID_TOO_LONG,
+    BLANK_MEANING,
+    MEANING_TOO_LONG,
+    DISALLOWED_STATE,
+    SEED_CANDIDATE_ID_MISMATCH,
+    SEED_ROLE_MISMATCH,
+    SEED_ORDER_MISMATCH,
+    BLANK_LINEAGE_KEY,
+    LINEAGE_KEY_TOO_LONG,
+}
+
+data class CreateCandidateMemoryInput(
+    val candidateId: String,
+    val proposedKind: MemoryKind,
+    val proposedScope: MemoryScope,
+    val proposedMeaning: String,
+    val proposedEpistemicBasis: EpistemicBasis,
+    val proposedCertainty: MemoryCertainty,
+    val state: CandidateMemoryState,
+    val sensitivity: SensitivityLevel,
+    val seedEvidence: CandidateEvidenceWriteInput,
+    val occurredAt: Long,
+)
 
 data class CandidateEvidenceWriteInput(
     val candidateId: String,

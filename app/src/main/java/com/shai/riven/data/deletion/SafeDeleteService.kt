@@ -18,7 +18,7 @@ import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
-import java.security.MessageDigest
+import com.shai.riven.data.memory.sourceLineageHash
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -524,10 +524,7 @@ class SafeDeleteService(
     }
 
     private fun MemoryEvidenceEntity.lineageHash(): String {
-        val canonicalLineage = "$experienceId:$lineageKey"
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(canonicalLineage.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { byte -> "%02x".format(byte) }
+        return sourceLineageHash(experienceId, lineageKey)
     }
 
     private fun requireExperience(experienceId: String) =

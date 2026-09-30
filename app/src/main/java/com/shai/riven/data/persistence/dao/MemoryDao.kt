@@ -111,6 +111,34 @@ interface MemoryDao {
     @Query("SELECT * FROM candidate_memory_evidence WHERE candidate_memory_id = :candidateMemoryId ORDER BY evidence_order")
     fun candidateEvidence(candidateMemoryId: String): List<CandidateMemoryEvidenceEntity>
 
+    @Query(
+        """
+        SELECT candidate_memory_evidence.* FROM candidate_memory_evidence
+        INNER JOIN candidate_memories
+            ON candidate_memories.candidate_memory_id = candidate_memory_evidence.candidate_memory_id
+        WHERE candidate_memory_evidence.experience_id = :experienceId
+          AND candidate_memory_evidence.lineage_key = :lineageKey
+          AND candidate_memory_evidence.role = 'SEED'
+        ORDER BY candidate_memories.created_at, candidate_memories.candidate_memory_id
+        """,
+    )
+    fun candidateSeedEvidenceByLineage(
+        experienceId: String,
+        lineageKey: String,
+    ): List<CandidateMemoryEvidenceEntity>
+
+    @Query(
+        """
+        SELECT candidate_memory_evidence.* FROM candidate_memory_evidence
+        INNER JOIN candidate_memories
+            ON candidate_memories.candidate_memory_id = candidate_memory_evidence.candidate_memory_id
+        WHERE candidate_memory_evidence.experience_id = :experienceId
+          AND candidate_memory_evidence.role = 'SEED'
+        ORDER BY candidate_memories.created_at, candidate_memories.candidate_memory_id
+        """,
+    )
+    fun candidateSeedEvidenceForExperience(experienceId: String): List<CandidateMemoryEvidenceEntity>
+
     @Query("SELECT COUNT(*) FROM candidate_memory_evidence WHERE candidate_memory_id = :candidateMemoryId AND role = :role")
     fun candidateEvidenceRoleCount(candidateMemoryId: String, role: CandidateEvidenceRole): Int
 

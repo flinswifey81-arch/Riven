@@ -3,6 +3,7 @@ package com.shai.riven.data.memory
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
@@ -15,6 +16,7 @@ import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.EvidenceRole
+import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.MemoryAuditAction
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
@@ -25,7 +27,6 @@ import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
-import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -35,6 +36,21 @@ class MemoryTransactionService(
 ) {
     private val memoryDao = database.memoryDao()
     private val maintenanceDao = database.maintenanceDao()
+
+    suspend fun createCandidate(input: CreateCandidateMemoryInput): MemoryWriteResult =
+        execute(MemoryWriteOperation.CREATE_CANDIDATE) {
+            createCandidateOrThrow(input)
+        }
+
+    /**
+     * Canonical Candidate + initial SEED insertion while the caller owns the surrounding Room
+     * transaction. Candidate extraction uses this so a multi-proposal extraction is all-or-none.
+     */
+    internal fun createCandidateInCurrentTransaction(
+        input: CreateCandidateMemoryInput,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.CREATE_CANDIDATE) {
+        createCandidateOrThrow(input)
+    }
 
     suspend fun addCandidateEvidence(input: CandidateEvidenceWriteInput): MemoryWriteResult =
         execute(MemoryWriteOperation.ADD_CANDIDATE_EVIDENCE) {
@@ -69,6 +85,86 @@ class MemoryTransactionService(
                 candidateId = input.candidateId,
             )
         }
+
+    private fun createCandidateOrThrow(
+        input: CreateCandidateMemoryInput,
+    ): MemoryWriteResult.Success {
+        if (input.candidateId.isBlank()) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.BLANK_ID))
+        }
+        if (input.candidateId.length > MAX_CANDIDATE_ID_CHARS) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.ID_TOO_LONG))
+        }
+        if (memoryDao.candidateMemory(input.candidateId) != null) {
+            abort(MemoryWriteError.CandidateAlreadyExists(input.candidateId))
+        }
+        if (input.proposedMeaning.isBlank()) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.BLANK_MEANING))
+        }
+        if (input.proposedMeaning.length > MAX_CANDIDATE_MEANING_CHARS) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.MEANING_TOO_LONG))
+        }
+        if (input.state !in ALLOWED_CANDIDATE_CREATION_STATES) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.DISALLOWED_STATE))
+        }
+        val seed = input.seedEvidence
+        if (seed.candidateId != input.candidateId) {
+            abort(
+                MemoryWriteError.InvalidCandidateCreation(
+                    InvalidCandidateCreationReason.SEED_CANDIDATE_ID_MISMATCH,
+                ),
+            )
+        }
+        if (seed.role != CandidateEvidenceRole.SEED) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.SEED_ROLE_MISMATCH))
+        }
+        if (seed.evidenceOrder != 0) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.SEED_ORDER_MISMATCH))
+        }
+        if (seed.lineageKey.isBlank()) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.BLANK_LINEAGE_KEY))
+        }
+        if (seed.lineageKey.length > MAX_CANDIDATE_LINEAGE_KEY_CHARS) {
+            abort(MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.LINEAGE_KEY_TOO_LONG))
+        }
+        val experience = memoryDao.experience(seed.experienceId)
+            ?: abort(MemoryWriteError.ExperienceNotFound(seed.experienceId))
+        if (experience.availability != ExperienceAvailability.AVAILABLE) {
+            abort(MemoryWriteError.ExperienceUnavailable(seed.experienceId))
+        }
+        if (memoryDao.candidateEvidenceExists(input.candidateId, seed.experienceId) != 0) {
+            abort(MemoryWriteError.CandidateEvidenceAlreadyExists(input.candidateId, seed.experienceId))
+        }
+
+        memoryDao.insertCandidateMemory(
+            CandidateMemoryEntity(
+                id = input.candidateId,
+                proposedKind = input.proposedKind,
+                proposedScope = input.proposedScope,
+                proposedMeaning = input.proposedMeaning,
+                proposedEpistemicBasis = input.proposedEpistemicBasis,
+                proposedCertainty = input.proposedCertainty,
+                state = input.state,
+                sensitivity = input.sensitivity,
+                createdAt = input.occurredAt,
+                updatedAt = input.occurredAt,
+            ),
+        )
+        memoryDao.insertCandidateMemoryEvidence(
+            CandidateMemoryEvidenceEntity(
+                candidateMemoryId = input.candidateId,
+                experienceId = seed.experienceId,
+                evidenceOrder = 0,
+                role = CandidateEvidenceRole.SEED,
+                lineageKey = seed.lineageKey,
+                createdAt = input.occurredAt,
+            ),
+        )
+        return MemoryWriteResult.Success(
+            operation = MemoryWriteOperation.CREATE_CANDIDATE,
+            candidateId = input.candidateId,
+        )
+    }
 
     suspend fun admitCandidate(input: AdmitCandidateMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.ADMIT_CANDIDATE) {
@@ -725,9 +821,7 @@ class MemoryTransactionService(
     }
 
     private fun MemoryEvidenceEntity.lineageHash(): String {
-        val canonicalLineage = "$experienceId:$lineageKey"
-        val digest = MessageDigest.getInstance("SHA-256").digest(canonicalLineage.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { byte -> "%02x".format(byte) }
+        return sourceLineageHash(experienceId, lineageKey)
     }
 
     private fun CandidateEvidenceRole.toMemoryEvidenceRole(): EvidenceRole = when (this) {
@@ -745,5 +839,10 @@ class MemoryTransactionService(
 
     private companion object {
         const val REPAIR_TARGET_MEMORY = "MEMORY"
+        val ALLOWED_CANDIDATE_CREATION_STATES = setOf(
+            CandidateMemoryState.PENDING_CONTEXT,
+            CandidateMemoryState.TENTATIVE,
+            CandidateMemoryState.READY_FOR_VALIDATION,
+        )
     }
 }

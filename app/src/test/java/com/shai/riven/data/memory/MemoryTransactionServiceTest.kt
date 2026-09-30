@@ -83,6 +83,153 @@ class MemoryTransactionServiceTest {
     }
 
     @Test
+    fun canonicalCandidateCreationPersistsCandidateAndExactlyOneSeedAtomically() = runBlocking {
+        insertExperience("experience-create", 1)
+
+        val result = service.createCandidate(createCandidateInput())
+
+        val success = assertSuccess(result)
+        assertEquals(MemoryWriteOperation.CREATE_CANDIDATE, success.operation)
+        assertEquals("candidate-create", success.candidateId)
+        val candidate = database.memoryDao().candidateMemory("candidate-create")!!
+        assertEquals("Candidate meaning.", candidate.proposedMeaning)
+        assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, candidate.state)
+        assertEquals(42, candidate.createdAt)
+        val evidence = database.memoryDao().candidateEvidence("candidate-create").single()
+        assertEquals("experience-create", evidence.experienceId)
+        assertEquals(CandidateEvidenceRole.SEED, evidence.role)
+        assertEquals(0, evidence.evidenceOrder)
+        assertEquals("opaque-lineage", evidence.lineageKey)
+        assertEquals(42, evidence.createdAt)
+    }
+
+    @Test
+    fun canonicalCandidateCreationRejectsDuplicateCandidateIdWithoutExtraEvidence() = runBlocking {
+        insertExperience("experience-create", 1)
+        assertSuccess(service.createCandidate(createCandidateInput()))
+
+        val error = assertFailure(service.createCandidate(createCandidateInput()))
+
+        assertEquals(MemoryWriteError.CandidateAlreadyExists("candidate-create"), error)
+        assertEquals(1, database.memoryDao().candidateMemoryCount())
+        assertEquals(1, database.memoryDao().candidateMemoryEvidenceCount("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationRejectsMissingSeedExperienceWithoutCandidateRow() = runBlocking {
+        val error = assertFailure(service.createCandidate(createCandidateInput()))
+
+        assertEquals(MemoryWriteError.ExperienceNotFound("experience-create"), error)
+        assertNull(database.memoryDao().candidateMemory("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationRejectsUnavailableSeedExperienceWithoutCandidateRow() = runBlocking {
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = "experience-create",
+                eventOrder = 1,
+                experienceType = ExperienceType.SHARED_EVENT,
+                actor = ExperienceActor.SHAI,
+                sourceContent = "Unavailable evidence.",
+                occurredAt = 1,
+                recordedAt = 1,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = ExperienceAvailability.DELETED,
+            ),
+        )
+
+        val error = assertFailure(service.createCandidate(createCandidateInput()))
+
+        assertEquals(MemoryWriteError.ExperienceUnavailable("experience-create"), error)
+        assertNull(database.memoryDao().candidateMemory("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationRejectsResolvedState() = runBlocking {
+        insertExperience("experience-create", 1)
+
+        val error = assertFailure(
+            service.createCandidate(createCandidateInput(state = CandidateMemoryState.ACCEPTED)),
+        )
+
+        assertEquals(
+            MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.DISALLOWED_STATE),
+            error,
+        )
+        assertNull(database.memoryDao().candidateMemory("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationRejectsBlankLineage() = runBlocking {
+        insertExperience("experience-create", 1)
+
+        val error = assertFailure(service.createCandidate(createCandidateInput(lineageKey = " \t")))
+
+        assertEquals(
+            MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.BLANK_LINEAGE_KEY),
+            error,
+        )
+        assertNull(database.memoryDao().candidateMemory("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationRejectsNonZeroSeedOrder() = runBlocking {
+        insertExperience("experience-create", 1)
+
+        val error = assertFailure(service.createCandidate(createCandidateInput(evidenceOrder = 1)))
+
+        assertEquals(
+            MemoryWriteError.InvalidCandidateCreation(InvalidCandidateCreationReason.SEED_ORDER_MISMATCH),
+            error,
+        )
+        assertNull(database.memoryDao().candidateMemory("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationMakesMultipleSeedsImpossible() = runBlocking {
+        insertExperience("experience-create", 1)
+        insertExperience("experience-second", 2)
+        assertSuccess(service.createCandidate(createCandidateInput()))
+
+        val error = assertFailure(
+            service.addCandidateEvidence(
+                CandidateEvidenceWriteInput(
+                    candidateId = "candidate-create",
+                    experienceId = "experience-second",
+                    evidenceOrder = 1,
+                    role = CandidateEvidenceRole.SEED,
+                    lineageKey = "second-opaque-lineage",
+                    createdAt = 43,
+                ),
+            ),
+        )
+
+        assertEquals(MemoryWriteError.CandidateSeedAlreadyExists("candidate-create"), error)
+        assertEquals(1, database.memoryDao().candidateMemoryEvidenceCount("candidate-create"))
+    }
+
+    @Test
+    fun canonicalCandidateCreationRollsBackCandidateWhenSeedInsertFails() = runBlocking {
+        insertExperience("experience-create", 1)
+        database.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER fail_candidate_seed
+            BEFORE INSERT ON candidate_memory_evidence
+            BEGIN
+                SELECT RAISE(ABORT, 'forced test failure');
+            END
+            """.trimIndent(),
+        )
+
+        val error = assertFailure(service.createCandidate(createCandidateInput()))
+
+        assertTrue(error is MemoryWriteError.StorageFailure)
+        assertNull(database.memoryDao().candidateMemory("candidate-create"))
+        assertEquals(0, database.memoryDao().candidateMemoryEvidenceCount("candidate-create"))
+    }
+
+    @Test
     fun secondSeedEvidenceIsRejectedWhileSupportingEvidenceRemainsAllowed() = runBlocking {
         insertCandidate("candidate-1", CandidateMemoryState.TENTATIVE)
         insertExperience("experience-1", 1)
@@ -796,6 +943,30 @@ class MemoryTransactionServiceTest {
             ),
         )
     }
+
+    private fun createCandidateInput(
+        state: CandidateMemoryState = CandidateMemoryState.READY_FOR_VALIDATION,
+        lineageKey: String = "opaque-lineage",
+        evidenceOrder: Int = 0,
+    ) = CreateCandidateMemoryInput(
+        candidateId = "candidate-create",
+        proposedKind = MemoryKind.SEMANTIC,
+        proposedScope = MemoryScope.SHAI,
+        proposedMeaning = "Candidate meaning.",
+        proposedEpistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+        proposedCertainty = MemoryCertainty.PROBABLE,
+        state = state,
+        sensitivity = SensitivityLevel.SENSITIVE,
+        seedEvidence = CandidateEvidenceWriteInput(
+            candidateId = "candidate-create",
+            experienceId = "experience-create",
+            evidenceOrder = evidenceOrder,
+            role = CandidateEvidenceRole.SEED,
+            lineageKey = lineageKey,
+            createdAt = 42,
+        ),
+        occurredAt = 42,
+    )
 
     private fun candidateEvidence(
         candidateId: String,
