@@ -39,6 +39,9 @@ interface MemoryDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertCandidateMemoryEvidence(evidence: CandidateMemoryEvidenceEntity)
 
+    @Update
+    fun updateCandidateMemory(candidate: CandidateMemoryEntity)
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertMemory(memory: MemoryEntity)
 
@@ -156,6 +159,15 @@ interface MemoryDao {
 
     @Query("SELECT * FROM memory_evidence WHERE memory_id = :memoryId ORDER BY created_at, experience_id")
     fun evidenceForMemory(memoryId: String): List<MemoryEvidenceEntity>
+
+    @Query(
+        """
+        SELECT * FROM memory_relationships
+        WHERE source_memory_id = :memoryId OR target_memory_id = :memoryId
+        ORDER BY created_at, source_memory_id, target_memory_id, relationship_type
+        """,
+    )
+    fun directRelationshipsForMemory(memoryId: String): List<MemoryRelationshipEntity>
 
     @Query("SELECT COUNT(*) FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId")
     fun memoryEvidenceExists(memoryId: String, experienceId: String): Int

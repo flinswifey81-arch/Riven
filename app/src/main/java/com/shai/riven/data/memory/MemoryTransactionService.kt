@@ -168,91 +168,33 @@ class MemoryTransactionService(
 
     suspend fun admitCandidate(input: AdmitCandidateMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.ADMIT_CANDIDATE) {
-            val candidate = memoryDao.candidateMemory(input.candidateId)
-                ?: abort(MemoryWriteError.CandidateNotFound(input.candidateId))
-            if (candidate.state != CandidateMemoryState.READY_FOR_VALIDATION) {
-                abort(MemoryWriteError.InvalidCandidateState(candidate.id, candidate.state))
-            }
-            val candidateEvidence = memoryDao.candidateEvidence(candidate.id)
-            if (candidateEvidence.isEmpty()) {
-                abort(MemoryWriteError.CandidateHasNoEvidence(candidate.id))
-            }
-            if (candidateEvidence.count { it.role == CandidateEvidenceRole.SEED } > 1) {
-                abort(MemoryWriteError.CandidateHasMultipleSeedEvidence(candidate.id))
-            }
-
-            val validated = ValidatedMemoryInput(
-                memoryId = input.memoryId,
-                kind = candidate.proposedKind,
-                scope = candidate.proposedScope,
-                meaning = candidate.proposedMeaning,
-                epistemicBasis = candidate.proposedEpistemicBasis,
-                certainty = candidate.proposedCertainty,
-                learnedAt = input.learnedAt,
-                sensitivity = candidate.sensitivity,
-                evidence = candidateEvidence.map { evidence ->
-                    MemoryEvidenceInput(
-                        experienceId = evidence.experienceId,
-                        role = evidence.role.toMemoryEvidenceRole(),
-                        epistemicBasis = candidate.proposedEpistemicBasis,
-                        sourceCertainty = candidate.proposedCertainty,
-                        lineageKey = evidence.lineageKey,
-                    )
-                },
-                temporalState = input.temporalState,
-                validFrom = input.validFrom,
-                validUntil = input.validUntil,
-                significance = input.significance,
-                entityLinks = input.entityLinks,
-                relationships = input.relationships,
-            )
-            insertValidatedMemory(validated, input.occurredAt)
-            memoryDao.deleteCandidateMemory(candidate.id)
-
-            MemoryWriteResult.Success(
-                operation = MemoryWriteOperation.ADMIT_CANDIDATE,
-                affectedMemoryIds = setOf(input.memoryId),
-                candidateId = input.candidateId,
-            )
+            admitCandidateOrThrow(input)
         }
+
+    internal fun admitCandidateInCurrentTransaction(
+        input: AdmitCandidateMemoryInput,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.ADMIT_CANDIDATE) {
+        admitCandidateOrThrow(input)
+    }
 
     suspend fun reinforce(input: ReinforceMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.REINFORCE) {
-            val memory = requireMemory(input.memoryId)
-            requireMutableUnderstanding(memory, MemoryWriteOperation.REINFORCE)
-            requireExperience(input.evidence.experienceId)
-            if (memoryDao.memoryEvidenceExists(memory.id, input.evidence.experienceId) != 0) {
-                abort(MemoryWriteError.DuplicateEvidence(memory.id, input.evidence.experienceId))
-            }
-            if (memoryDao.memoryEvidenceLineageExists(memory.id, input.evidence.lineageKey) != 0) {
-                abort(MemoryWriteError.DuplicateEvidenceLineage(memory.id, input.evidence.lineageKey))
-            }
-
-            memoryDao.insertMemoryEvidence(
-                MemoryEvidenceEntity(
-                    memoryId = memory.id,
-                    experienceId = input.evidence.experienceId,
-                    role = EvidenceRole.SUPPORTS,
-                    epistemicBasis = input.evidence.epistemicBasis,
-                    sourceCertainty = input.evidence.sourceCertainty,
-                    lineageKey = input.evidence.lineageKey,
-                    createdAt = input.occurredAt,
+            reinforceOrThrow(
+                ReinforceMemorySetInput(
+                    memoryId = input.memoryId,
+                    evidence = listOf(input.evidence),
+                    confirmedAt = input.confirmedAt,
+                    occurredAt = input.occurredAt,
+                    triggeringExperienceId = input.evidence.experienceId,
                 ),
             )
-            memoryDao.updateMemory(
-                memory.copy(
-                    lastConfirmedAt = input.confirmedAt,
-                    updatedAt = input.occurredAt,
-                ),
-            )
-            insertAudit(
-                memoryId = memory.id,
-                action = MemoryAuditAction.REINFORCED,
-                triggeringExperienceId = input.evidence.experienceId,
-                occurredAt = input.occurredAt,
-            )
-            MemoryWriteResult.Success(MemoryWriteOperation.REINFORCE, setOf(memory.id))
         }
+
+    internal fun reinforceInCurrentTransaction(
+        input: ReinforceMemorySetInput,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.REINFORCE) {
+        reinforceOrThrow(input)
+    }
 
     suspend fun correct(input: CorrectMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.CORRECT) { correctInCurrentTransactionOrThrow(input) }
@@ -283,143 +225,71 @@ class MemoryTransactionService(
             correctInCurrentTransactionOrThrow(input)
         }
 
+    internal fun transitionCandidateInCurrentTransaction(
+        candidateId: String,
+        expectedState: CandidateMemoryState,
+        nextState: CandidateMemoryState,
+        updatedAt: Long,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.ADMIT_CANDIDATE) {
+        val candidate = memoryDao.candidateMemory(candidateId)
+            ?: abort(MemoryWriteError.CandidateNotFound(candidateId))
+        if (candidate.state != expectedState) {
+            abort(MemoryWriteError.InvalidCandidateState(candidateId, candidate.state))
+        }
+        memoryDao.updateCandidateMemory(candidate.copy(state = nextState, updatedAt = updatedAt))
+        MemoryWriteResult.Success(
+            operation = MemoryWriteOperation.ADMIT_CANDIDATE,
+            candidateId = candidateId,
+        )
+    }
+
+    internal fun consumeCandidateInCurrentTransaction(
+        candidateId: String,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.ADMIT_CANDIDATE) {
+        val candidate = memoryDao.candidateMemory(candidateId)
+            ?: abort(MemoryWriteError.CandidateNotFound(candidateId))
+        if (candidate.state != CandidateMemoryState.READY_FOR_VALIDATION) {
+            abort(MemoryWriteError.InvalidCandidateState(candidateId, candidate.state))
+        }
+        memoryDao.deleteCandidateMemory(candidateId)
+        MemoryWriteResult.Success(
+            operation = MemoryWriteOperation.ADMIT_CANDIDATE,
+            candidateId = candidateId,
+        )
+    }
+
     suspend fun supersede(input: SupersedeMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.SUPERSEDE) {
-            val old = requireMemory(input.historicalMemoryId)
-            requireCurrentSupportedMemory(old, MemoryWriteOperation.SUPERSEDE)
-            requireTriggeringExperience(input.triggeringExperienceId)
-            val replacement = input.replacement.copy(temporalState = TemporalState.CURRENT)
-            insertValidatedMemory(replacement, input.occurredAt)
-
-            val historical = old.copy(
-                lifecycleState = MemoryLifecycleState.SUPERSEDED,
-                temporalState = TemporalState.HISTORICAL,
-                validUntil = old.validUntil ?: input.occurredAt,
-                updatedAt = input.occurredAt,
-            )
-            memoryDao.updateMemory(historical)
-            memoryDao.insertMemoryRelationship(
-                MemoryRelationshipEntity(
-                    sourceMemoryId = replacement.memoryId,
-                    targetMemoryId = old.id,
-                    relationshipType = MemoryRelationshipType.SUPERSEDES,
-                    createdByExperienceId = input.triggeringExperienceId,
-                    createdAt = input.occurredAt,
-                ),
-            )
-            insertAudit(
-                memoryId = old.id,
-                action = MemoryAuditAction.SUPERSEDED,
-                triggeringExperienceId = input.triggeringExperienceId,
-                fromTruthState = old.truthState,
-                toTruthState = historical.truthState,
-                fromLifecycleState = old.lifecycleState,
-                toLifecycleState = historical.lifecycleState,
-                occurredAt = input.occurredAt,
-            )
-            invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-            MemoryWriteResult.Success(MemoryWriteOperation.SUPERSEDE, setOf(old.id, replacement.memoryId))
+            supersedeOrThrow(input)
         }
+
+    internal fun supersedeInCurrentTransaction(
+        input: SupersedeMemoryInput,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.SUPERSEDE) {
+        supersedeOrThrow(input)
+    }
 
     suspend fun refine(input: RefineMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.REFINE) {
-            val old = requireMemory(input.broaderMemoryId)
-            requireCurrentSupportedMemory(old, MemoryWriteOperation.REFINE)
-            requireTriggeringExperience(input.triggeringExperienceId)
-            val refinement = input.refinement.copy(temporalState = TemporalState.CURRENT)
-            insertValidatedMemory(refinement, input.occurredAt)
-
-            val broaderAfterRefinement = when (input.disposition) {
-                RefinementDisposition.KEEP_BROADER_CURRENT -> old
-                RefinementDisposition.SUPERSEDE_BROADER -> old.copy(
-                    lifecycleState = MemoryLifecycleState.SUPERSEDED,
-                    temporalState = TemporalState.HISTORICAL,
-                    validUntil = old.validUntil ?: input.occurredAt,
-                    updatedAt = input.occurredAt,
-                ).also { memoryDao.updateMemory(it) }
-            }
-            memoryDao.insertMemoryRelationship(
-                MemoryRelationshipEntity(
-                    sourceMemoryId = refinement.memoryId,
-                    targetMemoryId = old.id,
-                    relationshipType = MemoryRelationshipType.REFINES,
-                    createdByExperienceId = input.triggeringExperienceId,
-                    createdAt = input.occurredAt,
-                ),
-            )
-            insertAudit(
-                memoryId = old.id,
-                action = MemoryAuditAction.REFINED,
-                triggeringExperienceId = input.triggeringExperienceId,
-                fromTruthState = old.truthState,
-                toTruthState = broaderAfterRefinement.truthState,
-                fromLifecycleState = old.lifecycleState,
-                toLifecycleState = broaderAfterRefinement.lifecycleState,
-                occurredAt = input.occurredAt,
-            )
-            invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-            MemoryWriteResult.Success(MemoryWriteOperation.REFINE, setOf(old.id, refinement.memoryId))
+            refineOrThrow(input)
         }
+
+    internal fun refineInCurrentTransaction(
+        input: RefineMemoryInput,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.REFINE) {
+        refineOrThrow(input)
+    }
 
     suspend fun dispute(input: DisputeMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.DISPUTE) {
-            val primary = requireMemory(input.memoryId)
-            requireMutableUnderstanding(primary, MemoryWriteOperation.DISPUTE)
-            if (primary.truthState == MemoryTruthState.DISPUTED && primary.certainty == MemoryCertainty.DISPUTED) {
-                abort(
-                    MemoryWriteError.IllegalStateTransition(
-                        primary.id,
-                        MemoryWriteOperation.DISPUTE,
-                        "DISPUTED",
-                    ),
-                )
-            }
-            requireTriggeringExperience(input.triggeringExperienceId)
-            val memories = buildList {
-                add(primary)
-                input.competingMemoryId?.let { competingId ->
-                    if (competingId == primary.id) {
-                        abort(MemoryWriteError.InvalidTarget(MemoryWriteOperation.DISPUTE, competingId, "self-contradiction"))
-                    }
-                    val competing = requireMemory(competingId)
-                    requireMutableUnderstanding(competing, MemoryWriteOperation.DISPUTE)
-                    add(competing)
-                }
-            }
-
-            memories.forEach { memory ->
-                val disputed = memory.copy(
-                    truthState = MemoryTruthState.DISPUTED,
-                    certainty = MemoryCertainty.DISPUTED,
-                    updatedAt = input.occurredAt,
-                )
-                memoryDao.updateMemory(disputed)
-                insertAudit(
-                    memoryId = memory.id,
-                    action = MemoryAuditAction.DISPUTED,
-                    triggeringExperienceId = input.triggeringExperienceId,
-                    fromTruthState = memory.truthState,
-                    toTruthState = disputed.truthState,
-                    fromCertainty = memory.certainty,
-                    toCertainty = disputed.certainty,
-                    occurredAt = input.occurredAt,
-                )
-            }
-            input.competingMemoryId?.let { competingId ->
-                memoryDao.insertMemoryRelationship(
-                    MemoryRelationshipEntity(
-                        sourceMemoryId = primary.id,
-                        targetMemoryId = competingId,
-                        relationshipType = MemoryRelationshipType.CONTRADICTS,
-                        createdByExperienceId = input.triggeringExperienceId,
-                        createdAt = input.occurredAt,
-                    ),
-                )
-            }
-            val affectedIds = memories.mapTo(linkedSetOf()) { it.id }
-            invalidateDerived(affectedIds, input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-            MemoryWriteResult.Success(MemoryWriteOperation.DISPUTE, affectedIds)
+            disputeOrThrow(input)
         }
+
+    internal fun disputeInCurrentTransaction(
+        input: DisputeMemoryInput,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.DISPUTE) {
+        disputeOrThrow(input)
+    }
 
     suspend fun moveDormant(input: MemoryStateTransitionInput): MemoryWriteResult =
         changeRetention(
@@ -525,6 +395,242 @@ class MemoryTransactionService(
         MemoryWriteResult.Success(operation, setOf(memory.id))
     }
 
+    private fun admitCandidateOrThrow(input: AdmitCandidateMemoryInput): MemoryWriteResult.Success {
+        val candidate = memoryDao.candidateMemory(input.candidateId)
+            ?: abort(MemoryWriteError.CandidateNotFound(input.candidateId))
+        if (candidate.state != CandidateMemoryState.READY_FOR_VALIDATION) {
+            abort(MemoryWriteError.InvalidCandidateState(candidate.id, candidate.state))
+        }
+        val candidateEvidence = memoryDao.candidateEvidence(candidate.id)
+        if (candidateEvidence.isEmpty()) {
+            abort(MemoryWriteError.CandidateHasNoEvidence(candidate.id))
+        }
+        if (candidateEvidence.count { it.role == CandidateEvidenceRole.SEED } != 1) {
+            abort(MemoryWriteError.CandidateHasMultipleSeedEvidence(candidate.id))
+        }
+
+        val validated = ValidatedMemoryInput(
+            memoryId = input.memoryId,
+            kind = candidate.proposedKind,
+            scope = candidate.proposedScope,
+            meaning = candidate.proposedMeaning,
+            epistemicBasis = candidate.proposedEpistemicBasis,
+            certainty = candidate.proposedCertainty,
+            learnedAt = input.learnedAt,
+            sensitivity = input.sensitivity ?: candidate.sensitivity,
+            evidence = candidateEvidence.map { evidence ->
+                MemoryEvidenceInput(
+                    experienceId = evidence.experienceId,
+                    role = evidence.role.toMemoryEvidenceRole(),
+                    epistemicBasis = candidate.proposedEpistemicBasis,
+                    sourceCertainty = candidate.proposedCertainty,
+                    lineageKey = evidence.lineageKey,
+                )
+            },
+            temporalState = input.temporalState,
+            validFrom = input.validFrom,
+            validUntil = input.validUntil,
+            lastConfirmedAt = input.lastConfirmedAt,
+            significance = input.significance,
+            entityLinks = input.entityLinks,
+            relationships = input.relationships,
+        )
+        insertValidatedMemory(validated, input.occurredAt)
+        memoryDao.deleteCandidateMemory(candidate.id)
+
+        return MemoryWriteResult.Success(
+            operation = MemoryWriteOperation.ADMIT_CANDIDATE,
+            affectedMemoryIds = setOf(input.memoryId),
+            candidateId = input.candidateId,
+        )
+    }
+
+    private fun reinforceOrThrow(input: ReinforceMemorySetInput): MemoryWriteResult.Success {
+        val memory = requireMemory(input.memoryId)
+        requireMutableUnderstanding(memory, MemoryWriteOperation.REINFORCE)
+        if (input.evidence.isEmpty()) abort(MemoryWriteError.ZeroEvidence(memory.id))
+        val duplicateExperience = input.evidence.groupingBy { it.experienceId }.eachCount()
+            .entries.firstOrNull { it.value > 1 }?.key
+        if (duplicateExperience != null) {
+            abort(MemoryWriteError.DuplicateEvidence(memory.id, duplicateExperience))
+        }
+        val duplicateLineage = input.evidence.groupingBy { it.lineageKey }.eachCount()
+            .entries.firstOrNull { it.value > 1 }?.key
+        if (duplicateLineage != null) {
+            abort(MemoryWriteError.DuplicateEvidenceLineage(memory.id, duplicateLineage))
+        }
+        input.evidence.forEach { evidence ->
+            requireExperience(evidence.experienceId)
+            if (memoryDao.memoryEvidenceExists(memory.id, evidence.experienceId) != 0) {
+                abort(MemoryWriteError.DuplicateEvidence(memory.id, evidence.experienceId))
+            }
+            if (memoryDao.memoryEvidenceLineageExists(memory.id, evidence.lineageKey) != 0) {
+                abort(MemoryWriteError.DuplicateEvidenceLineage(memory.id, evidence.lineageKey))
+            }
+        }
+        input.evidence.forEach { evidence ->
+            memoryDao.insertMemoryEvidence(
+                MemoryEvidenceEntity(
+                    memoryId = memory.id,
+                    experienceId = evidence.experienceId,
+                    role = EvidenceRole.SUPPORTS,
+                    epistemicBasis = evidence.epistemicBasis,
+                    sourceCertainty = evidence.sourceCertainty,
+                    lineageKey = evidence.lineageKey,
+                    createdAt = input.occurredAt,
+                ),
+            )
+        }
+        memoryDao.updateMemory(
+            memory.copy(
+                lastConfirmedAt = input.confirmedAt,
+                updatedAt = input.occurredAt,
+            ),
+        )
+        insertAudit(
+            memoryId = memory.id,
+            action = MemoryAuditAction.REINFORCED,
+            triggeringExperienceId = input.triggeringExperienceId,
+            occurredAt = input.occurredAt,
+        )
+        return MemoryWriteResult.Success(MemoryWriteOperation.REINFORCE, setOf(memory.id))
+    }
+
+    private fun supersedeOrThrow(input: SupersedeMemoryInput): MemoryWriteResult.Success {
+        val old = requireMemory(input.historicalMemoryId)
+        requireCurrentSupportedMemory(old, MemoryWriteOperation.SUPERSEDE)
+        requireTriggeringExperience(input.triggeringExperienceId)
+        val replacement = input.replacement.copy(temporalState = TemporalState.CURRENT)
+        insertValidatedMemory(replacement, input.occurredAt)
+
+        val historical = old.copy(
+            lifecycleState = MemoryLifecycleState.SUPERSEDED,
+            temporalState = TemporalState.HISTORICAL,
+            validUntil = old.validUntil ?: input.occurredAt,
+            updatedAt = input.occurredAt,
+        )
+        memoryDao.updateMemory(historical)
+        memoryDao.insertMemoryRelationship(
+            MemoryRelationshipEntity(
+                sourceMemoryId = replacement.memoryId,
+                targetMemoryId = old.id,
+                relationshipType = MemoryRelationshipType.SUPERSEDES,
+                createdByExperienceId = input.triggeringExperienceId,
+                createdAt = input.occurredAt,
+            ),
+        )
+        insertAudit(
+            memoryId = old.id,
+            action = MemoryAuditAction.SUPERSEDED,
+            triggeringExperienceId = input.triggeringExperienceId,
+            fromTruthState = old.truthState,
+            toTruthState = historical.truthState,
+            fromLifecycleState = old.lifecycleState,
+            toLifecycleState = historical.lifecycleState,
+            occurredAt = input.occurredAt,
+        )
+        invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
+        return MemoryWriteResult.Success(MemoryWriteOperation.SUPERSEDE, setOf(old.id, replacement.memoryId))
+    }
+
+    private fun refineOrThrow(input: RefineMemoryInput): MemoryWriteResult.Success {
+        val old = requireMemory(input.broaderMemoryId)
+        requireCurrentSupportedMemory(old, MemoryWriteOperation.REFINE)
+        requireTriggeringExperience(input.triggeringExperienceId)
+        val refinement = input.refinement.copy(temporalState = TemporalState.CURRENT)
+        insertValidatedMemory(refinement, input.occurredAt)
+
+        val broaderAfterRefinement = when (input.disposition) {
+            RefinementDisposition.KEEP_BROADER_CURRENT -> old
+            RefinementDisposition.SUPERSEDE_BROADER -> old.copy(
+                lifecycleState = MemoryLifecycleState.SUPERSEDED,
+                temporalState = TemporalState.HISTORICAL,
+                validUntil = old.validUntil ?: input.occurredAt,
+                updatedAt = input.occurredAt,
+            ).also { memoryDao.updateMemory(it) }
+        }
+        memoryDao.insertMemoryRelationship(
+            MemoryRelationshipEntity(
+                sourceMemoryId = refinement.memoryId,
+                targetMemoryId = old.id,
+                relationshipType = MemoryRelationshipType.REFINES,
+                createdByExperienceId = input.triggeringExperienceId,
+                createdAt = input.occurredAt,
+            ),
+        )
+        insertAudit(
+            memoryId = old.id,
+            action = MemoryAuditAction.REFINED,
+            triggeringExperienceId = input.triggeringExperienceId,
+            fromTruthState = old.truthState,
+            toTruthState = broaderAfterRefinement.truthState,
+            fromLifecycleState = old.lifecycleState,
+            toLifecycleState = broaderAfterRefinement.lifecycleState,
+            occurredAt = input.occurredAt,
+        )
+        invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
+        return MemoryWriteResult.Success(MemoryWriteOperation.REFINE, setOf(old.id, refinement.memoryId))
+    }
+
+    private fun disputeOrThrow(input: DisputeMemoryInput): MemoryWriteResult.Success {
+        val primary = requireMemory(input.memoryId)
+        requireMutableUnderstanding(primary, MemoryWriteOperation.DISPUTE)
+        if (primary.truthState == MemoryTruthState.DISPUTED && primary.certainty == MemoryCertainty.DISPUTED) {
+            abort(
+                MemoryWriteError.IllegalStateTransition(
+                    primary.id,
+                    MemoryWriteOperation.DISPUTE,
+                    "DISPUTED",
+                ),
+            )
+        }
+        requireTriggeringExperience(input.triggeringExperienceId)
+        val memories = buildList {
+            add(primary)
+            input.competingMemoryId?.let { competingId ->
+                if (competingId == primary.id) {
+                    abort(MemoryWriteError.InvalidTarget(MemoryWriteOperation.DISPUTE, competingId, "self-contradiction"))
+                }
+                val competing = requireMemory(competingId)
+                requireMutableUnderstanding(competing, MemoryWriteOperation.DISPUTE)
+                add(competing)
+            }
+        }
+
+        memories.forEach { memory ->
+            val disputed = memory.copy(
+                truthState = MemoryTruthState.DISPUTED,
+                certainty = MemoryCertainty.DISPUTED,
+                updatedAt = input.occurredAt,
+            )
+            memoryDao.updateMemory(disputed)
+            insertAudit(
+                memoryId = memory.id,
+                action = MemoryAuditAction.DISPUTED,
+                triggeringExperienceId = input.triggeringExperienceId,
+                fromTruthState = memory.truthState,
+                toTruthState = disputed.truthState,
+                fromCertainty = memory.certainty,
+                toCertainty = disputed.certainty,
+                occurredAt = input.occurredAt,
+            )
+        }
+        input.competingMemoryId?.let { competingId ->
+            memoryDao.insertMemoryRelationship(
+                MemoryRelationshipEntity(
+                    sourceMemoryId = primary.id,
+                    targetMemoryId = competingId,
+                    relationshipType = MemoryRelationshipType.CONTRADICTS,
+                    createdByExperienceId = input.triggeringExperienceId,
+                    createdAt = input.occurredAt,
+                ),
+            )
+        }
+        val affectedIds = memories.mapTo(linkedSetOf()) { it.id }
+        invalidateDerived(affectedIds, input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
+        return MemoryWriteResult.Success(MemoryWriteOperation.DISPUTE, affectedIds)
+    }
+
     private fun insertValidatedMemory(
         input: ValidatedMemoryInput,
         occurredAt: Long,
@@ -628,7 +734,7 @@ class MemoryTransactionService(
         val old = requireMemory(input.inaccurateMemoryId)
         requireMutableUnderstanding(old, MemoryWriteOperation.CORRECT)
         requireTriggeringExperience(input.triggeringExperienceId)
-        val replacement = input.replacement.copy(temporalState = TemporalState.CURRENT)
+        val replacement = input.replacement
         insertValidatedMemory(replacement, input.occurredAt)
 
         val corrected = old.copy(

@@ -484,6 +484,37 @@ class MemoryTransactionServiceTest {
     }
 
     @Test
+    fun correctionPreservesValidatedHistoricalReplacementTemporalState() = runBlocking {
+        insertExperience("experience-old", 1)
+        insertExperience("experience-new", 2)
+        insertCanonicalMemory("memory-old", "experience-old")
+
+        assertSuccess(
+            service.correct(
+                CorrectMemoryInput(
+                    inaccurateMemoryId = "memory-old",
+                    replacement = validatedMemory(
+                        "memory-new",
+                        "experience-new",
+                        "Corrected historical event.",
+                    ).copy(
+                        temporalState = TemporalState.HISTORICAL,
+                        validFrom = 10,
+                        validUntil = 20,
+                    ),
+                    occurredAt = 30,
+                    triggeringExperienceId = "experience-new",
+                ),
+            ),
+        )
+
+        val replacement = database.memoryDao().memory("memory-new")!!
+        assertEquals(TemporalState.HISTORICAL, replacement.temporalState)
+        assertEquals(10L, replacement.validFrom)
+        assertEquals(20L, replacement.validUntil)
+    }
+
+    @Test
     fun failedCorrectionLeavesOriginalMemoryUnchanged() = runBlocking {
         insertExperience("experience-old", 1)
         insertCanonicalMemory("memory-old", "experience-old")

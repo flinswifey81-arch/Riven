@@ -11,6 +11,8 @@ import com.shai.riven.data.attachment.AttachmentByteSource
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
+import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationDraftEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
@@ -20,6 +22,8 @@ import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntit
 import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
+import com.shai.riven.data.persistence.entity.MemoryEntity
+import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
@@ -27,6 +31,8 @@ import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.AttentionSignal
 import com.shai.riven.data.persistence.model.AttentionSignalPolarity
+import com.shai.riven.data.persistence.model.CandidateEvidenceRole
+import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ConversationStatus
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.DerivedArtifactType
@@ -34,9 +40,18 @@ import com.shai.riven.data.persistence.model.GeneratedMediaKind
 import com.shai.riven.data.persistence.model.ExperienceActor
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.ExperienceType
+import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.EvidenceRole
+import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryLifecycleState
+import com.shai.riven.data.persistence.model.MemoryRetentionState
+import com.shai.riven.data.persistence.model.MemoryScope
+import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.TemporalState
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -659,6 +674,101 @@ class RivenArchiveExportAndStageTest {
                 database.experienceAttentionDao().signals("attention-experience"),
                 staged.experienceAttentionDao().signals("attention-experience"),
             )
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun versionSevenArchivePreservesDeferredRejectedCandidatesAndValidatedMemory() {
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = "validation-experience",
+                eventOrder = 1,
+                experienceType = ExperienceType.OTHER,
+                actor = ExperienceActor.SHAI,
+                sourceContent = "validation evidence",
+                occurredAt = 1,
+                recordedAt = 1,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = ExperienceAvailability.AVAILABLE,
+            ),
+        )
+        listOf(
+            "candidate-deferred" to CandidateMemoryState.PENDING_CONTEXT,
+            "candidate-rejected" to CandidateMemoryState.REJECTED,
+        ).forEachIndexed { index, (id, state) ->
+            database.memoryDao().insertCandidateMemory(
+                CandidateMemoryEntity(
+                    id = id,
+                    proposedKind = MemoryKind.SEMANTIC,
+                    proposedScope = MemoryScope.SHAI,
+                    proposedMeaning = "candidate-$index",
+                    proposedEpistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                    proposedCertainty = MemoryCertainty.PROBABLE,
+                    state = state,
+                    sensitivity = SensitivityLevel.STANDARD,
+                    createdAt = 2 + index.toLong(),
+                    updatedAt = 2 + index.toLong(),
+                ),
+            )
+            database.memoryDao().insertCandidateMemoryEvidence(
+                CandidateMemoryEvidenceEntity(
+                    id,
+                    "validation-experience",
+                    0,
+                    CandidateEvidenceRole.SEED,
+                    "candidate-lineage-$index",
+                    2 + index.toLong(),
+                ),
+            )
+        }
+        database.memoryDao().insertMemory(
+            MemoryEntity(
+                id = "validated-memory",
+                kind = MemoryKind.SEMANTIC,
+                scope = MemoryScope.SHAI,
+                meaning = "validated meaning",
+                epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                certainty = MemoryCertainty.PROBABLE,
+                truthState = MemoryTruthState.SUPPORTED,
+                retentionState = MemoryRetentionState.ACTIVE,
+                lifecycleState = MemoryLifecycleState.VALIDATED,
+                temporalState = TemporalState.CURRENT,
+                learnedAt = 4,
+                sensitivity = SensitivityLevel.STANDARD,
+                createdAt = 4,
+                updatedAt = 4,
+            ),
+        )
+        database.memoryDao().insertMemoryEvidence(
+            MemoryEvidenceEntity(
+                "validated-memory",
+                "validation-experience",
+                EvidenceRole.SUPPORTS,
+                EpistemicBasis.DIRECT_USER_STATEMENT,
+                MemoryCertainty.PROBABLE,
+                "validated-lineage",
+                4,
+            ),
+        )
+
+        assertTrue(stage(validArchive()) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            assertEquals(
+                CandidateMemoryState.PENDING_CONTEXT,
+                staged.memoryDao().candidateMemory("candidate-deferred")?.state,
+            )
+            assertEquals(
+                CandidateMemoryState.REJECTED,
+                staged.memoryDao().candidateMemory("candidate-rejected")?.state,
+            )
+            assertEquals(
+                MemoryLifecycleState.VALIDATED,
+                staged.memoryDao().memory("validated-memory")?.lifecycleState,
+            )
+            assertEquals(1, staged.memoryDao().memoryEvidenceCount("validated-memory"))
         } finally {
             staged.close()
         }

@@ -192,6 +192,8 @@ data class AdmitCandidateMemoryInput(
     val temporalState: TemporalState = TemporalState.CURRENT,
     val validFrom: Long? = null,
     val validUntil: Long? = null,
+    val lastConfirmedAt: Long? = null,
+    val sensitivity: SensitivityLevel? = null,
     val significance: IntrinsicSignificanceInput = IntrinsicSignificanceInput(),
     val entityLinks: List<MemoryEntityLinkInput> = emptyList(),
     val relationships: List<MemoryRelationshipInput> = emptyList(),
@@ -202,6 +204,14 @@ data class ReinforceMemoryInput(
     val evidence: ReinforcementEvidenceInput,
     val confirmedAt: Long,
     val occurredAt: Long,
+)
+
+internal data class ReinforceMemorySetInput(
+    val memoryId: String,
+    val evidence: List<ReinforcementEvidenceInput>,
+    val confirmedAt: Long,
+    val occurredAt: Long,
+    val triggeringExperienceId: String,
 )
 
 data class CorrectMemoryInput(
