@@ -447,7 +447,12 @@ class ProviderNeutralConversationEngineTest {
 
         releaseActive.complete(Unit)
         assertTrue(active.all { it.await() is ConversationEngineResult.Succeeded })
+        val followUpEntered = AtomicInteger(0)
+        val allFollowUpsEntered = CompletableDeferred<Unit>()
+        val releaseFollowUps = CompletableDeferred<Unit>()
         val followUpAdapter = FakeAdapter { _, emit ->
+            if (followUpEntered.incrementAndGet() == 4) allFollowUpsEntered.complete(Unit)
+            releaseFollowUps.await()
             emit(ProviderStreamEvent.Delta("follow-up success"))
             emit(ProviderStreamEvent.Completed())
         }
@@ -460,6 +465,8 @@ class ProviderNeutralConversationEngineTest {
                 ).execute(pressureInput(index, "follow-up"))
             }
         }
+        withTimeout(5_000) { allFollowUpsEntered.await() }
+        releaseFollowUps.complete(Unit)
         assertTrue(followUps.all { it.await() is ConversationEngineResult.Succeeded })
         assertEquals(4, activeAdapter.invocationCount.get())
         assertEquals(4, followUpAdapter.invocationCount.get())
