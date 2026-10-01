@@ -4,7 +4,6 @@ import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 
 internal object ConversationEngineOwnerRegistry {
@@ -31,8 +30,17 @@ class ConversationRunLimiter(
     suspend fun <T> withPermitOrNull(
         timeoutMillis: Long,
         block: suspend () -> T,
-    ): T? = withTimeoutOrNull(timeoutMillis) {
-        semaphore.withPermit { block() }
+    ): T? {
+        val acquired = withTimeoutOrNull(timeoutMillis) {
+            semaphore.acquire()
+            true
+        } ?: false
+        if (!acquired) return null
+        return try {
+            block()
+        } finally {
+            semaphore.release()
+        }
     }
 }
 

@@ -11,6 +11,7 @@ import com.shai.riven.data.context.RivenContextCollectionResult
 import com.shai.riven.data.context.RivenContextContentAuthority
 import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextFreshnessValidation
+import com.shai.riven.data.context.RivenContextSnapshot
 import com.shai.riven.data.context.RivenConversationContextRequest
 import com.shai.riven.data.context.RivenCurrentInteraction
 import com.shai.riven.data.context.ShaiSystemInstructionsReceiptValidator
@@ -51,10 +52,16 @@ class ProviderNeutralConversationEngine(
     private val limits: ConversationEngineLimits = ConversationEngineLimits(),
     private val clock: () -> Long = System::currentTimeMillis,
     private val limiter: ConversationRunLimiter = ConversationRunLimiterPool.forMaximum(limits.maxConcurrentRuns),
+    profileReceiptValidator: ProviderProfileReceiptValidator? = null,
+    beforeFinalRoomTransaction: suspend () -> Unit = {},
     ownerSessionToken: String = ConversationEngineOwnerRegistry.newToken(),
 ) : AutoCloseable {
     private val ownerSessionToken = ownerSessionToken
-    private val persistence = ConversationRunPersistence(database, ephemeralStateStore)
+    private val persistence = ConversationRunPersistence(
+        database = database,
+        ephemeralStateStore = ephemeralStateStore,
+        beforeFinalRoomTransaction = beforeFinalRoomTransaction,
+    )
     private val activeCalls = ConcurrentHashMap<String, ActiveCall>()
     private val freshnessValidator = ConversationalContextFreshnessValidator(
         activeConversationValidator = ActiveConversationReceiptValidator { receipt ->
@@ -70,7 +77,7 @@ class ProviderNeutralConversationEngine(
                 is ShaiSystemInstructionsReadResult.Failure -> false
             }
         },
-        profileValidator = ProviderProfileReceiptValidator { receipt ->
+        profileValidator = profileReceiptValidator ?: ProviderProfileReceiptValidator { receipt ->
             when (val result = profileService.profile(receipt.profileId)) {
                 is ProviderProfileReadResult.Success -> result.profile.let { profile ->
                     profile.isEnabled &&
@@ -93,21 +100,32 @@ class ProviderNeutralConversationEngine(
 
     suspend fun execute(input: StartConversationRunInput): ConversationEngineResult {
         check(!closed.get()) { "Conversation engine is closed" }
-        return when (val reservation = persistence.reserve(input, ownerSessionToken)) {
-            is ReserveConversationRunResult.Existing -> ConversationEngineResult.Existing(
-                reservation.run.toSnapshot(),
-            )
-            is ReserveConversationRunResult.Failure -> ConversationEngineResult.Failed(null, reservation.code)
-            is ReserveConversationRunResult.Reserved -> {
-                val limited = limiter.withPermitOrNull(limits.concurrencyWaitMillis) {
-                    executeReserved(reservation.run, reservation.userMessage.content)
-                }
-                limited ?: failRun(
-                    reservation.run,
-                    ConversationEngineErrorCode.CONCURRENCY_LIMIT,
-                    ConversationRunState.FAILED,
-                )
+        var reserved: ConversationRunEntity? = null
+        try {
+            val reservation = withContext(NonCancellable) {
+                persistence.reserve(input, ownerSessionToken)
             }
+            if (reservation is ReserveConversationRunResult.Reserved) reserved = reservation.run
+            coroutineContext.ensureActive()
+            return when (reservation) {
+                is ReserveConversationRunResult.Existing -> ConversationEngineResult.Existing(
+                    reservation.run.toSnapshot(),
+                )
+                is ReserveConversationRunResult.Failure -> ConversationEngineResult.Failed(null, reservation.code)
+                is ReserveConversationRunResult.Reserved -> {
+                    val limited = limiter.withPermitOrNull(limits.concurrencyWaitMillis) {
+                        executeReserved(reservation.run, reservation.userMessage.content)
+                    }
+                    limited ?: failRun(
+                        reservation.run,
+                        ConversationEngineErrorCode.CONCURRENCY_LIMIT,
+                        ConversationRunState.FAILED,
+                    )
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            reserved?.let { settleCancellation(it) }
+            throw cancelled
         }
     }
 
@@ -289,10 +307,7 @@ class ProviderNeutralConversationEngine(
             val awaitingRun = (awaiting as? RunMutationResult.Updated)?.run
                 ?: return mutationFailure(awaiting, attachedRun)
 
-            val dispatchNow = clock()
-            if (freshnessValidator.validate(contextSnapshot, dispatchNow) !is
-                RivenContextFreshnessValidation.Current
-            ) {
+            if (!contextIsCurrentAtDispatchBoundary(contextSnapshot)) {
                 return failRun(
                     awaitingRun,
                     ConversationEngineErrorCode.CONTEXT_STALE,
@@ -302,7 +317,8 @@ class ProviderNeutralConversationEngine(
 
             val stream = StreamAccumulator(limits)
             try {
-                // This is deliberately the first suspending call after final dispatch validation.
+                // This is deliberately the first suspending call after the coherent Room snapshot
+                // and live synchronous recall/expiry checks in contextIsCurrentAtDispatchBoundary.
                 withTimeout(limits.maxProviderDurationMillis) {
                     adapter.stream(request) { event ->
                         coroutineContext.ensureActive()
@@ -365,6 +381,7 @@ class ProviderNeutralConversationEngine(
                         content = stream.content(),
                         providerRequestId = terminal.providerRequestId,
                         occurredAt = commitNow,
+                        eligibilityClock = clock,
                     )
                 }
             ) {
@@ -396,17 +413,6 @@ class ProviderNeutralConversationEngine(
                 ConversationRunState.FAILED,
             )
         } catch (cancelled: CancellationException) {
-            withContext(NonCancellable) {
-                persistence.requestCancellation(reserved.runId, clock())
-                persistence.finishWithoutContent(
-                    runId = reserved.runId,
-                    ownerSessionToken = ownerSessionToken,
-                    state = ConversationRunState.CANCELLED,
-                    errorCode = ConversationEngineErrorCode.CANCELLED,
-                    providerRequestId = persistence.run(reserved.runId)?.providerRequestId,
-                    occurredAt = clock(),
-                )
-            }
             throw cancelled
         } catch (_: Exception) {
             return failRun(
@@ -441,6 +447,33 @@ class ProviderNeutralConversationEngine(
             else -> persistence.run(run.runId)?.toSnapshot()
         }
         return ConversationEngineResult.Failed(snapshot, code)
+    }
+
+    private suspend fun contextIsCurrentAtDispatchBoundary(
+        snapshot: RivenContextSnapshot,
+    ): Boolean {
+        if (freshnessValidator.validate(snapshot, clock()) !is RivenContextFreshnessValidation.Current) {
+            return false
+        }
+        // This coherent Room transaction is the final suspension. Nothing below may suspend before
+        // the adapter call: process-local recall and expiry are sampled against the live clock last.
+        if (!persistence.roomReceiptsCurrent(snapshot)) return false
+        return freshnessValidator.validateSynchronousReceipts(snapshot, clock()) is
+            RivenContextFreshnessValidation.Current
+    }
+
+    private suspend fun settleCancellation(run: ConversationRunEntity) {
+        withContext(NonCancellable) {
+            persistence.requestCancellation(run.runId, clock())
+            persistence.finishWithoutContent(
+                runId = run.runId,
+                ownerSessionToken = ownerSessionToken,
+                state = ConversationRunState.CANCELLED,
+                errorCode = ConversationEngineErrorCode.CANCELLED,
+                providerRequestId = persistence.run(run.runId)?.providerRequestId,
+                occurredAt = clock(),
+            )
+        }
     }
 
     private suspend fun mutationFailure(

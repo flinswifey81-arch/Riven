@@ -10,6 +10,7 @@ import com.shai.riven.data.context.EphemeralAppStateExposure
 import com.shai.riven.data.context.EphemeralAppStateStore
 import com.shai.riven.data.context.EphemeralAppStateWriteResult
 import com.shai.riven.data.context.PublishEphemeralAppStateInput
+import com.shai.riven.data.context.ProviderProfileReceiptValidator
 import com.shai.riven.data.context.RivenContextBudgetBehavior
 import com.shai.riven.data.context.RivenContextCollectionResult
 import com.shai.riven.data.context.RivenContextContentAuthority
@@ -47,6 +48,7 @@ import com.shai.riven.data.experience.ConversationExperienceService
 import com.shai.riven.data.instructions.SaveShaiSystemInstructionsInput
 import com.shai.riven.data.instructions.ShaiSystemInstructionsContextSource
 import com.shai.riven.data.instructions.ShaiSystemInstructionsService
+import com.shai.riven.data.instructions.ShaiSystemInstructionsWriteResult
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.MessageAttachmentEntity
@@ -72,11 +74,14 @@ import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -234,6 +239,158 @@ class ProviderNeutralConversationEngineTest {
         release.complete(Unit)
         first.await()
         Unit
+    }
+
+    @Test
+    fun providerRunMayOutlivePermitQueueTimeoutWhenItRemainsWithinProviderTimeout() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val result = engine(
+            adapter = FakeAdapter { _, emit ->
+                delay(150)
+                emit(ProviderStreamEvent.Delta("slow success"))
+                emit(ProviderStreamEvent.Completed())
+            },
+            limits = ConversationEngineLimits(
+                maxProviderDurationMillis = 1_000,
+                concurrencyWaitMillis = 25,
+            ),
+        ).execute(input())
+
+        assertTrue(result is ConversationEngineResult.Succeeded)
+        assertEquals(ConversationRunState.SUCCEEDED, database.conversationRunDao().run("run-1")!!.state)
+    }
+
+    @Test
+    fun saturatedPermitTimesOutQueuedRunWithoutInvokingItsAdapter() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        createConversationAndUser("conversation-2", "user-2")
+        createProfile("profile-2")
+        val limiter = ConversationRunLimiter(1)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val firstAdapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("first"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val first = async {
+            engine(
+                adapter = firstAdapter,
+                limiter = limiter,
+                limits = ConversationEngineLimits(concurrencyWaitMillis = 1_000),
+            ).execute(input())
+        }
+        entered.await()
+        val queuedAdapter = FakeAdapter { _, _ -> error("queued adapter must not be invoked") }
+        val queued = engine(
+            adapter = queuedAdapter,
+            limiter = limiter,
+            limits = ConversationEngineLimits(concurrencyWaitMillis = 50),
+        ).execute(
+            input().copy(
+                runId = "run-queued",
+                idempotencyKey = "key-queued",
+                conversationId = "conversation-2",
+                userMessageId = "user-2",
+                assistantMessageId = "assistant-queued",
+                profileId = "profile-2",
+            ),
+        ) as ConversationEngineResult.Failed
+
+        assertEquals(ConversationEngineErrorCode.CONCURRENCY_LIMIT, queued.code)
+        assertEquals(0, queuedAdapter.invocationCount.get())
+        assertEquals(ConversationRunState.FAILED, database.conversationRunDao().run("run-queued")!!.state)
+        assertNull(database.conversationRunDao().activeRun("conversation-2"))
+        release.complete(Unit)
+        assertTrue(first.await() is ConversationEngineResult.Succeeded)
+    }
+
+    @Test
+    fun cancellingQueuedRunDurablyClearsSlotAndAllowsRetry() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        createConversationAndUser("conversation-2", "user-2")
+        createProfile("profile-2")
+        val limiter = ConversationRunLimiter(1)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val first = async {
+            engine(
+                adapter = FakeAdapter { _, emit ->
+                    entered.complete(Unit)
+                    release.await()
+                    emit(ProviderStreamEvent.Delta("first"))
+                    emit(ProviderStreamEvent.Completed())
+                },
+                limiter = limiter,
+                limits = ConversationEngineLimits(concurrencyWaitMillis = 5_000),
+            ).execute(input())
+        }
+        entered.await()
+        val queuedAdapter = FakeAdapter { _, _ -> error("cancelled queued adapter must not run") }
+        val queued = async {
+            engine(
+                adapter = queuedAdapter,
+                limiter = limiter,
+                limits = ConversationEngineLimits(concurrencyWaitMillis = 5_000),
+            ).execute(
+                input().copy(
+                    runId = "run-queued",
+                    idempotencyKey = "key-queued",
+                    conversationId = "conversation-2",
+                    userMessageId = "user-2",
+                    assistantMessageId = "assistant-queued",
+                    profileId = "profile-2",
+                ),
+            )
+        }
+        withTimeout(1_000) {
+            while (database.conversationRunDao().run("run-queued") == null) yield()
+        }
+        assertEquals(ConversationRunState.PREPARING, database.conversationRunDao().run("run-queued")!!.state)
+        queued.cancel()
+        val cancellationPropagated = try {
+            queued.await()
+            false
+        } catch (_: CancellationException) {
+            true
+        }
+
+        assertTrue(cancellationPropagated)
+        assertEquals(0, queuedAdapter.invocationCount.get())
+        assertEquals(ConversationRunState.CANCELLED, database.conversationRunDao().run("run-queued")!!.state)
+        assertNull(database.conversationRunDao().activeRun("conversation-2"))
+        assertEquals(
+            MessageDeliveryState.CANCELLED,
+            database.conversationTimelineDao().message("assistant-queued")!!.deliveryState,
+        )
+        release.complete(Unit)
+        assertTrue(first.await() is ConversationEngineResult.Succeeded)
+
+        val retryRevision = database.conversationTimelineDao().timelineHead("conversation-2")!!.timelineRevision
+        val retry = engine(
+            adapter = FakeAdapter { _, emit ->
+                emit(ProviderStreamEvent.Delta("retry succeeded"))
+                emit(ProviderStreamEvent.Completed())
+            },
+            limiter = limiter,
+        ).execute(
+            input().copy(
+                runId = "run-retry-after-queue-cancel",
+                idempotencyKey = "key-retry-after-queue-cancel",
+                conversationId = "conversation-2",
+                userMessageId = "user-2",
+                assistantMessageId = "assistant-retry-after-queue-cancel",
+                profileId = "profile-2",
+                trigger = ConversationRunTrigger.RETRY,
+                retryOfRunId = "run-queued",
+                expectedTimelineRevision = retryRevision,
+            ),
+        )
+        assertTrue(retry is ConversationEngineResult.Succeeded)
     }
 
     @Test
@@ -674,7 +831,74 @@ class ProviderNeutralConversationEngineTest {
     }
 
     @Test
-    fun ephemeralExpiryDuringPreparationBlocksDispatchWithoutStoreMutation() = runBlocking {
+    fun rewindAndInstructionEditDuringQueuedProfileReadBlockDispatch() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        assertTrue(
+            instructions.save(SaveShaiSystemInstructionsInput("Initial", true, 0, 10)) is
+                ShaiSystemInstructionsWriteResult.Saved,
+        )
+        assertTrue(
+            timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    conversationId = CONVERSATION_ID,
+                    message = NewTimelineMessageInput(
+                        messageId = "user-2",
+                        role = MessageRole.USER,
+                        deliveryState = MessageDeliveryState.PERSISTED,
+                        content = "Second turn",
+                        createdAt = 3,
+                        updatedAt = 3,
+                    ),
+                    expectedTimelineRevision = 1,
+                    occurredAt = 3,
+                ),
+            ) is TimelineWriteResult.MessageAppended,
+        )
+        val profileReadEntered = CompletableDeferred<Unit>()
+        val releaseProfileRead = CompletableDeferred<Unit>()
+        val heldProfileRead = ProviderProfileReceiptValidator {
+            profileReadEntered.complete(Unit)
+            releaseProfileRead.await()
+            true
+        }
+        val adapter = FakeAdapter { _, _ -> error("stale context must not be dispatched") }
+        val execution = async {
+            engine(
+                adapter = adapter,
+                profileReceiptValidator = heldProfileRead,
+            ).execute(
+                input().copy(
+                    userMessageId = "user-2",
+                    expectedTimelineRevision = 2,
+                ),
+            )
+        }
+        profileReadEntered.await()
+        assertTrue(
+            timeline.rewindTo(
+                RewindTimelineInput(
+                    conversationId = CONVERSATION_ID,
+                    targetMessageId = "user-1",
+                    expectedTimelineRevision = 3,
+                    occurredAt = 20,
+                ),
+            ) is TimelineWriteResult.Rewound,
+        )
+        assertTrue(
+            instructions.save(SaveShaiSystemInstructionsInput("Edited", true, 1, 20)) is
+                ShaiSystemInstructionsWriteResult.Saved,
+        )
+        releaseProfileRead.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals(0, adapter.invocationCount.get())
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+    }
+
+    @Test
+    fun ephemeralExpiryDuringQueuedProfileReadBlocksDispatchWithoutStoreMutation() = runBlocking {
         createConversationAndUser()
         createProfile()
         ephemeral.publish(
@@ -690,8 +914,18 @@ class ProviderNeutralConversationEngineTest {
         )
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
+        val heldProfileRead = ProviderProfileReceiptValidator {
+            entered.complete(Unit)
+            release.await()
+            true
+        }
         val adapter = FakeAdapter { _, _ -> error("must not be invoked") }
-        val execution = async { engine(adapter, listOf(HoldingSource(entered, release))).execute(input()) }
+        val execution = async {
+            engine(
+                adapter = adapter,
+                profileReceiptValidator = heldProfileRead,
+            ).execute(input())
+        }
         entered.await()
         clock.set(151)
         release.complete(Unit)
@@ -699,6 +933,53 @@ class ProviderNeutralConversationEngineTest {
         val result = execution.await() as ConversationEngineResult.Failed
         assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
         assertEquals(0, adapter.invocationCount.get())
+    }
+
+    @Test
+    fun ephemeralExpiryWhileFinalRoomTransactionIsQueuedRejectsBufferedOutput() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        assertTrue(
+            ephemeral.publish(
+                PublishEphemeralAppStateInput(
+                    stateId = "commit-window",
+                    content = "temporary",
+                    exposure = EphemeralAppStateExposure.RIVEN_CONTEXT,
+                    priority = 1,
+                    expectedRevision = 0,
+                    observedAt = 100,
+                    validUntil = 1_000,
+                ),
+            ) is EphemeralAppStateWriteResult.Published,
+        )
+        val transactionQueued = CompletableDeferred<Unit>()
+        val releaseTransaction = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("must not commit"))
+            emit(ProviderStreamEvent.Completed("expired-before-commit"))
+        }
+        val execution = async {
+            engine(
+                adapter = adapter,
+                beforeFinalRoomTransaction = {
+                    transactionQueued.complete(Unit)
+                    releaseTransaction.await()
+                },
+            ).execute(input())
+        }
+        transactionQueued.await()
+        clock.set(1_001)
+        releaseTransaction.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals(1, adapter.invocationCount.get())
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
     }
 
     @Test
@@ -878,6 +1159,9 @@ class ProviderNeutralConversationEngineTest {
             maxProviderDurationMillis = 5_000,
             concurrencyWaitMillis = 1_000,
         ),
+        limiter: ConversationRunLimiter = ConversationRunLimiterPool.forMaximum(limits.maxConcurrentRuns),
+        profileReceiptValidator: ProviderProfileReceiptValidator? = null,
+        beforeFinalRoomTransaction: suspend () -> Unit = {},
     ): ProviderNeutralConversationEngine {
         val registry = RivenContextSourceRegistry(
             listOf(
@@ -897,6 +1181,9 @@ class ProviderNeutralConversationEngineTest {
             adapterRegistry = ProviderAdapterRegistry(listOf(adapter)),
             limits = limits,
             clock = clock::incrementAndGet,
+            limiter = limiter,
+            profileReceiptValidator = profileReceiptValidator,
+            beforeFinalRoomTransaction = beforeFinalRoomTransaction,
         ).also(engines::add)
     }
 

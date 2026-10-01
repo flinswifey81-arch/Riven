@@ -50,14 +50,10 @@ class ConversationalContextFreshnessValidator(
         val stale = linkedSetOf<RivenContextFreshnessReceipt>()
         val activeConversationReceipts = snapshot.freshnessReceipts
             .filterIsInstance<RivenContextFreshnessReceipt.ActiveConversation>()
-        val recallReceipts = snapshot.freshnessReceipts
-            .filterIsInstance<RivenContextFreshnessReceipt.ConversationalRecall>()
         val instructionReceipts = snapshot.freshnessReceipts
             .filterIsInstance<RivenContextFreshnessReceipt.ShaiSystemInstructions>()
         val profileReceipts = snapshot.freshnessReceipts
             .filterIsInstance<RivenContextFreshnessReceipt.ProviderProfile>()
-        val ephemeralReceipts = snapshot.freshnessReceipts
-            .filterIsInstance<RivenContextFreshnessReceipt.EphemeralAppState>()
 
         // Complete every suspending read first. Recall receipts are deliberately rechecked only
         // after the final suspension so a concurrent forget/delete cannot become stale while a
@@ -71,6 +67,28 @@ class ConversationalContextFreshnessValidator(
         profileReceipts.forEach { receipt ->
             if (profileValidator?.isCurrent(receipt) != true) stale += receipt
         }
+        stale += staleSynchronousReceipts(snapshot, now)
+        return stale.toValidation()
+    }
+
+    /**
+     * Final non-suspending boundary for receipts backed by process-local fences or clocks. Callers
+     * can run this after every suspending Room read and immediately before dispatch.
+     */
+    fun validateSynchronousReceipts(
+        snapshot: RivenContextSnapshot,
+        now: Long,
+    ): RivenContextFreshnessValidation = staleSynchronousReceipts(snapshot, now).toValidation()
+
+    private fun staleSynchronousReceipts(
+        snapshot: RivenContextSnapshot,
+        now: Long,
+    ): Set<RivenContextFreshnessReceipt> {
+        val stale = linkedSetOf<RivenContextFreshnessReceipt>()
+        val recallReceipts = snapshot.freshnessReceipts
+            .filterIsInstance<RivenContextFreshnessReceipt.ConversationalRecall>()
+        val ephemeralReceipts = snapshot.freshnessReceipts
+            .filterIsInstance<RivenContextFreshnessReceipt.EphemeralAppState>()
         recallReceipts.forEach { receipt ->
             if (
                 !recallValidator.isCurrent(
@@ -87,10 +105,13 @@ class ConversationalContextFreshnessValidator(
         ephemeralReceipts.forEach { receipt ->
             if (ephemeralValidator?.isCurrent(receipt, now) != true) stale += receipt
         }
-        return if (stale.isEmpty()) {
+        return stale
+    }
+
+    private fun Set<RivenContextFreshnessReceipt>.toValidation(): RivenContextFreshnessValidation =
+        if (isEmpty()) {
             RivenContextFreshnessValidation.Current
         } else {
-            RivenContextFreshnessValidation.Stale(stale)
+            RivenContextFreshnessValidation.Stale(this)
         }
-    }
 }

@@ -53,6 +53,7 @@ internal sealed interface CompleteConversationRunResult {
 internal class ConversationRunPersistence(
     private val database: RivenDatabase,
     private val ephemeralStateStore: EphemeralAppStateStore,
+    private val beforeFinalRoomTransaction: suspend () -> Unit = {},
 ) {
     private val runDao = database.conversationRunDao()
     private val timelineDao = database.conversationTimelineDao()
@@ -407,6 +408,7 @@ internal class ConversationRunPersistence(
         content: String,
         providerRequestId: String?,
         occurredAt: Long,
+        eligibilityClock: () -> Long,
     ): CompleteConversationRunResult {
         if (content.isBlank() || providerRequestId?.length ?: 0 > MAX_PROVIDER_REQUEST_ID_CHARS) {
             return CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.PROVIDER_PROTOCOL)
@@ -419,11 +421,12 @@ internal class ConversationRunPersistence(
             return CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.CONTEXT_STALE)
         }
         val commit: suspend () -> CompleteConversationRunResult = {
-            val guarded = ephemeralStateStore.withFreshnessGuard(
-                receipt = ephemeralReceipts.singleOrNull(),
-                now = occurredAt,
-            ) {
-                database.runInTransaction<CompleteConversationRunResult> {
+            beforeFinalRoomTransaction()
+            database.withTransaction {
+                ephemeralStateStore.withFreshnessGuard(
+                    receipt = ephemeralReceipts.singleOrNull(),
+                    now = eligibilityClock(),
+                ) {
                     completeSuccessInCurrentTransaction(
                         runId = runId,
                         ownerSessionToken = ownerSessionToken,
@@ -432,9 +435,8 @@ internal class ConversationRunPersistence(
                         providerRequestId = providerRequestId,
                         occurredAt = occurredAt,
                     )
-                }
+                } ?: CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.CONTEXT_STALE)
             }
-            guarded ?: CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.CONTEXT_STALE)
         }
         return try {
             val recall = recallReceipts.singleOrNull()
@@ -485,6 +487,15 @@ internal class ConversationRunPersistence(
     fun attachmentIdsForMessage(messageId: String): List<String> =
         attachmentDao.attachmentIdsForMessage(messageId)
 
+    /** Coherent Room snapshot used as the final suspending pre-dispatch read. */
+    suspend fun roomReceiptsCurrent(snapshot: RivenContextSnapshot): Boolean = try {
+        database.withTransaction { roomReceiptsCurrentInCurrentTransaction(snapshot) }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        false
+    }
+
     private fun completeSuccessInCurrentTransaction(
         runId: String,
         ownerSessionToken: String,
@@ -509,7 +520,7 @@ internal class ConversationRunPersistence(
                 },
             )
         }
-        if (!roomReceiptsCurrent(contextSnapshot)) {
+        if (!roomReceiptsCurrentInCurrentTransaction(contextSnapshot)) {
             return CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.CONTEXT_STALE)
         }
         val head = timelineDao.timelineHead(run.conversationId)
@@ -564,7 +575,7 @@ internal class ConversationRunPersistence(
         return CompleteConversationRunResult.Committed(succeededRun, nextRevision)
     }
 
-    private fun roomReceiptsCurrent(snapshot: RivenContextSnapshot): Boolean {
+    private fun roomReceiptsCurrentInCurrentTransaction(snapshot: RivenContextSnapshot): Boolean {
         for (receipt in snapshot.freshnessReceipts) {
             when (receipt) {
                 is RivenContextFreshnessReceipt.ActiveConversation -> {
