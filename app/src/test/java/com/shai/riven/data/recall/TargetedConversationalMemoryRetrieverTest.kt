@@ -5,10 +5,26 @@ import androidx.room.Room
 import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.context.ActiveConversationReceiptValidator
+import com.shai.riven.data.context.ConversationalContextAssembler
+import com.shai.riven.data.context.ConversationalContextAssemblyInput
 import com.shai.riven.data.context.ConversationalContextFreshnessValidator
+import com.shai.riven.data.context.RivenContextBudgetBehavior
+import com.shai.riven.data.context.RivenContextCollectionResult
+import com.shai.riven.data.context.RivenContextContentAuthority
 import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextFreshnessValidation
+import com.shai.riven.data.context.RivenContextLayer
+import com.shai.riven.data.context.RivenContextPayload
+import com.shai.riven.data.context.RivenContextProvenanceClass
+import com.shai.riven.data.context.RivenContextReadRequest
 import com.shai.riven.data.context.RivenContextSnapshot
+import com.shai.riven.data.context.RivenContextSource
+import com.shai.riven.data.context.RivenContextSourceCriticality
+import com.shai.riven.data.context.RivenContextSourceDescriptor
+import com.shai.riven.data.context.RivenContextSourceRegistry
+import com.shai.riven.data.context.RivenContextSourceResult
+import com.shai.riven.data.context.RivenConversationContextRequest
+import com.shai.riven.data.context.RivenCurrentInteraction
 import com.shai.riven.data.conversation.AppendTimelineMessageInput
 import com.shai.riven.data.conversation.ConversationTimelineService
 import com.shai.riven.data.conversation.CreateTimelineConversationInput
@@ -448,6 +464,108 @@ class TargetedConversationalMemoryRetrieverTest {
         assertEquals(ConversationalRecallIncrementalWork(1, 0, 1), recall.incrementalWorkSnapshot())
     }
 
+    @Test
+    fun tenThousandMemoryContextAssemblyKeepsSixtyFourIncrementalAndBoundsSixtyFiveFallback() = runBlocking {
+        val reader = LargeConversationalCorpusReader(memoryCount = 10_000, graphVertices = 4_000)
+        val recall = TargetedConversationalMemoryRetriever(
+            database,
+            Dispatchers.IO,
+            ConversationalRecallLimits(),
+            reader,
+        )
+        closeables += recall
+        assertReady(recall.retrieve(query("topic0")))
+        assertEquals(1, reader.memoryPagePasses)
+
+        val sixtyFour = (0 until 64).map { "memory-${it.toString().padStart(5, '0')}" }.toSet()
+        reader.updateMeanings(sixtyFour, "batch64marker")
+        database.validationRecallCorpusFence().withCanonicalMutation(
+            change = { ValidationRecallCorpusChange.memoryIds(sixtyFour) },
+        ) { Unit }
+        val incremental = recall.retrieve(query("batch64marker0"))
+        assertReady(incremental)
+        assertEquals(listOf("memory-00000"), incremental.memories.map { it.memoryId })
+        assertEquals(1, reader.memoryPagePasses)
+        assertEquals(1, reader.memoryRowsCalls)
+
+        val sixtyFive = (100 until 165).map { "memory-${it.toString().padStart(5, '0')}" }.toSet()
+        reader.updateMeanings(sixtyFive, "batch65marker")
+        database.validationRecallCorpusFence().withCanonicalMutation(
+            change = { ValidationRecallCorpusChange.memoryIds(sixtyFive) },
+        ) { Unit }
+        val bounded = recall.retrieve(query("batch65marker0"))
+        assertEquals(ConversationalRecallReadiness.CAPACITY_EXCEEDED, bounded.readiness)
+        assertTrue(bounded.memories.isEmpty())
+        assertEquals(ConversationalRecallReadiness.READY, recall.prepare())
+        val rebuilt = recall.retrieve(query("batch65marker0"))
+        assertReady(rebuilt)
+        assertEquals(listOf("memory-00100"), rebuilt.memories.map { it.memoryId })
+        assertEquals(2, reader.memoryPagePasses)
+
+        val transcript = object : RivenContextSource {
+            override val descriptor = RivenContextSourceDescriptor(
+                sourceId = "STRESS_TRANSCRIPT",
+                layer = RivenContextLayer.ACTIVE_CANONICAL_CONVERSATION_AND_CURRENT_INTERACTION,
+                provenanceClass = RivenContextProvenanceClass.ACTIVE_CONVERSATION,
+                criticality = RivenContextSourceCriticality.REQUIRED,
+                orderWithinLayer = 0,
+                maxFragments = 32,
+                maxCharsPerFragment = 1_024,
+                maxAggregateChars = 32_768,
+                budgetBehavior = RivenContextBudgetBehavior.REQUIRED,
+            )
+
+            override suspend fun read(request: RivenContextReadRequest) = RivenContextSourceResult.Success(
+                (0 until 32).map { index ->
+                    RivenContextPayload("transcript-$index", "role=USER\n" + "t".repeat(700), observedAt = request.now)
+                },
+            )
+        }
+        val openLoops = object : RivenContextSource {
+            override val descriptor = RivenContextSourceDescriptor(
+                sourceId = "STRESS_OPEN_LOOPS",
+                layer = RivenContextLayer.RETRIEVED_DYNAMIC_MEMORY_OPEN_LOOPS_AND_TOOL_CONTEXT,
+                provenanceClass = RivenContextProvenanceClass.OPEN_LOOP,
+                criticality = RivenContextSourceCriticality.OPTIONAL,
+                orderWithinLayer = 20,
+                maxFragments = 4,
+                maxCharsPerFragment = 3_100,
+                maxAggregateChars = 12_400,
+                budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED,
+            )
+
+            override suspend fun read(request: RivenContextReadRequest) = RivenContextSourceResult.Success(
+                (0 until 4).map { index ->
+                    RivenContextPayload("loop-$index", "type=OPEN_LOOP\n" + "o".repeat(3_000), observedAt = request.now)
+                },
+            )
+        }
+        val assembled = ConversationalContextAssembler(
+            RivenContextSourceRegistry(
+                listOf(ConversationalMemoryContextSource(recall), openLoops, transcript),
+            ),
+        ).assemble(
+            ConversationalContextAssemblyInput(
+                now = 500,
+                conversation = RivenConversationContextRequest(
+                    conversationId = "stress-conversation",
+                    expectedTimelineRevision = 1,
+                    currentInteraction = RivenCurrentInteraction(content = "batch65marker0"),
+                ),
+            ),
+        ) as RivenContextCollectionResult.Success
+        val snapshot = assembled.snapshot
+        assertTrue(snapshot.fragments.size <= 48)
+        assertTrue(snapshot.fragments.sumOf { it.content.length } <= 32_768)
+        assertEquals(32, snapshot.fragments.count { it.sourceId == "STRESS_TRANSCRIPT" })
+        assertTrue(snapshot.fragments.any { it.sourceId == ConversationalMemoryContextSource.SOURCE_ID })
+        assertTrue(snapshot.budgetOmissions.any { it.sourceId == "STRESS_OPEN_LOOPS" })
+        assertTrue(
+            snapshot.fragments.filter { it.sourceId == ConversationalMemoryContextSource.SOURCE_ID }
+                .all { it.contentAuthority == RivenContextContentAuthority.UNTRUSTED_DATA },
+        )
+    }
+
     private fun retriever(limits: ConversationalRecallLimits = ConversationalRecallLimits()) =
         TargetedConversationalMemoryRetriever(database, limits = limits).also { closeables += it }
 
@@ -562,6 +680,12 @@ class TargetedConversationalMemoryRetrieverTest {
 
         fun updateIsolated(meaning: String) {
             rows["isolated"] = row("isolated", meaning)
+        }
+
+        fun updateMeanings(memoryIds: Set<String>, prefix: String) {
+            memoryIds.sorted().forEachIndexed { index, memoryId ->
+                rows[memoryId] = row(memoryId, "$prefix$index")
+            }
         }
 
         override fun memoryPage(afterMemoryId: String, limit: Int, maxMeaningCharsPlusOne: Int): List<ConversationalRecallMemoryRow> {

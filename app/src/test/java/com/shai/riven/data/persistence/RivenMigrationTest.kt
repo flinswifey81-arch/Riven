@@ -781,6 +781,61 @@ class RivenMigrationTest {
     }
 
     @Test
+    fun migrationOneToEightPreservesTwoHundredFiftyConversationsAndFiveThousandLinearMessages() {
+        migrationHelper.createDatabase(1).apply {
+            execSQL("BEGIN IMMEDIATE TRANSACTION")
+            repeat(250) { conversationIndex ->
+                val conversationId = "stress-conversation-${conversationIndex.toString().padStart(3, '0')}"
+                execSQL(
+                    "INSERT INTO conversations VALUES " +
+                        "('$conversationId', $conversationIndex, $conversationIndex, 'ACTIVE', 'Stress $conversationIndex')",
+                )
+                repeat(20) { messageIndex ->
+                    val messageId = "$conversationId-message-${messageIndex.toString().padStart(2, '0')}"
+                    execSQL(
+                        "INSERT INTO messages (message_id, conversation_id, sequence_number, role, " +
+                            "delivery_state, content, created_at, updated_at) VALUES " +
+                            "('$messageId', '$conversationId', ${messageIndex + 1}, " +
+                            "'${if (messageIndex % 2 == 0) "USER" else "ASSISTANT"}', " +
+                            "'${if (messageIndex % 2 == 0) "PERSISTED" else "SUCCEEDED"}', " +
+                            "'stress-content-$conversationIndex-$messageIndex', $messageIndex, $messageIndex)",
+                    )
+                }
+            }
+            execSQL("COMMIT")
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 8,
+            migrations = listOf(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+                MIGRATION_7_8,
+            ),
+        )
+
+        assertEquals(250L, migrated.rowCount("conversations"))
+        assertEquals(5_000L, migrated.rowCount("messages"))
+        assertEquals(250L, migrated.rowCount("conversation_timeline_heads"))
+        assertEquals(4_750L, migrated.rowCount("message_parent_edges"))
+        assertEquals(
+            "stress-conversation-249-message-19",
+            migrated.singleString(
+                "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                    "WHERE conversation_id='stress-conversation-249'",
+            ),
+        )
+        assertEquals(20, migrated.activePath("stress-conversation-249-message-19").size)
+        assertEquals(0L, migrated.rowCount("conversation_runs"))
+        migrated.close()
+    }
+
+    @Test
     fun historicalSchemaExportsOneThroughSevenRemainByteIdentical() {
         val expected = mapOf(
             1 to "8021b472cb9147553b9d9fda9e89716f82e927d7",

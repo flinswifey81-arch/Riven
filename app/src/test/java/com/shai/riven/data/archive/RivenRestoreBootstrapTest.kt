@@ -12,10 +12,33 @@ import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.RivenBackgroundWorker
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.ConversationEntity
+import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
+import com.shai.riven.data.persistence.entity.ExperienceEntity
+import com.shai.riven.data.persistence.entity.MemoryEntity
+import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
+import com.shai.riven.data.persistence.entity.MessageEntity
+import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.ConversationStatus
+import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.EvidenceRole
+import com.shai.riven.data.persistence.model.ExperienceActor
+import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.persistence.model.ExperienceType
+import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryLifecycleState
+import com.shai.riven.data.persistence.model.MemoryRetentionState
+import com.shai.riven.data.persistence.model.MemoryScope
+import com.shai.riven.data.persistence.model.MemoryTruthState
+import com.shai.riven.data.persistence.model.MessageDeliveryState
+import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.TemporalState
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -86,6 +109,37 @@ class RivenRestoreBootstrapTest {
             "restored attachment bytes".toByteArray(),
             File(paths.canonicalAttachments, "attachments/new-attachment.blob").readBytes(),
         )
+    }
+
+    @Test
+    fun eightMiBLargeRestoreInterruptedAtNewInstalledResumesWithCanonicalCountsAndHashes() {
+        seedLargeSourceState()
+        prepareOldState(withAttachment = true, withCredential = true)
+        stageValidArchive()
+        simulateInstalledState(RivenRestoreJournalStage.NEW_INSTALLED)
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, bootstrap().recoverAndApply())
+
+        val restored = RivenDatabase.build(context)
+        try {
+            val sqlite = restored.openHelper.writableDatabase
+            assertEquals(251L, sqlite.rowCount("conversations"))
+            assertEquals(5_000L, sqlite.rowCount("messages"))
+            assertEquals(250L, sqlite.rowCount("conversation_timeline_heads"))
+            assertEquals(4_750L, sqlite.rowCount("message_parent_edges"))
+            assertEquals(2_000L, sqlite.rowCount("experiences"))
+            assertEquals(2_000L, sqlite.rowCount("memories"))
+            assertEquals(2_000L, sqlite.rowCount("memory_evidence"))
+            assertEquals(128L, sqlite.rowCount("attachments"))
+        } finally {
+            restored.close()
+        }
+        assertArrayEquals(
+            stressAttachmentBytes(127),
+            File(paths.canonicalAttachments, "attachments/stress-attachment-127.blob").readBytes(),
+        )
+        assertFalse(paths.canonicalCredentials.exists())
+        assertFalse(RivenRestoreGate.isPending(context, restoreRoot))
     }
 
     @Test
@@ -483,6 +537,110 @@ class RivenRestoreBootstrapTest {
             ),
         )
     }
+
+    private fun seedLargeSourceState() {
+        sourceDatabase.runInTransaction {
+            val timelineDao = sourceDatabase.conversationTimelineDao()
+            repeat(250) { conversationIndex ->
+                val conversationId = "stress-conversation-${conversationIndex.toString().padStart(3, '0')}"
+                timelineDao.insertConversation(
+                    ConversationEntity(
+                        id = conversationId,
+                        createdAt = conversationIndex.toLong(),
+                        updatedAt = conversationIndex.toLong(),
+                        status = ConversationStatus.ACTIVE,
+                        title = "Stress $conversationIndex",
+                    ),
+                )
+                var parentId: String? = null
+                repeat(20) { messageIndex ->
+                    val messageId = "$conversationId-message-${messageIndex.toString().padStart(2, '0')}"
+                    timelineDao.insertMessage(
+                        MessageEntity(
+                            id = messageId,
+                            conversationId = conversationId,
+                            sequenceNumber = (messageIndex + 1).toLong(),
+                            role = if (messageIndex % 2 == 0) MessageRole.USER else MessageRole.ASSISTANT,
+                            deliveryState = if (messageIndex % 2 == 0) {
+                                MessageDeliveryState.PERSISTED
+                            } else {
+                                MessageDeliveryState.SUCCEEDED
+                            },
+                            content = "stress-content-$conversationIndex-$messageIndex",
+                            createdAt = messageIndex.toLong(),
+                            updatedAt = messageIndex.toLong(),
+                        ),
+                    )
+                    parentId?.let { parent ->
+                        timelineDao.insertParentEdge(MessageParentEdgeEntity(messageId, parent, messageIndex.toLong()))
+                    }
+                    parentId = messageId
+                }
+                timelineDao.insertTimelineHead(
+                    ConversationTimelineHeadEntity(conversationId, parentId, timelineRevision = 20, updatedAt = 20),
+                )
+            }
+            repeat(2_000) { index ->
+                val experienceId = "stress-experience-${index.toString().padStart(4, '0')}"
+                val memoryId = "stress-memory-${index.toString().padStart(4, '0')}"
+                sourceDatabase.memoryDao().insertExperience(
+                    ExperienceEntity(
+                        id = experienceId,
+                        eventOrder = 10_000L + index,
+                        experienceType = ExperienceType.SHARED_EVENT,
+                        actor = ExperienceActor.SHAI,
+                        sourceContent = "stress evidence $index",
+                        occurredAt = index.toLong(),
+                        recordedAt = index.toLong(),
+                        sensitivity = SensitivityLevel.STANDARD,
+                        availability = ExperienceAvailability.AVAILABLE,
+                    ),
+                )
+                sourceDatabase.memoryDao().insertMemory(
+                    MemoryEntity(
+                        id = memoryId,
+                        kind = MemoryKind.SEMANTIC,
+                        scope = MemoryScope.SHAI,
+                        meaning = "stress memory $index",
+                        epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                        certainty = MemoryCertainty.CERTAIN,
+                        truthState = MemoryTruthState.SUPPORTED,
+                        retentionState = MemoryRetentionState.ACTIVE,
+                        lifecycleState = MemoryLifecycleState.VALIDATED,
+                        temporalState = TemporalState.CURRENT,
+                        learnedAt = index.toLong(),
+                        sensitivity = SensitivityLevel.STANDARD,
+                        createdAt = index.toLong(),
+                        updatedAt = index.toLong(),
+                    ),
+                )
+                sourceDatabase.memoryDao().insertMemoryEvidence(
+                    MemoryEvidenceEntity(
+                        memoryId = memoryId,
+                        experienceId = experienceId,
+                        role = EvidenceRole.SUPPORTS,
+                        epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                        sourceCertainty = MemoryCertainty.CERTAIN,
+                        lineageKey = "stress-lineage-$index",
+                        createdAt = index.toLong(),
+                    ),
+                )
+            }
+        }
+        repeat(127) { zeroBased ->
+            val index = zeroBased + 1
+            insertSourceAttachment("stress-attachment-$index", stressAttachmentBytes(index))
+        }
+    }
+
+    private fun stressAttachmentBytes(index: Int): ByteArray =
+        ByteArray(64 * 1_024) { offset -> ((index + offset) % 251).toByte() }
+
+    private fun androidx.sqlite.db.SupportSQLiteDatabase.rowCount(table: String): Long =
+        query("SELECT COUNT(*) FROM `$table`").use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getLong(0)
+        }
 
     private fun stageValidArchive() {
         val output = ByteArrayOutputStream()

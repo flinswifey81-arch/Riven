@@ -3,6 +3,13 @@ package com.shai.riven.data.conversation.engine
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.shai.riven.data.candidate.CandidateExtractionProposal
+import com.shai.riven.data.candidate.CandidateExtractionResult
+import com.shai.riven.data.candidate.CandidateExtractionService
+import com.shai.riven.data.candidate.CandidateIdGenerator
+import com.shai.riven.data.candidate.CandidateMemoryExtractor
+import com.shai.riven.data.candidate.CandidateMemoryProposal
+import com.shai.riven.data.candidate.ExtractCandidateMemoriesInput
 import com.shai.riven.data.context.ActiveConversationContextSource
 import com.shai.riven.data.context.ConversationalContextAssembler
 import com.shai.riven.data.context.EphemeralAppStateContextSource
@@ -41,6 +48,8 @@ import com.shai.riven.data.credential.ProviderSecret
 import com.shai.riven.data.credential.PutProviderCredentialResult
 import com.shai.riven.data.credential.ReadProviderCredentialResult
 import com.shai.riven.data.deletion.DeleteTimelineMessageInput
+import com.shai.riven.data.deletion.DeleteMemoryInput
+import com.shai.riven.data.deletion.MemoryDeleteResult
 import com.shai.riven.data.deletion.SafeDeleteService
 import com.shai.riven.data.deletion.TimelineDeleteResult
 import com.shai.riven.data.experience.ConversationExperienceLookupResult
@@ -49,17 +58,32 @@ import com.shai.riven.data.instructions.SaveShaiSystemInstructionsInput
 import com.shai.riven.data.instructions.ShaiSystemInstructionsContextSource
 import com.shai.riven.data.instructions.ShaiSystemInstructionsService
 import com.shai.riven.data.instructions.ShaiSystemInstructionsWriteResult
+import com.shai.riven.data.memory.MemoryStateTransitionInput
+import com.shai.riven.data.memory.MemoryTransactionService
+import com.shai.riven.data.memory.MemoryWriteResult
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
+import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
 import com.shai.riven.data.persistence.entity.MessageAttachmentEntity
+import com.shai.riven.data.persistence.model.AttentionOutcome
+import com.shai.riven.data.persistence.model.AttentionSignal
+import com.shai.riven.data.persistence.model.AttentionSignalPolarity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ConversationRunState
 import com.shai.riven.data.persistence.model.ConversationRunTrigger
 import com.shai.riven.data.persistence.model.ConversationStatus
+import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.provider.CreateProviderProfileInput
 import com.shai.riven.data.provider.CreateProviderProfileResult
 import com.shai.riven.data.provider.ProviderCapability
@@ -68,6 +92,20 @@ import com.shai.riven.data.provider.ProviderRuntimeProfileResolver
 import com.shai.riven.data.provider.UpdateProviderProfileInput
 import com.shai.riven.data.provider.UpdateProviderProfileResult
 import com.shai.riven.data.recall.ConversationalRecallReceiptValidator
+import com.shai.riven.data.recall.ConversationalMemoryContextSource
+import com.shai.riven.data.recall.ConversationalMemoryQuery
+import com.shai.riven.data.recall.TargetedConversationalMemoryRetriever
+import com.shai.riven.data.validation.CandidateValidationDecision
+import com.shai.riven.data.validation.CandidateValidationDecider
+import com.shai.riven.data.validation.CandidateValidationOutcome
+import com.shai.riven.data.validation.CandidateValidationResult
+import com.shai.riven.data.validation.CandidateValidationService
+import com.shai.riven.data.validation.ValidateCandidateInput
+import com.shai.riven.data.validation.ValidatedMemoryIdGenerator
+import com.shai.riven.data.validation.ValidationAdmissionMetadata
+import com.shai.riven.data.validation.ValidationMemoryRetrieval
+import com.shai.riven.data.validation.ValidationMemoryRetriever
+import com.shai.riven.data.validation.ValidationRecallReadiness
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.ValidationRecallGeneration
 import com.shai.riven.data.validation.validationRecallCorpusFence
@@ -333,6 +371,196 @@ class ProviderNeutralConversationEngineTest {
         assertNull(database.conversationRunDao().activeRun("conversation-2"))
         release.complete(Unit)
         assertTrue(first.await() is ConversationEngineResult.Succeeded)
+    }
+
+    @Test
+    fun fourActiveEightQueuedAndFourFollowUpRunsLeaveNoSlotsOrPermitsLeaked() = runBlocking {
+        repeat(16) { index ->
+            createConversationAndUser("pressure-conversation-$index", "pressure-user-$index")
+        }
+        createProfile()
+        val limiter = ConversationRunLimiter(4)
+        val activeEntered = AtomicInteger(0)
+        val allActiveEntered = CompletableDeferred<Unit>()
+        val releaseActive = CompletableDeferred<Unit>()
+        val activeAdapter = FakeAdapter { _, emit ->
+            if (activeEntered.incrementAndGet() == 4) allActiveEntered.complete(Unit)
+            releaseActive.await()
+            emit(ProviderStreamEvent.Delta("active success"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        fun pressureInput(index: Int, prefix: String) = input().copy(
+            runId = "$prefix-run-$index",
+            idempotencyKey = "$prefix-key-$index",
+            conversationId = "pressure-conversation-$index",
+            userMessageId = "pressure-user-$index",
+            assistantMessageId = "$prefix-assistant-$index",
+        )
+        val active = (0 until 4).map { index ->
+            async {
+                engine(
+                    adapter = activeAdapter,
+                    limiter = limiter,
+                    limits = ConversationEngineLimits(concurrencyWaitMillis = 1_000),
+                ).execute(pressureInput(index, "active"))
+            }
+        }
+        withTimeout(5_000) { allActiveEntered.await() }
+
+        val cancelledAdapter = FakeAdapter { _, _ -> error("cancelled queued adapter must not run") }
+        val cancelled = (4 until 8).map { index ->
+            async {
+                engine(
+                    adapter = cancelledAdapter,
+                    limiter = limiter,
+                    limits = ConversationEngineLimits(concurrencyWaitMillis = 5_000),
+                ).execute(pressureInput(index, "cancelled"))
+            }
+        }
+        withTimeout(5_000) {
+            while ((4 until 8).any { database.conversationRunDao().run("cancelled-run-$it") == null }) yield()
+        }
+        cancelled.forEach { it.cancel() }
+        cancelled.forEach { execution ->
+            var propagated = false
+            try {
+                execution.await()
+            } catch (_: CancellationException) {
+                propagated = true
+            }
+            assertTrue(propagated)
+        }
+
+        val timedOutAdapter = FakeAdapter { _, _ -> error("timed-out queued adapter must not run") }
+        val timedOut = (8 until 12).map { index ->
+            async {
+                engine(
+                    adapter = timedOutAdapter,
+                    limiter = limiter,
+                    limits = ConversationEngineLimits(concurrencyWaitMillis = 50),
+                ).execute(pressureInput(index, "timed"))
+            }
+        }.map { it.await() as ConversationEngineResult.Failed }
+        assertTrue(timedOut.all { it.code == ConversationEngineErrorCode.CONCURRENCY_LIMIT })
+        assertEquals(0, cancelledAdapter.invocationCount.get())
+        assertEquals(0, timedOutAdapter.invocationCount.get())
+
+        releaseActive.complete(Unit)
+        assertTrue(active.all { it.await() is ConversationEngineResult.Succeeded })
+        val followUpAdapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("follow-up success"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val followUps = (12 until 16).map { index ->
+            async {
+                engine(
+                    adapter = followUpAdapter,
+                    limiter = limiter,
+                    limits = ConversationEngineLimits(concurrencyWaitMillis = 1_000),
+                ).execute(pressureInput(index, "follow-up"))
+            }
+        }
+        assertTrue(followUps.all { it.await() is ConversationEngineResult.Succeeded })
+        assertEquals(4, activeAdapter.invocationCount.get())
+        assertEquals(4, followUpAdapter.invocationCount.get())
+        (0 until 16).forEach { index ->
+            assertNull(database.conversationRunDao().activeRun("pressure-conversation-$index"))
+        }
+    }
+
+    @Test
+    fun productionStreamCharacterAndEventBoundariesFailClosedOnePastTheLimit() = runBlocking {
+        repeat(3) { index -> createConversationAndUser("stream-conversation-$index", "stream-user-$index") }
+        createProfile()
+        val limits = ConversationEngineLimits(
+            maxOutputChars = 262_144,
+            maxDeltaChars = 16_384,
+            maxStreamEvents = 4_096,
+            maxProviderDurationMillis = 30_000,
+        )
+        fun streamInput(index: Int) = input().copy(
+            runId = "stream-run-$index",
+            idempotencyKey = "stream-key-$index",
+            conversationId = "stream-conversation-$index",
+            userMessageId = "stream-user-$index",
+            assistantMessageId = "stream-assistant-$index",
+        )
+        val exact = engine(
+            adapter = FakeAdapter { _, emit ->
+                repeat(4_094) { emit(ProviderStreamEvent.Delta("x".repeat(64))) }
+                emit(ProviderStreamEvent.Delta("y".repeat(128)))
+                emit(ProviderStreamEvent.Completed("exact-boundary"))
+            },
+            limits = limits,
+        ).execute(streamInput(0))
+        assertTrue(exact is ConversationEngineResult.Succeeded)
+        assertEquals(262_144, database.conversationTimelineDao().message("stream-assistant-0")!!.content.length)
+
+        val extraCharacter = engine(
+            adapter = FakeAdapter { _, emit ->
+                repeat(4_094) { emit(ProviderStreamEvent.Delta("x".repeat(64))) }
+                emit(ProviderStreamEvent.Delta("y".repeat(129)))
+            },
+            limits = limits,
+        ).execute(streamInput(1)) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.OUTPUT_LIMIT, extraCharacter.code)
+        assertEquals("", database.conversationTimelineDao().message("stream-assistant-1")!!.content)
+
+        val extraEvent = engine(
+            adapter = FakeAdapter { _, emit ->
+                repeat(4_096) { emit(ProviderStreamEvent.Delta("z")) }
+                emit(ProviderStreamEvent.Completed("one-event-too-many"))
+            },
+            limits = limits,
+        ).execute(streamInput(2)) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.OUTPUT_LIMIT, extraEvent.code)
+        assertEquals("", database.conversationTimelineDao().message("stream-assistant-2")!!.content)
+    }
+
+    @Test
+    fun recoveryInterruptsOneHundredTwentyEightAbandonedRunsWithoutReplayingFourLiveRuns() = runBlocking {
+        val persistence = ConversationRunPersistence(database, ephemeral)
+        val liveTokens = (0 until 4).map { "pressure-live-owner-$it" }
+        liveTokens.forEach(ConversationEngineOwnerRegistry::register)
+        try {
+            repeat(132) { index ->
+                createConversationAndUser("recovery-conversation-$index", "recovery-user-$index")
+                val owner = if (index < 128) "pressure-abandoned-owner-$index" else liveTokens[index - 128]
+                val reservation = persistence.reserve(
+                    input().copy(
+                        runId = "recovery-run-${index.toString().padStart(3, '0')}",
+                        idempotencyKey = "recovery-key-$index",
+                        conversationId = "recovery-conversation-$index",
+                        userMessageId = "recovery-user-$index",
+                        assistantMessageId = "recovery-assistant-$index",
+                    ),
+                    owner,
+                )
+                assertTrue(reservation is ReserveConversationRunResult.Reserved)
+            }
+            val adapter = FakeAdapter { _, _ -> error("recovery must not replay provider work") }
+            val recovery = engine(adapter)
+            val first = recovery.recoverInterruptedRuns()
+            assertEquals(128, first.interruptedRunIds.size)
+            assertEquals("recovery-run-000", first.interruptedRunIds.first())
+            assertEquals("recovery-run-127", first.interruptedRunIds.last())
+            assertEquals(0, adapter.invocationCount.get())
+            (128 until 132).forEach { index ->
+                assertEquals(
+                    ConversationRunState.PREPARING,
+                    database.conversationRunDao().run("recovery-run-$index")!!.state,
+                )
+            }
+
+            liveTokens.forEach(ConversationEngineOwnerRegistry::unregister)
+            assertEquals(
+                (128 until 132).map { "recovery-run-$it" },
+                recovery.recoverInterruptedRuns().interruptedRunIds,
+            )
+            assertEquals(0, adapter.invocationCount.get())
+        } finally {
+            liveTokens.forEach(ConversationEngineOwnerRegistry::unregister)
+        }
     }
 
     @Test
@@ -735,6 +963,191 @@ class ProviderNeutralConversationEngineTest {
         val result = execution.await() as ConversationEngineResult.Failed
         assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
         assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+    }
+
+    @Test
+    fun canonicalProviderExperienceCandidateValidationMemoryRecallForgetAndDeleteChain() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val providerResult = engine(FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("Riven grounded the chain source."))
+            emit(ProviderStreamEvent.Completed("chain-source-request"))
+        }).execute(input())
+        assertTrue(providerResult is ConversationEngineResult.Succeeded)
+        val experience = (
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") as
+                ConversationExperienceLookupResult.Found
+            ).experience
+        database.experienceAttentionDao().insertAssessment(
+            ExperienceAttentionAssessmentEntity(
+                experienceId = experience.id,
+                outcome = AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+                revision = 1,
+                createdAt = 200,
+                updatedAt = 200,
+            ),
+        )
+        database.experienceAttentionDao().insertSignal(
+            ExperienceAttentionSignalEntity(
+                experienceId = experience.id,
+                signal = AttentionSignal.PREFERENCE,
+                polarity = AttentionSignalPolarity.POSITIVE,
+                createdAt = 200,
+            ),
+        )
+        val candidateCounter = AtomicInteger(0)
+        val extraction = CandidateExtractionService(
+            database = database,
+            extractor = CandidateMemoryExtractor { snapshot ->
+                assertEquals(experience.id, snapshot.experienceId)
+                CandidateExtractionProposal(
+                    listOf(
+                        CandidateMemoryProposal(
+                            proposedMeaning = "Hello Riven chain forget marker",
+                            proposedKind = MemoryKind.SEMANTIC,
+                            proposedScope = MemoryScope.SHAI,
+                            proposedEpistemicBasis = EpistemicBasis.DIRECT_RIVEN_EXPERIENCE,
+                            proposedCertainty = MemoryCertainty.CERTAIN,
+                            proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
+                            proposedSensitivity = SensitivityLevel.STANDARD,
+                        ),
+                        CandidateMemoryProposal(
+                            proposedMeaning = "Hello Riven chain delete marker",
+                            proposedKind = MemoryKind.SEMANTIC,
+                            proposedScope = MemoryScope.SHAI,
+                            proposedEpistemicBasis = EpistemicBasis.DIRECT_RIVEN_EXPERIENCE,
+                            proposedCertainty = MemoryCertainty.CERTAIN,
+                            proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
+                            proposedSensitivity = SensitivityLevel.STANDARD,
+                        ),
+                    ),
+                )
+            },
+            candidateIdGenerator = CandidateIdGenerator { "chain-candidate-${candidateCounter.incrementAndGet()}" },
+        ).extract(ExtractCandidateMemoriesInput(experience.id, extractedAt = 210)) as CandidateExtractionResult.Extracted
+        assertEquals(2, extraction.createdCandidateIds.size)
+
+        val memoryCounter = AtomicInteger(0)
+        val validation = CandidateValidationService(
+            database = database,
+            retriever = ValidationMemoryRetriever {
+                ValidationMemoryRetrieval(
+                    readiness = ValidationRecallReadiness.READY,
+                    generation = database.validationRecallCorpusFence().snapshot(),
+                )
+            },
+            decider = CandidateValidationDecider {
+                CandidateValidationDecision(
+                    outcome = CandidateValidationOutcome.ACCEPT_NEW,
+                    admission = ValidationAdmissionMetadata(TemporalState.CURRENT),
+                )
+            },
+            memoryIdGenerator = ValidatedMemoryIdGenerator { "chain-memory-${memoryCounter.incrementAndGet()}" },
+        )
+        try {
+            extraction.createdCandidateIds.forEachIndexed { index, candidateId ->
+                val result = validation.validate(ValidateCandidateInput(candidateId, validatedAt = 220L + index))
+                assertTrue(result is CandidateValidationResult.AcceptedNew)
+            }
+        } finally {
+            validation.close()
+        }
+
+        val recall = TargetedConversationalMemoryRetriever(database)
+        try {
+            val initiallyRecalled = recall.retrieve(ConversationalMemoryQuery("Hello Riven chain", now = 230))
+            assertEquals(setOf("chain-memory-1", "chain-memory-2"), initiallyRecalled.memories.map { it.memoryId }.toSet())
+            val recallSource = ConversationalMemoryContextSource(recall)
+
+            createConversationAndUser("chain-forget-conversation", "chain-forget-user")
+            val forgetEntered = CompletableDeferred<Unit>()
+            val releaseForget = CompletableDeferred<Unit>()
+            val forgetAdapter = FakeAdapter { request, emit ->
+                assertTrue(request.context.any { it.content.contains("chain forget marker") })
+                forgetEntered.complete(Unit)
+                releaseForget.await()
+                emit(ProviderStreamEvent.Delta("must not persist after forget"))
+                emit(ProviderStreamEvent.Completed("forget-race"))
+            }
+            val forgetExecution = async {
+                engine(
+                    adapter = forgetAdapter,
+                    extraSources = listOf(recallSource),
+                    recallValidator = recall,
+                ).execute(
+                    input().copy(
+                        runId = "chain-forget-run",
+                        idempotencyKey = "chain-forget-key",
+                        conversationId = "chain-forget-conversation",
+                        userMessageId = "chain-forget-user",
+                        assistantMessageId = "chain-forget-assistant",
+                    ),
+                )
+            }
+            withTimeout(5_000) { forgetEntered.await() }
+            assertTrue(
+                MemoryTransactionService(database).forget(
+                    MemoryStateTransitionInput("chain-memory-1", occurredAt = 240, triggeringExperienceId = experience.id),
+                ) is MemoryWriteResult.Success,
+            )
+            releaseForget.complete(Unit)
+            val forgotten = forgetExecution.await() as ConversationEngineResult.Failed
+            assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, forgotten.code)
+            assertEquals("", database.conversationTimelineDao().message("chain-forget-assistant")!!.content)
+            assertTrue(
+                ConversationExperienceService(database).conversationExperienceForMessage("chain-forget-assistant") is
+                    ConversationExperienceLookupResult.NotRecorded,
+            )
+            assertEquals(
+                listOf("chain-memory-2"),
+                recall.retrieve(ConversationalMemoryQuery("Hello Riven chain", now = 250)).memories.map { it.memoryId },
+            )
+
+            createConversationAndUser("chain-delete-conversation", "chain-delete-user")
+            val deleteEntered = CompletableDeferred<Unit>()
+            val releaseDelete = CompletableDeferred<Unit>()
+            val deleteAdapter = FakeAdapter { request, emit ->
+                assertTrue(request.context.any { it.content.contains("chain delete marker") })
+                deleteEntered.complete(Unit)
+                releaseDelete.await()
+                emit(ProviderStreamEvent.Delta("must not persist after delete"))
+                emit(ProviderStreamEvent.Completed("delete-race"))
+            }
+            val deleteExecution = async {
+                engine(
+                    adapter = deleteAdapter,
+                    extraSources = listOf(recallSource),
+                    recallValidator = recall,
+                ).execute(
+                    input().copy(
+                        runId = "chain-delete-run",
+                        idempotencyKey = "chain-delete-key",
+                        conversationId = "chain-delete-conversation",
+                        userMessageId = "chain-delete-user",
+                        assistantMessageId = "chain-delete-assistant",
+                    ),
+                )
+            }
+            withTimeout(5_000) { deleteEntered.await() }
+            assertTrue(
+                SafeDeleteService(database).deleteMemory(
+                    DeleteMemoryInput(memoryId = "chain-memory-2", occurredAt = 260),
+                ) is MemoryDeleteResult.Deleted,
+            )
+            releaseDelete.complete(Unit)
+            val deleted = deleteExecution.await() as ConversationEngineResult.Failed
+            assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, deleted.code)
+            assertEquals("", database.conversationTimelineDao().message("chain-delete-assistant")!!.content)
+            assertTrue(
+                ConversationExperienceService(database).conversationExperienceForMessage("chain-delete-assistant") is
+                    ConversationExperienceLookupResult.NotRecorded,
+            )
+            assertTrue(
+                recall.retrieve(ConversationalMemoryQuery("Hello Riven chain", now = 270)).memories.isEmpty(),
+            )
+        } finally {
+            recall.close()
+        }
     }
 
     @Test

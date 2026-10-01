@@ -15,6 +15,13 @@ import com.shai.riven.data.background.RepairJobRunner
 import com.shai.riven.data.background.TargetedAttachmentCleanupResult
 import com.shai.riven.data.credential.FileProviderCredentialStore
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.RepairJobEntity
+import com.shai.riven.data.persistence.model.AttachmentKind
+import com.shai.riven.data.persistence.model.AttachmentSource
+import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.RepairJobState
+import com.shai.riven.data.persistence.model.RepairJobType
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
@@ -430,6 +437,83 @@ class RivenResetBootstrapTest {
         } finally {
             database.close()
         }
+    }
+
+    @Test
+    fun sixtyFourAttachmentAndRepairJobsAreClearedAndEveryStaleTargetIsSafeNoOp() = runBlocking {
+        seedCanonicalState()
+        val seeded = openCanonicalDatabase()
+        try {
+            seeded.runInTransaction {
+                repeat(64) { index ->
+                    seeded.attachmentDao().insertAttachment(
+                        AttachmentEntity(
+                            id = "stress-attachment-$index",
+                            kind = AttachmentKind.IMAGE,
+                            mimeType = "image/png",
+                            state = AttachmentState.DELETE_PENDING,
+                            storageKey = "attachments/stress-attachment-$index.blob",
+                            byteSize = 4,
+                            contentSha256 = "0".repeat(64),
+                            source = AttachmentSource.SHAI_IMPORT,
+                            createdAt = index.toLong(),
+                            updatedAt = index.toLong(),
+                        ),
+                    )
+                    seeded.maintenanceDao().insertRepairJob(
+                        RepairJobEntity(
+                            id = "stress-repair-$index",
+                            jobType = RepairJobType.INVALIDATE_DERIVED,
+                            state = RepairJobState.PENDING,
+                            targetType = "MEMORY",
+                            targetId = "stress-memory-$index",
+                            attemptCount = 0,
+                            createdAt = index.toLong(),
+                            updatedAt = index.toLong(),
+                        ),
+                    )
+                }
+            }
+        } finally {
+            seeded.close()
+        }
+        repeat(64) { index ->
+            File(context.filesDir, "riven_attachments/attachments/stress-attachment-$index.blob").apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(1, 2, 3, 4))
+            }
+        }
+        stageReset()
+        assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
+
+        val fresh = openCanonicalDatabase()
+        try {
+            val counts = applicationTableCounts(fresh)
+            assertTrue(counts.values.all { it == 0L })
+            val maintenance = AttachmentMaintenanceService(
+                fresh.attachmentDao(),
+                AttachmentService(fresh, FileAttachmentBlobStore.fromContext(context)),
+            )
+            val runner = RepairJobRunner(fresh, RepairJobHandlerRegistry(emptyList()))
+            repeat(64) { index ->
+                assertEquals(
+                    TargetedAttachmentCleanupResult.NoOp(
+                        "stress-attachment-$index",
+                        AttachmentCleanupNoOpReason.MISSING,
+                    ),
+                    maintenance.cleanupTarget("stress-attachment-$index"),
+                )
+                assertEquals(
+                    RepairJobRunResult.NoOp("stress-repair-$index", RepairJobNoOpReason.MISSING),
+                    runner.run("stress-repair-$index"),
+                )
+            }
+        } finally {
+            fresh.close()
+        }
+        assertFalse(
+            File(context.filesDir, "riven_attachments").walkTopDown().any { candidate -> candidate.isFile },
+        )
     }
 
     private fun assertRecoveryAfterInterruption(
