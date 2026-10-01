@@ -17,7 +17,14 @@ import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
+import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
+import com.shai.riven.data.persistence.model.MemoryRetentionState
+import com.shai.riven.data.persistence.model.MemoryScope
+import com.shai.riven.data.persistence.model.MemoryTruthState
+import com.shai.riven.data.persistence.model.SensitivityLevel
 
 @Dao
 interface MemoryDao {
@@ -200,4 +207,119 @@ interface MemoryDao {
         targetMemoryId: String,
         relationshipType: MemoryRelationshipType,
     ): Int
+
+    /**
+     * Keyset-paged canonical corpus read for the rebuildable validation-recall index. The primary
+     * key bounds every page; callers must still enforce a total corpus capacity.
+     */
+    @Query(
+        """
+        SELECT memory_id AS memoryId,
+               kind,
+               scope,
+               substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
+               length(meaning) AS meaningLength,
+               truth_state AS truthState,
+               retention_state AS retentionState,
+               lifecycle_state AS lifecycleState,
+               sensitivity
+        FROM memories
+        WHERE memory_id > :afterMemoryId
+        ORDER BY memory_id
+        LIMIT :limit
+        """,
+    )
+    fun validationRecallMemoryPage(
+        afterMemoryId: String,
+        limit: Int,
+        maxMeaningCharsPlusOne: Int,
+    ): List<ValidationRecallMemoryRow>
+
+    @Query(
+        """
+        SELECT memory_evidence.memory_id AS memoryId,
+               memory_evidence.experience_id AS sourceExperienceId,
+               substr(experiences.source_content, 1, :maxSourceCharsPlusOne) AS sourceContent,
+               length(experiences.source_content) AS sourceLength,
+               experiences.availability AS sourceAvailability,
+               experiences.sensitivity AS sourceSensitivity
+        FROM memory_evidence
+        INNER JOIN experiences
+            ON experiences.experience_id = memory_evidence.experience_id
+        WHERE memory_evidence.memory_id IN (:memoryIds)
+        ORDER BY memory_evidence.memory_id, memory_evidence.experience_id
+        LIMIT :limit
+        """,
+    )
+    fun validationRecallEvidenceRows(
+        memoryIds: List<String>,
+        limit: Int,
+        maxSourceCharsPlusOne: Int,
+    ): List<ValidationRecallEvidenceRow>
+
+    @Query(
+        """
+        SELECT memory_id AS memoryId, entity_id AS entityId
+        FROM memory_entity_links
+        WHERE memory_id IN (:memoryIds)
+        ORDER BY memory_id, entity_id, role
+        LIMIT :limit
+        """,
+    )
+    fun validationRecallMemoryEntityRows(
+        memoryIds: List<String>,
+        limit: Int,
+    ): List<ValidationRecallEntityRow>
+
+    @Query(
+        """
+        SELECT * FROM memory_relationships
+        WHERE source_memory_id IN (:memoryIds)
+        ORDER BY source_memory_id, target_memory_id, relationship_type
+        LIMIT :limit
+        """,
+    )
+    fun validationRecallOutgoingRelationships(
+        memoryIds: List<String>,
+        limit: Int,
+    ): List<MemoryRelationshipEntity>
+
+    @Query(
+        """
+        SELECT * FROM memory_relationships
+        WHERE target_memory_id IN (:memoryIds)
+        ORDER BY target_memory_id, source_memory_id, relationship_type
+        LIMIT :limit
+        """,
+    )
+    fun validationRecallIncomingRelationships(
+        memoryIds: List<String>,
+        limit: Int,
+    ): List<MemoryRelationshipEntity>
 }
+
+data class ValidationRecallEvidenceRow(
+    val memoryId: String,
+    val sourceExperienceId: String,
+    val sourceContent: String?,
+    val sourceLength: Long?,
+    val sourceAvailability: ExperienceAvailability,
+    val sourceSensitivity: SensitivityLevel,
+)
+
+data class ValidationRecallMemoryRow(
+    val memoryId: String,
+    val kind: MemoryKind,
+    val scope: MemoryScope,
+    val meaning: String,
+    val meaningLength: Long,
+    val truthState: MemoryTruthState,
+    val retentionState: MemoryRetentionState,
+    val lifecycleState: MemoryLifecycleState,
+    val sensitivity: SensitivityLevel,
+)
+
+data class ValidationRecallEntityRow(
+    val memoryId: String,
+    val entityId: String,
+)

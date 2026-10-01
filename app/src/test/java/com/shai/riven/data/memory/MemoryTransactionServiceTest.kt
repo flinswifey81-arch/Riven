@@ -2,6 +2,7 @@ package com.shai.riven.data.memory
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -48,6 +49,8 @@ import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
+import com.shai.riven.data.validation.ValidationRecallGeneration
+import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -956,6 +959,145 @@ class MemoryTransactionServiceTest {
         assertEquals(0, database.memoryDao().memoryRelationshipCount("memory-new", "memory-old", MemoryRelationshipType.CORRECTS))
         assertTrue(database.maintenanceDao().memoryAuditHistory("memory-old").isEmpty())
         assertTrue(database.maintenanceDao().memoryAuditHistory("memory-new").isEmpty())
+    }
+
+    @Test
+    fun everyCanonicalRecallWriterAdvancesTheSynchronousCorpusFence() = runBlocking {
+        val fence = database.validationRecallCorpusFence()
+
+        insertExperience("experience-create", 1)
+        val beforeCandidate = fence.snapshot()
+        assertSuccess(service.createCandidate(createCandidateInput()))
+        assertEquals(beforeCandidate, fence.snapshot())
+
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(
+                service.admitCandidate(
+                    AdmitCandidateMemoryInput(
+                        candidateId = "candidate-create",
+                        memoryId = "memory-admitted",
+                        learnedAt = 1,
+                        occurredAt = 2,
+                    ),
+                ),
+            )
+        }
+        insertExperience("experience-reinforce", 2)
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(
+                service.reinforce(
+                    ReinforceMemoryInput(
+                        memoryId = "memory-admitted",
+                        evidence = ReinforcementEvidenceInput(
+                            "experience-reinforce",
+                            EpistemicBasis.DIRECT_USER_STATEMENT,
+                            MemoryCertainty.CERTAIN,
+                            "lineage-reinforce",
+                        ),
+                        confirmedAt = 3,
+                        occurredAt = 3,
+                    ),
+                ),
+            )
+        }
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(service.moveDormant(MemoryStateTransitionInput("memory-admitted", 4)))
+        }
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(service.reactivate(MemoryStateTransitionInput("memory-admitted", 5)))
+        }
+
+        insertExperience("experience-validated", 3)
+        assertAdvanced(fence.snapshot()) {
+            database.withTransaction {
+                assertSuccess(
+                    service.createValidatedInCurrentTransaction(
+                        validatedMemory("memory-validated", "experience-validated", "Validated direct memory."),
+                        occurredAt = 6,
+                    ),
+                )
+            }
+        }
+
+        insertExperience("experience-correct-old", 4)
+        insertExperience("experience-correct-new", 5)
+        insertCanonicalMemory("memory-correct-old", "experience-correct-old")
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(
+                service.correct(
+                    CorrectMemoryInput(
+                        "memory-correct-old",
+                        validatedMemory("memory-correct-new", "experience-correct-new", "Corrected memory."),
+                        occurredAt = 7,
+                        triggeringExperienceId = "experience-correct-new",
+                    ),
+                ),
+            )
+        }
+
+        insertExperience("experience-super-old", 6)
+        insertExperience("experience-super-new", 7)
+        insertCanonicalMemory("memory-super-old", "experience-super-old")
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(
+                service.supersede(
+                    SupersedeMemoryInput(
+                        "memory-super-old",
+                        validatedMemory("memory-super-new", "experience-super-new", "Superseding memory."),
+                        occurredAt = 8,
+                        triggeringExperienceId = "experience-super-new",
+                    ),
+                ),
+            )
+        }
+
+        insertExperience("experience-refine-old", 8)
+        insertExperience("experience-refine-new", 9)
+        insertCanonicalMemory("memory-refine-old", "experience-refine-old")
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(
+                service.refine(
+                    RefineMemoryInput(
+                        "memory-refine-old",
+                        validatedMemory("memory-refine-new", "experience-refine-new", "Refined memory."),
+                        RefinementDisposition.KEEP_BROADER_CURRENT,
+                        occurredAt = 9,
+                        triggeringExperienceId = "experience-refine-new",
+                    ),
+                ),
+            )
+        }
+
+        insertExperience("experience-dispute-a", 10)
+        insertExperience("experience-dispute-b", 11)
+        insertCanonicalMemory("memory-dispute-a", "experience-dispute-a")
+        insertCanonicalMemory("memory-dispute-b", "experience-dispute-b")
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(
+                service.dispute(
+                    DisputeMemoryInput(
+                        memoryId = "memory-dispute-a",
+                        occurredAt = 10,
+                        competingMemoryId = "memory-dispute-b",
+                        triggeringExperienceId = "experience-dispute-b",
+                    ),
+                ),
+            )
+        }
+
+        assertAdvanced(fence.snapshot()) {
+            assertSuccess(service.forget(MemoryStateTransitionInput("memory-admitted", 11)))
+        }
+    }
+
+    private suspend fun assertAdvanced(
+        before: ValidationRecallGeneration,
+        mutation: suspend () -> Unit,
+    ) {
+        mutation()
+        val after = database.validationRecallCorpusFence().snapshot()
+        assertEquals(before.databaseSessionId, after.databaseSessionId)
+        assertEquals(before.corpusGeneration + 1L, after.corpusGeneration)
     }
 
     private fun insertCandidate(id: String, state: CandidateMemoryState) {

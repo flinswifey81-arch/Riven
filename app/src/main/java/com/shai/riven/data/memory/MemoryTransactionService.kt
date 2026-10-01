@@ -27,6 +27,7 @@ import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
+import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -36,6 +37,7 @@ class MemoryTransactionService(
 ) {
     private val memoryDao = database.memoryDao()
     private val maintenanceDao = database.maintenanceDao()
+    private val validationRecallFence = database.validationRecallCorpusFence()
 
     suspend fun createCandidate(input: CreateCandidateMemoryInput): MemoryWriteResult =
         execute(MemoryWriteOperation.CREATE_CANDIDATE) {
@@ -900,7 +902,13 @@ class MemoryTransactionService(
         operation: MemoryWriteOperation,
         block: suspend () -> MemoryWriteResult.Success,
     ): MemoryWriteResult = try {
-        database.withTransaction { block() }
+        database.withTransaction {
+            block().also {
+                if (operation in VALIDATION_RECALL_MUTATIONS) {
+                    validationRecallFence.markCanonicalMutation()
+                }
+            }
+        }
     } catch (abort: MemoryWriteAbort) {
         MemoryWriteResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
@@ -915,7 +923,11 @@ class MemoryTransactionService(
         operation: MemoryWriteOperation,
         block: () -> MemoryWriteResult.Success,
     ): MemoryWriteResult = try {
-        block()
+        block().also {
+            if (operation in VALIDATION_RECALL_MUTATIONS) {
+                validationRecallFence.markCanonicalMutation()
+            }
+        }
     } catch (abort: MemoryWriteAbort) {
         MemoryWriteResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
@@ -949,6 +961,18 @@ class MemoryTransactionService(
             CandidateMemoryState.PENDING_CONTEXT,
             CandidateMemoryState.TENTATIVE,
             CandidateMemoryState.READY_FOR_VALIDATION,
+        )
+        val VALIDATION_RECALL_MUTATIONS = setOf(
+            MemoryWriteOperation.ADMIT_CANDIDATE,
+            MemoryWriteOperation.CREATE_VALIDATED,
+            MemoryWriteOperation.REINFORCE,
+            MemoryWriteOperation.CORRECT,
+            MemoryWriteOperation.SUPERSEDE,
+            MemoryWriteOperation.REFINE,
+            MemoryWriteOperation.DISPUTE,
+            MemoryWriteOperation.MOVE_DORMANT,
+            MemoryWriteOperation.REACTIVATE,
+            MemoryWriteOperation.FORGET,
         )
     }
 }

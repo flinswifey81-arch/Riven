@@ -16,6 +16,7 @@ import com.shai.riven.data.persistence.model.TemporalState
 
 const val MAX_VALIDATION_RELATED_MEMORIES = 24
 const val MAX_VALIDATED_MEMORY_ID_CHARS = 128
+const val TARGETED_VALIDATION_RECALL_ALGORITHM_VERSION = "targeted-validation-recall-lexical-structural-v1"
 
 data class ValidateCandidateInput(
     val candidateId: String,
@@ -42,8 +43,41 @@ data class ValidationMemoryQuery(
     val seedAttention: ValidationAttentionSignals,
 )
 
+enum class ValidationRecallReadiness {
+    READY,
+    NOT_READY,
+    STALE,
+    FAILED,
+    CAPACITY_EXCEEDED,
+    BUDGET_EXCEEDED,
+    QUERY_UNSELECTIVE,
+}
+
+/**
+ * A nonsemantic fence proving which process/database corpus a retrieval result represents. This is
+ * deliberately not evidence, certainty, or a claim that lexical recall found every paraphrase.
+ */
+data class ValidationRecallGeneration(
+    val databaseSessionId: String,
+    val corpusGeneration: Long,
+    val algorithmVersion: String,
+)
+
+data class ValidationRecallBudgetUsage(
+    val indexedMemories: Int = 0,
+    val indexedTokens: Int = 0,
+    val postingVisits: Int = 0,
+    val structuralRowsVisited: Int = 0,
+    val graphSeedsVisited: Int = 0,
+    val relationshipRowsVisited: Int = 0,
+    val candidatePoolSize: Int = 0,
+)
+
 data class ValidationMemoryRetrieval(
-    val memoryIds: List<String>,
+    val memoryIds: List<String> = emptyList(),
+    val readiness: ValidationRecallReadiness = ValidationRecallReadiness.NOT_READY,
+    val generation: ValidationRecallGeneration? = null,
+    val budgetUsage: ValidationRecallBudgetUsage = ValidationRecallBudgetUsage(),
 )
 
 fun interface ValidationMemoryRetriever {
@@ -219,6 +253,10 @@ sealed interface CandidateValidationError {
     data class InvalidTargetMemory(val memoryId: String) : CandidateValidationError
     data class TargetNotRetrieved(val memoryId: String) : CandidateValidationError
     data class NoIndependentEvidence(val memoryId: String) : CandidateValidationError
+    data class ValidationRecallUnavailable(
+        val readiness: ValidationRecallReadiness,
+    ) : CandidateValidationError
+    data class StaleValidationRecall(val candidateId: String) : CandidateValidationError
     data class StaleValidationContext(val candidateId: String) : CandidateValidationError
     data class MemoryIdGenerationFailure(val reason: MemoryIdGenerationFailureReason) : CandidateValidationError
     data class TransactionFailure(val causeType: String) : CandidateValidationError

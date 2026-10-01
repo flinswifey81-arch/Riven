@@ -26,13 +26,14 @@ import kotlinx.coroutines.CancellationException
 
 class CandidateValidationService(
     private val database: RivenDatabase,
-    private val retriever: ValidationMemoryRetriever,
+    private val retriever: ValidationMemoryRetriever = TargetedValidationMemoryRetriever(database),
     private val decider: CandidateValidationDecider,
     private val memoryIdGenerator: ValidatedMemoryIdGenerator =
         ValidatedMemoryIdGenerator { UUID.randomUUID().toString() },
     private val memoryTransactions: MemoryTransactionService = MemoryTransactionService(database),
 ) {
     private val grounding = CandidateValidationGrounding(database)
+    private val validationRecallFence = database.validationRecallCorpusFence()
 
     suspend fun validate(input: ValidateCandidateInput): CandidateValidationResult {
         val initial = try {
@@ -78,10 +79,16 @@ class CandidateValidationService(
                 CandidateValidationError.RetrieverFailure(failure::class.java.simpleName),
             )
         }
+        validateRecallAvailability(initialContext.candidate.candidateId, retrieval)?.let {
+            return CandidateValidationResult.Failure(it)
+        }
         validateRetrieval(retrieval)?.let { return CandidateValidationResult.Failure(it) }
 
         val initialMemories = try {
             database.withTransaction {
+                if (!validationRecallFence.matches(retrieval.generation)) {
+                    abort(CandidateValidationError.StaleValidationRecall(input.candidateId))
+                }
                 grounding.hydrateMemoriesInCurrentTransaction(retrieval.memoryIds)
             }
         } catch (cancelled: CancellationException) {
@@ -121,6 +128,9 @@ class CandidateValidationService(
 
         return try {
             database.withTransaction {
+                if (!validationRecallFence.matches(retrieval.generation)) {
+                    abort(CandidateValidationError.StaleValidationRecall(input.candidateId))
+                }
                 val currentContext = try {
                     grounding.readCandidateInCurrentTransaction(input.candidateId)
                 } catch (_: CandidateValidationAbort) {
@@ -183,6 +193,24 @@ class CandidateValidationService(
         }
         if (retrieval.memoryIds.distinct().size != retrieval.memoryIds.size) {
             return CandidateValidationError.InvalidRetrieverResult(InvalidRetrieverResultReason.DUPLICATE_MEMORY_ID)
+        }
+        return null
+    }
+
+    private fun validateRecallAvailability(
+        candidateId: String,
+        retrieval: ValidationMemoryRetrieval,
+    ): CandidateValidationError? {
+        if (retrieval.readiness != ValidationRecallReadiness.READY) {
+            return CandidateValidationError.ValidationRecallUnavailable(retrieval.readiness)
+        }
+        val generation = retrieval.generation
+        if (
+            generation == null ||
+            generation.algorithmVersion != TARGETED_VALIDATION_RECALL_ALGORITHM_VERSION ||
+            !validationRecallFence.matches(generation)
+        ) {
+            return CandidateValidationError.StaleValidationRecall(candidateId)
         }
         return null
     }

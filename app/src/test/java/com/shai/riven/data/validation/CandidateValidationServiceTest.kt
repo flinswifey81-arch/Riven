@@ -2,10 +2,15 @@ package com.shai.riven.data.validation
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
+import com.shai.riven.data.memory.MemoryEvidenceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
+import com.shai.riven.data.memory.MemoryTransactionService
+import com.shai.riven.data.memory.MemoryWriteResult
 import com.shai.riven.data.memory.RefinementDisposition
+import com.shai.riven.data.memory.ValidatedMemoryInput
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -932,6 +937,76 @@ class CandidateValidationServiceTest {
         assertEquals(InvalidValidationDecisionReason.UNGROUNDED_ENTITY, failure.reason)
     }
 
+    @Test
+    fun unavailableRecallCannotAuthorizeAcceptNew() = runBlocking {
+        retriever.readiness = ValidationRecallReadiness.NOT_READY
+
+        val result = validate()
+
+        val failure = error(result) as CandidateValidationError.ValidationRecallUnavailable
+        assertEquals(ValidationRecallReadiness.NOT_READY, failure.readiness)
+        assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, candidate().state)
+        assertNull(decider.snapshot)
+        assertEquals(0, database.memoryDao().memoryCount())
+    }
+
+    @Test
+    fun memoryInsertedDuringDecisionMakesCorpusGenerationStale() = runBlocking {
+        decider.onDecide = {
+            database.withTransaction {
+                val write = MemoryTransactionService(database).createValidatedInCurrentTransaction(
+                    ValidatedMemoryInput(
+                        memoryId = "raced-memory",
+                        kind = MemoryKind.SEMANTIC,
+                        scope = MemoryScope.SHAI,
+                        meaning = "Shai likes rainy afternoons.",
+                        epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                        certainty = MemoryCertainty.PROBABLE,
+                        learnedAt = 400,
+                        sensitivity = SensitivityLevel.STANDARD,
+                        evidence = listOf(
+                            MemoryEvidenceInput(
+                                experienceId = SEED,
+                                role = EvidenceRole.SUPPORTS,
+                                epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                                sourceCertainty = MemoryCertainty.PROBABLE,
+                                lineageKey = "race-lineage",
+                            ),
+                        ),
+                    ),
+                    occurredAt = 400,
+                )
+                assertTrue(write is MemoryWriteResult.Success)
+            }
+        }
+
+        val result = validate()
+
+        assertTrue(error(result) is CandidateValidationError.StaleValidationRecall)
+        assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, candidate().state)
+        assertNotNull(database.memoryDao().memory("raced-memory"))
+        assertNull(database.memoryDao().memory(NEW_MEMORY))
+    }
+
+    @Test
+    fun defaultRetrieverHydratesExactCanonicalComparisonBeforeDecision() = runBlocking {
+        insertTargetMemory(meaning = "Shai likes rainy afternoons.")
+        decider.decision = CandidateValidationDecision(
+            CandidateValidationOutcome.REINFORCE_EXISTING,
+            targetMemoryIds = listOf(TARGET),
+        )
+        val realService = CandidateValidationService(
+            database = database,
+            decider = decider,
+            memoryIdGenerator = ValidatedMemoryIdGenerator { NEW_MEMORY },
+        )
+
+        val result = realService.validate(ValidateCandidateInput(CANDIDATE, VALIDATED_AT))
+
+        assertTrue(result is CandidateValidationResult.ReinforcedExisting)
+        assertEquals(listOf(TARGET), decider.snapshot?.relatedMemories?.map { it.memoryId })
+    }
+
     private fun newService(): CandidateValidationService = CandidateValidationService(
         database = database,
         retriever = retriever,
@@ -1208,14 +1283,20 @@ class CandidateValidationServiceTest {
     private fun error(result: CandidateValidationResult): CandidateValidationError =
         (result as CandidateValidationResult.Failure).error
 
-    private class FakeRetriever : ValidationMemoryRetriever {
+    private inner class FakeRetriever : ValidationMemoryRetriever {
         var ids: List<String> = emptyList()
         var query: ValidationMemoryQuery? = null
         var onRetrieve: suspend () -> Unit = {}
+        var readiness: ValidationRecallReadiness = ValidationRecallReadiness.READY
+        var generation: ValidationRecallGeneration? = null
         override suspend fun retrieve(query: ValidationMemoryQuery): ValidationMemoryRetrieval {
             this.query = query
             onRetrieve()
-            return ValidationMemoryRetrieval(ids)
+            return ValidationMemoryRetrieval(
+                memoryIds = ids,
+                readiness = readiness,
+                generation = generation ?: database.validationRecallCorpusFence().snapshot(),
+            )
         }
     }
 

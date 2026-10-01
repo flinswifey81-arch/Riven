@@ -19,6 +19,7 @@ import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.memory.sourceLineageHash
+import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -28,6 +29,7 @@ class SafeDeleteService(
     private val afterDependencyMutation: (SafeDeleteOperation) -> Unit = {},
 ) {
     private val dao = database.safeDeleteDao()
+    private val validationRecallFence = database.validationRecallCorpusFence()
 
     suspend fun deleteMemory(input: DeleteMemoryInput): MemoryDeleteResult =
         executeMemoryDelete {
@@ -533,7 +535,9 @@ class SafeDeleteService(
     private suspend fun executeMemoryDelete(
         block: suspend () -> MemoryDeleteResult.Deleted,
     ): MemoryDeleteResult = try {
-        database.withTransaction { block() }
+        database.withTransaction {
+            block().also { validationRecallFence.markCanonicalMutation() }
+        }
     } catch (abort: SafeDeleteAbort) {
         MemoryDeleteResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
@@ -557,7 +561,9 @@ class SafeDeleteService(
     private suspend fun executeTimelineDelete(
         block: suspend () -> TimelineDeleteResult.Deleted,
     ): TimelineDeleteResult = try {
-        database.withTransaction { block() }
+        database.withTransaction {
+            block().also { validationRecallFence.markCanonicalMutation() }
+        }
     } catch (abort: SafeDeleteAbort) {
         TimelineDeleteResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
