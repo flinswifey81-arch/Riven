@@ -50,6 +50,7 @@ import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.validation.ValidationRecallGeneration
+import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
@@ -1009,13 +1010,18 @@ class MemoryTransactionServiceTest {
 
         insertExperience("experience-validated", 3)
         assertAdvanced(fence.snapshot()) {
-            database.withTransaction {
-                assertSuccess(
-                    service.createValidatedInCurrentTransaction(
-                        validatedMemory("memory-validated", "experience-validated", "Validated direct memory."),
-                        occurredAt = 6,
-                    ),
-                )
+            fence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf("memory-validated")) },
+            ) { mutation ->
+                database.withTransaction {
+                    assertSuccess(
+                        service.createValidatedInCurrentTransaction(
+                            validatedMemory("memory-validated", "experience-validated", "Validated direct memory."),
+                            occurredAt = 6,
+                            mutation = mutation,
+                        ),
+                    )
+                }
             }
         }
 

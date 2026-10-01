@@ -13,6 +13,7 @@ import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.text.Normalizer
 import java.util.Locale
@@ -38,9 +39,12 @@ data class TargetedValidationRecallLimits(
     val maxTextCharsPerDocument: Int = 16_384,
     val maxTokensPerDocument: Int = 512,
     val maxTokenChars: Int = 64,
+    val maxCorpusTextChars: Long = 32L * 1_024L * 1_024L,
+    val maxCorpusTokens: Int = 2_000_000,
     val maxCorpusPostings: Int = 500_000,
     val maxCorpusStructuralRows: Int = 200_000,
-    val maxStructuralRowsPerPage: Int = 4_096,
+    val maxStructuralRowsPerPage: Int = 1_024,
+    val maxIncrementalChangedMemories: Int = 64,
     val maxQueryChars: Int = 4_096,
     val maxQueryTerms: Int = 32,
     val maxQuerySourceIds: Int = 32,
@@ -62,9 +66,11 @@ data class TargetedValidationRecallLimits(
                 maxTextCharsPerDocument,
                 maxTokensPerDocument,
                 maxTokenChars,
+                maxCorpusTokens,
                 maxCorpusPostings,
                 maxCorpusStructuralRows,
                 maxStructuralRowsPerPage,
+                maxIncrementalChangedMemories,
                 maxQueryChars,
                 maxQueryTerms,
                 maxQuerySourceIds,
@@ -77,6 +83,7 @@ data class TargetedValidationRecallLimits(
                 maxFinalIds,
             ).all { it > 0 },
         )
+        require(maxCorpusTextChars > 0L)
         require(maxFinalIds <= MAX_VALIDATION_RELATED_MEMORIES)
         require(maxCandidatePool >= maxFinalIds)
         require(maxTextCharsPerDocument >= maxMeaningChars)
@@ -110,26 +117,40 @@ class TargetedValidationMemoryRetriever internal constructor(
 
     private val fence = database.validationRecallCorpusFence()
     private val buildMutex = Mutex()
-    @Volatile
+    private val stateLock = Any()
     private var publishedIndex: ValidationRecallIndex? = null
-    @Volatile
     private var closed = false
-    private val synchronousInvalidationListener: () -> Unit = { publishedIndex = null }
+    private val pendingMutations = mutableListOf<ValidationRecallCommittedMutation>()
+    private var observerSawActiveMutation = false
+    private val observerGenerationsToIgnore = mutableSetOf<ValidationRecallGeneration>()
+    private val synchronousInvalidationListener: (ValidationRecallCommittedMutation) -> Unit = { mutation ->
+        synchronized(stateLock) {
+            if (!closed) {
+                if (observerSawActiveMutation) {
+                    observerSawActiveMutation = false
+                } else {
+                    observerGenerationsToIgnore += mutation.generation
+                }
+                when (mutation.change) {
+                    is ValidationRecallCorpusChange.MemoryIdsChanged -> {
+                        if (publishedIndex != null) pendingMutations += mutation
+                    }
+                    ValidationRecallCorpusChange.Unknown -> {
+                        publishedIndex = null
+                        pendingMutations.clear()
+                    }
+                }
+            }
+        }
+    }
 
-    private val invalidationObserver = object : InvalidationTracker.Observer(
+    private val invalidationObserver = RecallInvalidationObserver(
+        this,
         "memories",
         "memory_evidence",
         "memory_relationships",
         "memory_entity_links",
-        "experiences",
-        "experience_entity_links",
-        "entities",
-        "suppression_tombstones",
-    ) {
-        override fun onInvalidated(tables: Set<String>) {
-            publishedIndex = null
-        }
-    }
+    )
 
     init {
         fence.addInvalidationListener(synchronousInvalidationListener)
@@ -137,67 +158,113 @@ class TargetedValidationMemoryRetriever internal constructor(
     }
 
     override suspend fun retrieve(query: ValidationMemoryQuery): ValidationMemoryRetrieval = withContext(dispatcher) {
-        coroutineContext.ensureActive()
-        if (closed) return@withContext unavailable(ValidationRecallReadiness.NOT_READY)
-        when (val outcome = readyIndex()) {
-            is IndexBuildOutcome.Ready -> outcome.index.retrieve(query, limits)
-            is IndexBuildOutcome.Unavailable -> unavailable(outcome.readiness, outcome.budgetUsage)
+        buildMutex.withLock {
+            coroutineContext.ensureActive()
+            if (isClosed()) return@withLock unavailable(ValidationRecallReadiness.NOT_READY)
+            when (val outcome = readyIndexLocked(forceFullRebuild = false)) {
+                is IndexBuildOutcome.Ready -> outcome.index.retrieve(query, limits)
+                is IndexBuildOutcome.Unavailable -> unavailable(outcome.readiness, outcome.budgetUsage)
+            }
+        }
+    }
+
+    /** Explicit lifecycle/background preparation path for rebuilding an unavailable full index. */
+    internal suspend fun prepare(): ValidationRecallReadiness = withContext(dispatcher) {
+        buildMutex.withLock {
+            coroutineContext.ensureActive()
+            if (isClosed()) return@withLock ValidationRecallReadiness.NOT_READY
+            when (val outcome = readyIndexLocked(forceFullRebuild = true)) {
+                is IndexBuildOutcome.Ready -> ValidationRecallReadiness.READY
+                is IndexBuildOutcome.Unavailable -> outcome.readiness
+            }
         }
     }
 
     override fun close() {
-        if (closed) return
-        closed = true
-        publishedIndex = null
+        val shouldDetach = synchronized(stateLock) {
+            if (closed) {
+                false
+            } else {
+                closed = true
+                publishedIndex = null
+                pendingMutations.clear()
+                observerGenerationsToIgnore.clear()
+                true
+            }
+        }
+        if (!shouldDetach) return
         fence.removeInvalidationListener(synchronousInvalidationListener)
         database.invalidationTracker.removeObserver(invalidationObserver)
     }
 
-    private suspend fun readyIndex(): IndexBuildOutcome {
-        val current = fence.snapshot()
-        publishedIndex?.takeIf { it.generation == current }?.let { return IndexBuildOutcome.Ready(it) }
-        return buildMutex.withLock {
-            coroutineContext.ensureActive()
-            val generation = fence.snapshot()
-            publishedIndex?.takeIf { it.generation == generation }?.let { return@withLock IndexBuildOutcome.Ready(it) }
-            val built = try {
-                buildIndex(generation)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: ValidationRecallCapacityExceeded) {
-                return@withLock IndexBuildOutcome.Unavailable(ValidationRecallReadiness.CAPACITY_EXCEEDED)
-            } catch (_: Exception) {
-                return@withLock IndexBuildOutcome.Unavailable(ValidationRecallReadiness.FAILED)
-            }
-            if (!fence.matches(generation)) {
-                return@withLock IndexBuildOutcome.Unavailable(
-                    ValidationRecallReadiness.STALE,
-                    built.budgetUsage,
-                )
-            }
-            publishedIndex = built
-            IndexBuildOutcome.Ready(built)
+    private suspend fun readyIndexLocked(forceFullRebuild: Boolean): IndexBuildOutcome {
+        val generation = fence.snapshotForIndexBuild()
+            ?: return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.STALE)
+        val state = synchronized(stateLock) {
+            if (closed) return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.NOT_READY)
+            PublishedState(publishedIndex, pendingMutations.toList())
         }
+        val currentIndex = state.index
+        if (currentIndex != null && currentIndex.generation == generation && state.pending.isEmpty()) {
+            return IndexBuildOutcome.Ready(currentIndex)
+        }
+        if (!forceFullRebuild && currentIndex != null) {
+            val changes = contiguousChanges(currentIndex.generation, generation, state.pending)
+            if (changes != null) {
+                val changedIds = changes
+                    .flatMapTo(sortedSetOf()) { mutation ->
+                        (mutation.change as ValidationRecallCorpusChange.MemoryIdsChanged).memoryIds
+                    }
+                if (changedIds.size > limits.maxIncrementalChangedMemories) {
+                    return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.CAPACITY_EXCEEDED)
+                }
+                val updated = try {
+                    applyIncrementalChanges(currentIndex, generation, changedIds)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: ValidationRecallCapacityExceeded) {
+                    discardPublishedIndex()
+                    return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.CAPACITY_EXCEEDED)
+                } catch (_: Exception) {
+                    discardPublishedIndex()
+                    return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.FAILED)
+                }
+                if (!publishIfCurrent(updated, generation)) {
+                    return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.STALE, updated.budgetUsage())
+                }
+                return IndexBuildOutcome.Ready(updated)
+            }
+        }
+
+        val built = try {
+            buildIndex(generation)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: ValidationRecallCapacityExceeded) {
+            return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.CAPACITY_EXCEEDED)
+        } catch (_: Exception) {
+            return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.FAILED)
+        }
+        if (!publishIfCurrent(built, generation)) {
+            return IndexBuildOutcome.Unavailable(ValidationRecallReadiness.STALE, built.budgetUsage())
+        }
+        return IndexBuildOutcome.Ready(built)
     }
 
     private suspend fun buildIndex(generation: ValidationRecallGeneration): ValidationRecallIndex {
-        val documents = linkedMapOf<String, RecallDocumentBuilder>()
-        val relationships = linkedSetOf<RecallRelationship>()
+        val index = ValidationRecallIndex(generation, limits)
         var afterMemoryId = ""
         var structuralRows = 0
 
         while (true) {
             coroutineContext.ensureActive()
-            val remainingMemories = limits.maxMemories - documents.size
+            val remainingMemories = limits.maxMemories - index.documentCount
             val pageLimit = minOf(limits.pageSize, remainingMemories + 1)
             val page = reader.memoryPage(afterMemoryId, pageLimit, limits.maxMeaningChars + 1)
             if (page.size > remainingMemories) throw ValidationRecallCapacityExceeded()
             if (page.isEmpty()) break
-            page.forEach { row ->
-                if (row.meaningLength > limits.maxMeaningChars.toLong() || row.meaning.length > limits.maxMeaningChars) {
-                    throw ValidationRecallCapacityExceeded()
-                }
-                documents[row.memoryId] = RecallDocumentBuilder(row)
+            val pageBuilders = page.associateTo(linkedMapOf()) { row ->
+                row.memoryId to RecallDocumentBuilder.create(row, limits)
             }
             val pageIds = page.map { it.memoryId }
 
@@ -206,20 +273,7 @@ class TargetedValidationMemoryRetriever internal constructor(
             }
             structuralRows += evidenceRows.size
             evidenceRows.forEach { row ->
-                val document = documents.getValue(row.memoryId)
-                if (row.sourceLength != null && row.sourceLength > limits.maxSourceChars.toLong()) {
-                    throw ValidationRecallCapacityExceeded()
-                }
-                if (document.row.retentionState != MemoryRetentionState.FORGOTTEN &&
-                    row.sourceAvailability == ExperienceAvailability.AVAILABLE
-                ) {
-                    document.sourceExperienceIds += row.sourceExperienceId
-                    if (document.row.sensitivity == SensitivityLevel.STANDARD &&
-                        row.sourceSensitivity == SensitivityLevel.STANDARD
-                    ) {
-                        row.sourceContent?.let(document.sourceTexts::add)
-                    }
-                }
+                pageBuilders.getValue(row.memoryId).addEvidence(row, limits)
             }
 
             val entityRows = boundedStructuralRows(structuralRows) { limit ->
@@ -227,7 +281,7 @@ class TargetedValidationMemoryRetriever internal constructor(
             }
             structuralRows += entityRows.size
             entityRows.forEach { row ->
-                val document = documents.getValue(row.memoryId)
+                val document = pageBuilders.getValue(row.memoryId)
                 if (document.isBroadlyAccessible) document.entityIds += row.entityId
             }
 
@@ -242,72 +296,135 @@ class TargetedValidationMemoryRetriever internal constructor(
             (outgoing + incoming)
                 .asSequence()
                 .filter { it.relationshipType in COMPARISON_RELATIONSHIPS }
-                .mapTo(relationships) {
-                    RecallRelationship(it.sourceMemoryId, it.targetMemoryId, it.relationshipType)
-                }
+                .map { RecallRelationship(it.sourceMemoryId, it.targetMemoryId, it.relationshipType) }
+                .forEach(index::addRelationship)
+
+            pageBuilders.values.forEach { builder -> index.addDocument(builder.build()) }
 
             afterMemoryId = page.last().memoryId
             if (page.size < pageLimit) break
         }
+        index.requireStructuralRowsWithinLimit(structuralRows)
+        return index
+    }
 
-        val postings = linkedMapOf<String, MutableList<RecallPosting>>()
-        val exactMeanings = linkedMapOf<String, MutableList<String>>()
-        val sourceIndex = linkedMapOf<String, MutableList<String>>()
-        val entityIndex = linkedMapOf<String, MutableList<String>>()
-        val immutableDocuments = linkedMapOf<String, RecallDocument>()
-        var indexedTokens = 0
-        var postingCount = 0
-
-        documents.values.forEach { builder ->
-            coroutineContext.ensureActive()
-            val document = builder.build(limits)
-            immutableDocuments[document.memoryId] = document
-            indexedTokens += document.documentLength
-            if (document.isBroadlyAccessible) {
-                exactMeanings.getOrPut(document.meaningHash) { mutableListOf() } += document.memoryId
-                document.termFrequencies.forEach { (term, frequency) ->
-                    postings.getOrPut(term) { mutableListOf() } += RecallPosting(document.memoryId, frequency)
-                    postingCount++
-                    if (postingCount > limits.maxCorpusPostings) throw ValidationRecallCapacityExceeded()
-                }
-                document.entityIds.forEach { entityId ->
-                    entityIndex.getOrPut(entityId) { mutableListOf() } += document.memoryId
-                }
-            }
-            if (document.rowRetentionState != MemoryRetentionState.FORGOTTEN) {
-                document.sourceExperienceIds.forEach { sourceId ->
-                    sourceIndex.getOrPut(sourceId) { mutableListOf() } += document.memoryId
-                }
+    private suspend fun applyIncrementalChanges(
+        index: ValidationRecallIndex,
+        generation: ValidationRecallGeneration,
+        changedIds: Set<String>,
+    ): ValidationRecallIndex {
+        if (changedIds.isEmpty()) {
+            index.generation = generation
+            return index
+        }
+        coroutineContext.ensureActive()
+        val ids = changedIds.sorted()
+        val rows = reader.memoryRows(ids, limits.maxMeaningChars + 1)
+        val builders = rows.associateTo(linkedMapOf()) { row ->
+            row.memoryId to RecallDocumentBuilder.create(row, limits)
+        }
+        var structuralRows = 0
+        val evidenceRows = boundedStructuralRows(structuralRows) { limit ->
+            reader.evidenceRows(ids, limit, limits.maxSourceChars + 1)
+        }
+        structuralRows += evidenceRows.size
+        evidenceRows.forEach { row -> builders[row.memoryId]?.addEvidence(row, limits) }
+        val entityRows = boundedStructuralRows(structuralRows) { limit ->
+            reader.memoryEntityRows(ids, limit)
+        }
+        structuralRows += entityRows.size
+        entityRows.forEach { row ->
+            builders[row.memoryId]?.let { builder ->
+                if (builder.isBroadlyAccessible) builder.entityIds += row.entityId
             }
         }
-
-        val adjacency = linkedMapOf<String, MutableSet<String>>()
-        relationships.forEach { relationship ->
-            if (relationship.sourceMemoryId in immutableDocuments && relationship.targetMemoryId in immutableDocuments) {
-                adjacency.getOrPut(relationship.sourceMemoryId) { sortedSetOf() } += relationship.targetMemoryId
-                adjacency.getOrPut(relationship.targetMemoryId) { sortedSetOf() } += relationship.sourceMemoryId
-            }
+        val outgoing = boundedStructuralRows(structuralRows) { limit ->
+            reader.outgoingRelationships(ids, limit)
         }
-        return ValidationRecallIndex(
-            generation = generation,
-            documents = immutableDocuments,
-            postings = postings.mapValues { (_, value) -> value.sortedBy { it.memoryId } },
-            exactMeanings = exactMeanings.mapValues { (_, value) -> value.sorted() },
-            sourceIndex = sourceIndex.mapValues { (_, value) -> value.distinct().sorted() },
-            entityIndex = entityIndex.mapValues { (_, value) -> value.distinct().sorted() },
-            adjacency = adjacency.mapValues { (_, value) -> value.toList() },
-            broadDocumentCount = immutableDocuments.values.count { it.isBroadlyAccessible },
-            averageDocumentLength = immutableDocuments.values
-                .filter { it.isBroadlyAccessible && it.documentLength > 0 }
-                .map { it.documentLength }
-                .average()
-                .takeUnless { it.isNaN() } ?: 1.0,
-            budgetUsage = ValidationRecallBudgetUsage(
-                indexedMemories = immutableDocuments.size,
-                indexedTokens = indexedTokens,
-                structuralRowsVisited = structuralRows,
-            ),
+        structuralRows += outgoing.size
+        val incoming = boundedStructuralRows(structuralRows) { limit ->
+            reader.incomingRelationships(ids, limit)
+        }
+        structuralRows += incoming.size
+        val relationships = (outgoing + incoming)
+            .asSequence()
+            .filter { it.relationshipType in COMPARISON_RELATIONSHIPS }
+            .map { RecallRelationship(it.sourceMemoryId, it.targetMemoryId, it.relationshipType) }
+            .toSet()
+        index.replaceDocuments(
+            changedIds = changedIds,
+            replacements = builders.mapValues { (_, builder) -> builder.build() },
+            replacementRelationships = relationships,
+            nextGeneration = generation,
+            limits = limits,
         )
+        return index
+    }
+
+    private fun contiguousChanges(
+        from: ValidationRecallGeneration,
+        to: ValidationRecallGeneration,
+        pending: List<ValidationRecallCommittedMutation>,
+    ): List<ValidationRecallCommittedMutation>? {
+        if (from.databaseSessionId != to.databaseSessionId ||
+            from.algorithmVersion != to.algorithmVersion ||
+            from.corpusGeneration >= to.corpusGeneration
+        ) {
+            return null
+        }
+        val changes = pending
+            .filter { it.generation.corpusGeneration > from.corpusGeneration }
+            .filter { it.generation.corpusGeneration <= to.corpusGeneration }
+            .sortedBy { it.generation.corpusGeneration }
+        val expectedCount = to.corpusGeneration - from.corpusGeneration
+        if (expectedCount > Int.MAX_VALUE || changes.size != expectedCount.toInt()) return null
+        changes.forEachIndexed { index, mutation ->
+            if (mutation.generation.databaseSessionId != to.databaseSessionId ||
+                mutation.generation.algorithmVersion != to.algorithmVersion ||
+                mutation.generation.corpusGeneration != from.corpusGeneration + index + 1L ||
+                mutation.change !is ValidationRecallCorpusChange.MemoryIdsChanged
+            ) {
+                return null
+            }
+        }
+        return changes
+    }
+
+    private fun publishIfCurrent(
+        index: ValidationRecallIndex,
+        generation: ValidationRecallGeneration,
+    ): Boolean = synchronized(stateLock) {
+        if (closed || !fence.matches(generation) ||
+            pendingMutations.any { it.generation.corpusGeneration > generation.corpusGeneration }
+        ) {
+            return@synchronized false
+        }
+        pendingMutations.removeAll { it.generation.corpusGeneration <= generation.corpusGeneration }
+        publishedIndex = index
+        true
+    }
+
+    private fun discardPublishedIndex() {
+        synchronized(stateLock) {
+            publishedIndex = null
+            pendingMutations.clear()
+        }
+    }
+
+    private fun isClosed(): Boolean = synchronized(stateLock) { closed }
+
+    internal fun onCanonicalTablesInvalidated() {
+        if (fence.isMutationInFlight()) {
+            synchronized(stateLock) { observerSawActiveMutation = true }
+            return
+        }
+        val generation = fence.snapshot()
+        synchronized(stateLock) {
+            if (closed) return
+            if (observerGenerationsToIgnore.remove(generation)) return
+            publishedIndex = null
+            pendingMutations.clear()
+        }
     }
 
     private fun <T> boundedStructuralRows(
@@ -338,6 +455,11 @@ class TargetedValidationMemoryRetriever internal constructor(
         ) : IndexBuildOutcome
     }
 
+    private data class PublishedState(
+        val index: ValidationRecallIndex?,
+        val pending: List<ValidationRecallCommittedMutation>,
+    )
+
     private companion object {
         val COMPARISON_RELATIONSHIPS = setOf(
             MemoryRelationshipType.REFINES,
@@ -348,8 +470,20 @@ class TargetedValidationMemoryRetriever internal constructor(
     }
 }
 
+private class RecallInvalidationObserver(
+    owner: TargetedValidationMemoryRetriever,
+    vararg tables: String,
+) : InvalidationTracker.Observer(tables) {
+    private val owner = WeakReference(owner)
+
+    override fun onInvalidated(tables: Set<String>) {
+        owner.get()?.onCanonicalTablesInvalidated()
+    }
+}
+
 internal interface ValidationRecallCorpusReader {
     fun memoryPage(afterMemoryId: String, limit: Int, maxMeaningCharsPlusOne: Int): List<ValidationRecallMemoryRow>
+    fun memoryRows(memoryIds: List<String>, maxMeaningCharsPlusOne: Int): List<ValidationRecallMemoryRow> = emptyList()
     fun evidenceRows(
         memoryIds: List<String>,
         limit: Int,
@@ -369,6 +503,11 @@ private class RoomValidationRecallCorpusReader(
         maxMeaningCharsPlusOne: Int,
     ) = dao.validationRecallMemoryPage(afterMemoryId, limit, maxMeaningCharsPlusOne)
 
+    override fun memoryRows(
+        memoryIds: List<String>,
+        maxMeaningCharsPlusOne: Int,
+    ) = dao.validationRecallMemoryRows(memoryIds, maxMeaningCharsPlusOne)
+
     override fun evidenceRows(
         memoryIds: List<String>,
         limit: Int,
@@ -385,52 +524,84 @@ private class RoomValidationRecallCorpusReader(
         dao.validationRecallIncomingRelationships(memoryIds, limit)
 }
 
-private data class RecallDocumentBuilder(
-    val row: ValidationRecallMemoryRow,
-    val sourceTexts: MutableList<String> = mutableListOf(),
+private class RecallDocumentBuilder private constructor(
+    private val memoryId: String,
+    private val kind: MemoryKind,
+    private val scope: MemoryScope,
+    private val retentionState: MemoryRetentionState,
+    val isBroadlyAccessible: Boolean,
+    private val meaningHash: String,
+    private var textChars: Long,
+    private val termFrequencies: MutableMap<String, Int>,
+    private var tokenCount: Int,
     val sourceExperienceIds: MutableSet<String> = sortedSetOf(),
     val entityIds: MutableSet<String> = sortedSetOf(),
 ) {
-    val isBroadlyAccessible: Boolean
-        get() = row.retentionState != MemoryRetentionState.FORGOTTEN &&
-            row.sensitivity == SensitivityLevel.STANDARD
-
-    fun build(limits: TargetedValidationRecallLimits): RecallDocument {
-        val termFrequencies = linkedMapOf<String, Int>()
-        var totalChars = row.meaningLength
-        var tokenCount = 0
-        if (isBroadlyAccessible) {
-            safeIndexTokens(row.meaning, limits.maxTokenChars).forEach { token ->
-                termFrequencies[token] = (termFrequencies[token] ?: 0) + MEANING_TOKEN_WEIGHT
-                tokenCount += MEANING_TOKEN_WEIGHT
-            }
-            sourceTexts.forEach { text ->
-                totalChars += text.length.toLong()
-                if (totalChars > limits.maxTextCharsPerDocument.toLong()) throw ValidationRecallCapacityExceeded()
-                safeIndexTokens(text, limits.maxTokenChars).forEach { token ->
-                    termFrequencies[token] = (termFrequencies[token] ?: 0) + SOURCE_TOKEN_WEIGHT
-                    tokenCount += SOURCE_TOKEN_WEIGHT
-                }
-            }
-            if (tokenCount > limits.maxTokensPerDocument) throw ValidationRecallCapacityExceeded()
+    fun addEvidence(row: ValidationRecallEvidenceRow, limits: TargetedValidationRecallLimits) {
+        if (retentionState == MemoryRetentionState.FORGOTTEN ||
+            row.sourceAvailability != ExperienceAvailability.AVAILABLE
+        ) {
+            return
         }
-        return RecallDocument(
-            memoryId = row.memoryId,
-            kind = row.kind,
-            scope = row.scope,
-            rowRetentionState = row.retentionState,
-            isBroadlyAccessible = isBroadlyAccessible,
-            meaningHash = meaningHash(row.meaning),
-            termFrequencies = termFrequencies,
-            documentLength = tokenCount,
-            sourceExperienceIds = sourceExperienceIds,
-            entityIds = entityIds,
-        )
+        sourceExperienceIds += row.sourceExperienceId
+        if (!isBroadlyAccessible || row.sourceSensitivity != SensitivityLevel.STANDARD) return
+        val sourceLength = row.sourceLength ?: return
+        val sourceContent = row.sourceContent ?: return
+        if (sourceLength > limits.maxSourceChars.toLong() || sourceContent.length > limits.maxSourceChars) {
+            throw ValidationRecallCapacityExceeded()
+        }
+        val nextTextChars = textChars + sourceLength
+        if (nextTextChars > limits.maxTextCharsPerDocument.toLong()) throw ValidationRecallCapacityExceeded()
+        textChars = nextTextChars
+        addTokens(sourceContent, SOURCE_TOKEN_WEIGHT, limits)
     }
 
-    private companion object {
-        const val MEANING_TOKEN_WEIGHT = 3
-        const val SOURCE_TOKEN_WEIGHT = 1
+    fun build(): RecallDocument = RecallDocument(
+        memoryId = memoryId,
+        kind = kind,
+        scope = scope,
+        rowRetentionState = retentionState,
+        isBroadlyAccessible = isBroadlyAccessible,
+        meaningHash = meaningHash,
+        termFrequencies = termFrequencies.toMap(),
+        documentLength = tokenCount,
+        textChars = textChars,
+        sourceExperienceIds = sourceExperienceIds.toSet(),
+        entityIds = entityIds.toSet(),
+    )
+
+    private fun addTokens(text: String, weight: Int, limits: TargetedValidationRecallLimits) {
+        safeIndexTokens(text, limits.maxTokenChars).forEach { token ->
+            if (tokenCount > limits.maxTokensPerDocument - weight) throw ValidationRecallCapacityExceeded()
+            termFrequencies[token] = (termFrequencies[token] ?: 0) + weight
+            tokenCount += weight
+        }
+    }
+
+    companion object {
+        fun create(row: ValidationRecallMemoryRow, limits: TargetedValidationRecallLimits): RecallDocumentBuilder {
+            if (row.meaningLength > limits.maxMeaningChars.toLong() || row.meaning.length > limits.maxMeaningChars) {
+                throw ValidationRecallCapacityExceeded()
+            }
+            val broadlyAccessible = row.retentionState != MemoryRetentionState.FORGOTTEN &&
+                row.sensitivity == SensitivityLevel.STANDARD
+            return RecallDocumentBuilder(
+                memoryId = row.memoryId,
+                kind = row.kind,
+                scope = row.scope,
+                retentionState = row.retentionState,
+                isBroadlyAccessible = broadlyAccessible,
+                meaningHash = if (broadlyAccessible) meaningHash(row.meaning) else "",
+                textChars = row.meaningLength,
+                termFrequencies = linkedMapOf(),
+                tokenCount = 0,
+            ).also { builder ->
+                if (broadlyAccessible) builder.addTokens(row.meaning, MEANING_TOKEN_WEIGHT, limits)
+            }
+        }
+
+        private const val MEANING_TOKEN_WEIGHT = 3
+        private const val SOURCE_TOKEN_WEIGHT = 1
     }
 }
 
@@ -443,11 +614,13 @@ private data class RecallDocument(
     val meaningHash: String,
     val termFrequencies: Map<String, Int>,
     val documentLength: Int,
+    val textChars: Long,
     val sourceExperienceIds: Set<String>,
     val entityIds: Set<String>,
-)
-
-private data class RecallPosting(val memoryId: String, val termFrequency: Int)
+) {
+    val structuralRows: Int
+        get() = sourceExperienceIds.size + entityIds.size
+}
 
 private data class RecallRelationship(
     val sourceMemoryId: String,
@@ -455,18 +628,150 @@ private data class RecallRelationship(
     val relationshipType: MemoryRelationshipType,
 )
 
-private data class ValidationRecallIndex(
-    val generation: ValidationRecallGeneration,
-    val documents: Map<String, RecallDocument>,
-    val postings: Map<String, List<RecallPosting>>,
-    val exactMeanings: Map<String, List<String>>,
-    val sourceIndex: Map<String, List<String>>,
-    val entityIndex: Map<String, List<String>>,
-    val adjacency: Map<String, List<String>>,
-    val broadDocumentCount: Int,
-    val averageDocumentLength: Double,
-    val budgetUsage: ValidationRecallBudgetUsage,
+private class ValidationRecallIndex(
+    var generation: ValidationRecallGeneration,
+    private val limits: TargetedValidationRecallLimits,
 ) {
+    private val documents = linkedMapOf<String, RecallDocument>()
+    private val postings = linkedMapOf<String, MutableMap<String, Int>>()
+    private val exactMeanings = linkedMapOf<String, MutableSet<String>>()
+    private val sourceIndex = linkedMapOf<String, MutableSet<String>>()
+    private val entityIndex = linkedMapOf<String, MutableSet<String>>()
+    private val relationships = linkedSetOf<RecallRelationship>()
+    private val relationshipsByMemory = linkedMapOf<String, MutableSet<RecallRelationship>>()
+    private val adjacency = linkedMapOf<String, MutableSet<String>>()
+    private var indexedTextChars = 0L
+    private var indexedTokens = 0
+    private var postingCount = 0
+    private var structuralRows = 0
+    private var broadDocumentCount = 0
+    private var positiveBroadDocumentCount = 0
+    private var broadDocumentTokens = 0L
+
+    val documentCount: Int
+        get() = documents.size
+
+    fun addDocument(document: RecallDocument) {
+        if (document.memoryId in documents) throw ValidationRecallCapacityExceeded()
+        if (documents.size >= limits.maxMemories ||
+            indexedTextChars > limits.maxCorpusTextChars - document.textChars ||
+            indexedTokens > limits.maxCorpusTokens - document.documentLength ||
+            postingCount > limits.maxCorpusPostings - document.termFrequencies.size ||
+            structuralRows > limits.maxCorpusStructuralRows - document.structuralRows
+        ) {
+            throw ValidationRecallCapacityExceeded()
+        }
+        documents[document.memoryId] = document
+        indexedTextChars += document.textChars
+        indexedTokens += document.documentLength
+        postingCount += document.termFrequencies.size
+        structuralRows += document.structuralRows
+        if (document.isBroadlyAccessible) {
+            broadDocumentCount++
+            if (document.documentLength > 0) {
+                positiveBroadDocumentCount++
+                broadDocumentTokens += document.documentLength.toLong()
+            }
+            exactMeanings.getOrPut(document.meaningHash) { sortedSetOf() } += document.memoryId
+            document.termFrequencies.forEach { (term, frequency) ->
+                postings.getOrPut(term) { linkedMapOf() }[document.memoryId] = frequency
+            }
+            document.entityIds.forEach { entityId ->
+                entityIndex.getOrPut(entityId) { sortedSetOf() } += document.memoryId
+            }
+        }
+        if (document.rowRetentionState != MemoryRetentionState.FORGOTTEN) {
+            document.sourceExperienceIds.forEach { sourceId ->
+                sourceIndex.getOrPut(sourceId) { sortedSetOf() } += document.memoryId
+            }
+        }
+        relationshipsByMemory[document.memoryId].orEmpty().forEach(::activateRelationship)
+    }
+
+    fun addRelationship(relationship: RecallRelationship) {
+        if (!relationships.add(relationship)) return
+        if (structuralRows >= limits.maxCorpusStructuralRows) throw ValidationRecallCapacityExceeded()
+        structuralRows++
+        relationshipsByMemory.getOrPut(relationship.sourceMemoryId) { linkedSetOf() } += relationship
+        relationshipsByMemory.getOrPut(relationship.targetMemoryId) { linkedSetOf() } += relationship
+        activateRelationship(relationship)
+    }
+
+    fun requireStructuralRowsWithinLimit(rowsRead: Int) {
+        if (rowsRead > limits.maxCorpusStructuralRows) throw ValidationRecallCapacityExceeded()
+    }
+
+    fun replaceDocuments(
+        changedIds: Set<String>,
+        replacements: Map<String, RecallDocument>,
+        replacementRelationships: Set<RecallRelationship>,
+        nextGeneration: ValidationRecallGeneration,
+        limits: TargetedValidationRecallLimits,
+    ) {
+        val relationshipsToRemove = changedIds
+            .flatMapTo(linkedSetOf()) { relationshipsByMemory[it].orEmpty() }
+        relationshipsToRemove.forEach(::removeRelationship)
+        changedIds.forEach(::removeDocument)
+        replacements.toSortedMap().values.forEach(::addDocument)
+        replacementRelationships.sortedWith(
+            compareBy<RecallRelationship>(RecallRelationship::sourceMemoryId)
+                .thenBy(RecallRelationship::targetMemoryId)
+                .thenBy { it.relationshipType.name },
+        ).forEach(::addRelationship)
+        if (documents.size > limits.maxMemories) throw ValidationRecallCapacityExceeded()
+        generation = nextGeneration
+    }
+
+    fun budgetUsage(): ValidationRecallBudgetUsage = ValidationRecallBudgetUsage(
+        indexedMemories = documents.size,
+        indexedTokens = indexedTokens,
+        structuralRowsVisited = structuralRows,
+    )
+
+    private fun removeDocument(memoryId: String) {
+        val document = documents.remove(memoryId) ?: return
+        indexedTextChars -= document.textChars
+        indexedTokens -= document.documentLength
+        postingCount -= document.termFrequencies.size
+        structuralRows -= document.structuralRows
+        if (document.isBroadlyAccessible) {
+            broadDocumentCount--
+            if (document.documentLength > 0) {
+                positiveBroadDocumentCount--
+                broadDocumentTokens -= document.documentLength.toLong()
+            }
+            exactMeanings.removeMember(document.meaningHash, memoryId)
+            document.termFrequencies.keys.forEach { term -> postings.removePosting(term, memoryId) }
+            document.entityIds.forEach { entityId -> entityIndex.removeMember(entityId, memoryId) }
+        }
+        if (document.rowRetentionState != MemoryRetentionState.FORGOTTEN) {
+            document.sourceExperienceIds.forEach { sourceId -> sourceIndex.removeMember(sourceId, memoryId) }
+        }
+        adjacency.remove(memoryId)
+        adjacency.values.forEach { it.remove(memoryId) }
+    }
+
+    private fun removeRelationship(relationship: RecallRelationship) {
+        if (!relationships.remove(relationship)) return
+        structuralRows--
+        relationshipsByMemory.removeMember(relationship.sourceMemoryId, relationship)
+        relationshipsByMemory.removeMember(relationship.targetMemoryId, relationship)
+        adjacency[relationship.sourceMemoryId]?.let { neighbors ->
+            neighbors.remove(relationship.targetMemoryId)
+            if (neighbors.isEmpty()) adjacency.remove(relationship.sourceMemoryId)
+        }
+        adjacency[relationship.targetMemoryId]?.let { neighbors ->
+            neighbors.remove(relationship.sourceMemoryId)
+            if (neighbors.isEmpty()) adjacency.remove(relationship.targetMemoryId)
+        }
+    }
+
+    private fun activateRelationship(relationship: RecallRelationship) {
+        if (relationship.sourceMemoryId !in documents || relationship.targetMemoryId !in documents) return
+        adjacency.getOrPut(relationship.sourceMemoryId) { sortedSetOf() } += relationship.targetMemoryId
+        adjacency.getOrPut(relationship.targetMemoryId) { sortedSetOf() } += relationship.sourceMemoryId
+    }
+
     suspend fun retrieve(
         query: ValidationMemoryQuery,
         limits: TargetedValidationRecallLimits,
@@ -531,19 +836,24 @@ private data class ValidationRecallIndex(
         orderedTerms.forEach { term ->
             coroutineContext.ensureActive()
             val termPostings = postings[term].orEmpty()
+            val averageDocumentLength = if (positiveBroadDocumentCount == 0) {
+                1.0
+            } else {
+                broadDocumentTokens.toDouble() / positiveBroadDocumentCount
+            }
             val inverseDocumentFrequency = ln(
                 1.0 + (broadDocumentCount - termPostings.size + 0.5) / (termPostings.size + 0.5),
             )
-            termPostings.forEach { posting ->
+            termPostings.forEach { (memoryId, termFrequency) ->
                 postingVisits++
-                val document = documents.getValue(posting.memoryId)
+                val document = documents.getValue(memoryId)
                 val normalizedLength = document.documentLength / averageDocumentLength
-                val termFrequencyScore = posting.termFrequency * (BM25_K + 1.0) /
-                    (posting.termFrequency + BM25_K * (1.0 - BM25_B + BM25_B * normalizedLength))
+                val termFrequencyScore = termFrequency * (BM25_K + 1.0) /
+                    (termFrequency + BM25_K * (1.0 - BM25_B + BM25_B * normalizedLength))
                 val structuralBonus =
                     (if (document.kind == query.proposedKind) SAME_KIND_BONUS else 0.0) +
                         (if (document.scope == query.proposedScope) SAME_SCOPE_BONUS else 0.0)
-                if (!add(posting.memoryId, inverseDocumentFrequency * termFrequencyScore + structuralBonus)) {
+                if (!add(memoryId, inverseDocumentFrequency * termFrequencyScore + structuralBonus)) {
                     return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED, postingVisits, structuralVisits)
                 }
             }
@@ -578,9 +888,9 @@ private data class ValidationRecallIndex(
             memoryIds = memoryIds,
             readiness = ValidationRecallReadiness.READY,
             generation = generation,
-            budgetUsage = budgetUsage.copy(
+            budgetUsage = budgetUsage().copy(
                 postingVisits = postingVisits,
-                structuralRowsVisited = budgetUsage.structuralRowsVisited + structuralVisits,
+                structuralRowsVisited = budgetUsage().structuralRowsVisited + structuralVisits,
                 graphSeedsVisited = graphSeeds.size,
                 relationshipRowsVisited = relationshipVisits,
                 candidatePoolSize = scores.size,
@@ -597,9 +907,9 @@ private data class ValidationRecallIndex(
     ) = ValidationMemoryRetrieval(
         readiness = readiness,
         generation = generation,
-        budgetUsage = budgetUsage.copy(
+        budgetUsage = budgetUsage().copy(
             postingVisits = postingVisits,
-            structuralRowsVisited = budgetUsage.structuralRowsVisited + structuralVisits,
+            structuralRowsVisited = budgetUsage().structuralRowsVisited + structuralVisits,
             graphSeedsVisited = graphSeeds,
             relationshipRowsVisited = relationshipVisits,
         ),
@@ -614,6 +924,20 @@ private data class ValidationRecallIndex(
         const val SAME_SCOPE_BONUS = 0.25
         const val BM25_K = 1.2
         const val BM25_B = 0.75
+    }
+
+    private fun <K, V> MutableMap<K, MutableSet<V>>.removeMember(key: K, value: V) {
+        this[key]?.let { values ->
+            values.remove(value)
+            if (values.isEmpty()) remove(key)
+        }
+    }
+
+    private fun <K, V> MutableMap<K, MutableMap<V, Int>>.removePosting(key: K, value: V) {
+        this[key]?.let { values ->
+            values.remove(value)
+            if (values.isEmpty()) remove(key)
+        }
     }
 }
 

@@ -2,6 +2,7 @@ package com.shai.riven.data.validation
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
@@ -56,7 +57,11 @@ import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -77,6 +82,7 @@ class CandidateValidationServiceTest {
     private lateinit var decider: FakeDecider
     private lateinit var service: CandidateValidationService
     private var eventOrder = 10L
+    private var diskDatabaseName: String? = null
 
     @Before
     fun setUp() {
@@ -91,7 +97,12 @@ class CandidateValidationServiceTest {
     }
 
     @After
-    fun tearDown() = database.close()
+    fun tearDown() {
+        database.close()
+        diskDatabaseName?.let { name ->
+            ApplicationProvider.getApplicationContext<Context>().deleteDatabase(name)
+        }
+    }
 
     @Test // 1
     fun acceptNewCreatesValidatedMemory() = runBlocking {
@@ -953,30 +964,35 @@ class CandidateValidationServiceTest {
     @Test
     fun memoryInsertedDuringDecisionMakesCorpusGenerationStale() = runBlocking {
         decider.onDecide = {
-            database.withTransaction {
-                val write = MemoryTransactionService(database).createValidatedInCurrentTransaction(
-                    ValidatedMemoryInput(
-                        memoryId = "raced-memory",
-                        kind = MemoryKind.SEMANTIC,
-                        scope = MemoryScope.SHAI,
-                        meaning = "Shai likes rainy afternoons.",
-                        epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
-                        certainty = MemoryCertainty.PROBABLE,
-                        learnedAt = 400,
-                        sensitivity = SensitivityLevel.STANDARD,
-                        evidence = listOf(
-                            MemoryEvidenceInput(
-                                experienceId = SEED,
-                                role = EvidenceRole.SUPPORTS,
-                                epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
-                                sourceCertainty = MemoryCertainty.PROBABLE,
-                                lineageKey = "race-lineage",
+            database.validationRecallCorpusFence().withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf("raced-memory")) },
+            ) { mutation ->
+                database.withTransaction {
+                    val write = MemoryTransactionService(database).createValidatedInCurrentTransaction(
+                        ValidatedMemoryInput(
+                            memoryId = "raced-memory",
+                            kind = MemoryKind.SEMANTIC,
+                            scope = MemoryScope.SHAI,
+                            meaning = "Shai likes rainy afternoons.",
+                            epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                            certainty = MemoryCertainty.PROBABLE,
+                            learnedAt = 400,
+                            sensitivity = SensitivityLevel.STANDARD,
+                            evidence = listOf(
+                                MemoryEvidenceInput(
+                                    experienceId = SEED,
+                                    role = EvidenceRole.SUPPORTS,
+                                    epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                                    sourceCertainty = MemoryCertainty.PROBABLE,
+                                    lineageKey = "race-lineage",
+                                ),
                             ),
                         ),
-                    ),
-                    occurredAt = 400,
-                )
-                assertTrue(write is MemoryWriteResult.Success)
+                        occurredAt = 400,
+                        mutation = mutation,
+                    )
+                    assertTrue(write is MemoryWriteResult.Success)
+                }
             }
         }
 
@@ -986,6 +1002,89 @@ class CandidateValidationServiceTest {
         assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, candidate().state)
         assertNotNull(database.memoryDao().memory("raced-memory"))
         assertNull(database.memoryDao().memory(NEW_MEMORY))
+    }
+
+    @Test
+    fun diskWalUncommittedWriterCannotMintReceiptThatAuthorizesDuplicateAdmission() = runBlocking {
+        replaceWithDiskWalDatabase()
+        val fence = database.validationRecallCorpusFence()
+        val oldGeneration = fence.snapshot()
+        insertExperience("writer-evidence", sourceContent = "Shai likes rainy afternoons.")
+        val recall = TargetedValidationMemoryRetriever(database, Dispatchers.IO)
+        val writerPaused = CompletableDeferred<Unit>()
+        val releaseWriter = CompletableDeferred<Unit>()
+        val writer = async(Dispatchers.IO) {
+            fence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf("writer-memory")) },
+            ) { mutation ->
+                database.withTransaction {
+                    val write = MemoryTransactionService(database).createValidatedInCurrentTransaction(
+                        ValidatedMemoryInput(
+                            memoryId = "writer-memory",
+                            kind = MemoryKind.SEMANTIC,
+                            scope = MemoryScope.SHAI,
+                            meaning = "Shai likes rainy afternoons.",
+                            epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                            certainty = MemoryCertainty.CERTAIN,
+                            learnedAt = 450,
+                            sensitivity = SensitivityLevel.STANDARD,
+                            evidence = listOf(
+                                MemoryEvidenceInput(
+                                    experienceId = "writer-evidence",
+                                    role = EvidenceRole.SUPPORTS,
+                                    epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                                    sourceCertainty = MemoryCertainty.CERTAIN,
+                                    lineageKey = "writer-lineage",
+                                ),
+                            ),
+                        ),
+                        occurredAt = 450,
+                        mutation = mutation,
+                    )
+                    assertTrue(write is MemoryWriteResult.Success)
+                    writerPaused.complete(Unit)
+                    releaseWriter.await()
+                }
+            }
+        }
+        try {
+            withTimeout(10_000) { writerPaused.await() }
+            val duringWrite = withTimeout(5_000) {
+                recall.retrieve(
+                    ValidationMemoryQuery(
+                        candidateId = CANDIDATE,
+                        proposedMeaning = "Shai likes rainy afternoons.",
+                        proposedKind = MemoryKind.SEMANTIC,
+                        proposedScope = MemoryScope.SHAI,
+                        proposedEpistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                        proposedCertainty = MemoryCertainty.PROBABLE,
+                        sensitivity = SensitivityLevel.STANDARD,
+                        groundedEntityIds = emptySet(),
+                        sourceExperienceIds = listOf(SEED),
+                        seedAttention = ValidationAttentionSignals(
+                            AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+                            1,
+                            emptySet(),
+                            emptySet(),
+                        ),
+                    ),
+                )
+            }
+            assertEquals(ValidationRecallReadiness.STALE, duringWrite.readiness)
+        } finally {
+            releaseWriter.complete(Unit)
+            withTimeout(10_000) { writer.await() }
+        }
+
+        retriever.generation = oldGeneration
+        retriever.ids = emptyList()
+        val admission = validate()
+
+        assertTrue(error(admission) is CandidateValidationError.StaleValidationRecall)
+        assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, candidate().state)
+        assertNotNull(database.memoryDao().memory("writer-memory"))
+        assertNull(database.memoryDao().memory(NEW_MEMORY))
+        recall.close()
     }
 
     @Test
@@ -1005,6 +1104,18 @@ class CandidateValidationServiceTest {
 
         assertTrue(result is CandidateValidationResult.ReinforcedExisting)
         assertEquals(listOf(TARGET), decider.snapshot?.relatedMemories?.map { it.memoryId })
+        realService.close()
+    }
+
+    @Test
+    fun closingOwnedDefaultRetrieverMakesServiceExplicitlyUnavailable() = runBlocking {
+        val owned = CandidateValidationService(database = database, decider = decider)
+        owned.close()
+
+        val result = owned.validate(ValidateCandidateInput(CANDIDATE, VALIDATED_AT))
+
+        val failure = error(result) as CandidateValidationError.ValidationRecallUnavailable
+        assertEquals(ValidationRecallReadiness.NOT_READY, failure.readiness)
     }
 
     private fun newService(): CandidateValidationService = CandidateValidationService(
@@ -1013,6 +1124,23 @@ class CandidateValidationServiceTest {
         decider = decider,
         memoryIdGenerator = ValidatedMemoryIdGenerator { NEW_MEMORY },
     )
+
+    private fun replaceWithDiskWalDatabase() {
+        database.close()
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "candidate-validation-wal-${System.nanoTime()}.db"
+        diskDatabaseName = name
+        context.deleteDatabase(name)
+        database = Room.databaseBuilder(context, RivenDatabase::class.java, name)
+            .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+            .allowMainThreadQueries()
+            .build()
+        retriever = FakeRetriever()
+        decider = FakeDecider(acceptDecision())
+        service = newService()
+        eventOrder = 10L
+        insertGroundedCandidate()
+    }
 
     private suspend fun validate(candidateId: String = CANDIDATE): CandidateValidationResult =
         service.validate(ValidateCandidateInput(candidateId, VALIDATED_AT))

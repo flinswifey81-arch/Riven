@@ -20,6 +20,7 @@ import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.validation.validationRecallCorpusFence
+import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -535,8 +536,14 @@ class SafeDeleteService(
     private suspend fun executeMemoryDelete(
         block: suspend () -> MemoryDeleteResult.Deleted,
     ): MemoryDeleteResult = try {
-        database.withTransaction {
-            block().also { validationRecallFence.markCanonicalMutation() }
+        validationRecallFence.withCanonicalMutation(
+            change = { result ->
+                ValidationRecallCorpusChange.memoryIds(
+                    result.neighboringMemoryIdsRequiringReassessment + result.deletedMemoryId,
+                )
+            },
+        ) {
+            database.withTransaction { block() }
         }
     } catch (abort: SafeDeleteAbort) {
         MemoryDeleteResult.Failure(abort.error)
@@ -561,8 +568,10 @@ class SafeDeleteService(
     private suspend fun executeTimelineDelete(
         block: suspend () -> TimelineDeleteResult.Deleted,
     ): TimelineDeleteResult = try {
-        database.withTransaction {
-            block().also { validationRecallFence.markCanonicalMutation() }
+        validationRecallFence.withCanonicalMutation(
+            change = { ValidationRecallCorpusChange.Unknown },
+        ) {
+            database.withTransaction { block() }
         }
     } catch (abort: SafeDeleteAbort) {
         TimelineDeleteResult.Failure(abort.error)

@@ -28,6 +28,9 @@ import com.shai.riven.data.persistence.model.ExperienceActor
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.ExperienceType
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.validation.ValidationRecallCorpusChange
+import com.shai.riven.data.validation.ValidationRecallMutationToken
+import com.shai.riven.data.validation.validationRecallCorpusFence
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -44,6 +47,7 @@ class ManualMemoryIntentService(
 ) {
     private val memoryDao = database.memoryDao()
     private val experienceOrderAllocator = ExperienceOrderAllocator(memoryDao)
+    private val validationRecallFence = database.validationRecallCorpusFence()
 
     suspend fun remember(input: ManualRememberMemoryInput): ManualMemoryIntentResult {
         validateMeaning(input.meaning)?.let { return failure(it) }
@@ -57,7 +61,7 @@ class ManualMemoryIntentService(
         validateId(memoryId, ManualMemoryIdField.MEMORY_ID)?.let { return failure(it) }
         validateId(experienceId, ManualMemoryIdField.EXPERIENCE_ID)?.let { return failure(it) }
 
-        return executeTransaction(ManualMemoryIntentKind.REMEMBER) {
+        return executeTransaction(ManualMemoryIntentKind.REMEMBER, setOf(memoryId)) { mutation ->
             requireUnusedIds(memoryId, experienceId)
             val eventOrder = allocateEventOrder()
             insertManualExperience(
@@ -106,6 +110,7 @@ class ManualMemoryIntentService(
                         },
                     ),
                     occurredAt = input.occurredAt,
+                    mutation = mutation,
                 ),
             )
             ManualMemoryIntentResult.Remembered(
@@ -129,7 +134,10 @@ class ManualMemoryIntentService(
         validateId(replacementMemoryId, ManualMemoryIdField.REPLACEMENT_MEMORY_ID)?.let { return failure(it) }
         validateId(experienceId, ManualMemoryIdField.EXPERIENCE_ID)?.let { return failure(it) }
 
-        val committed = executeTransaction(ManualMemoryIntentKind.CORRECT) {
+        val committed = executeTransaction(
+            ManualMemoryIntentKind.CORRECT,
+            setOf(input.memoryId, replacementMemoryId),
+        ) { mutation ->
             val inaccurate = memoryDao.memory(input.memoryId)
                 ?: abort(ManualMemoryIntentError.MemoryNotFound(input.memoryId))
             requireUnusedIds(replacementMemoryId, experienceId)
@@ -186,6 +194,7 @@ class ManualMemoryIntentService(
                         occurredAt = input.occurredAt,
                         triggeringExperienceId = experienceId,
                     ),
+                    mutation,
                 ),
             )
             ManualMemoryIntentResult.Corrected(
@@ -352,9 +361,14 @@ class ManualMemoryIntentService(
 
     private suspend fun executeTransaction(
         kind: ManualMemoryIntentKind,
-        block: suspend () -> ManualMemoryIntentResult,
+        affectedMemoryIds: Set<String>,
+        block: suspend (ValidationRecallMutationToken) -> ManualMemoryIntentResult,
     ): ManualMemoryIntentResult = try {
-        database.withTransaction { block() }
+        validationRecallFence.withCanonicalMutation(
+            change = { ValidationRecallCorpusChange.memoryIds(affectedMemoryIds) },
+        ) { mutation ->
+            database.withTransaction { block(mutation) }
+        }
     } catch (abort: ManualMemoryIntentAbort) {
         failure(abort.error)
     } catch (cancelled: CancellationException) {

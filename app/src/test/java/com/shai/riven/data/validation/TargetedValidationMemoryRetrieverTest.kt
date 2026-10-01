@@ -2,13 +2,18 @@ package com.shai.riven.data.validation
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.deletion.DeleteMemoryInput
 import com.shai.riven.data.deletion.MemoryDeleteResult
 import com.shai.riven.data.deletion.SafeDeleteService
+import com.shai.riven.data.memory.MemoryEvidenceInput
 import com.shai.riven.data.memory.MemoryStateTransitionInput
 import com.shai.riven.data.memory.MemoryTransactionService
+import com.shai.riven.data.memory.MemoryWriteResult
+import com.shai.riven.data.memory.ValidatedMemoryInput
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.persistence.dao.MemoryDao
 import com.shai.riven.data.persistence.dao.ValidationRecallEntityRow
 import com.shai.riven.data.persistence.dao.ValidationRecallEvidenceRow
 import com.shai.riven.data.persistence.dao.ValidationRecallMemoryRow
@@ -35,10 +40,13 @@ import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.TemporalState
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -311,8 +319,11 @@ class TargetedValidationMemoryRetrieverTest {
         insertMemory("first", "first topic")
         val recall = retriever()
         assertReady(recall.retrieve(query("first topic")))
-        insertMemory("second", "zebraquasar")
-        database.validationRecallCorpusFence().markCanonicalMutation()
+        database.validationRecallCorpusFence().withCanonicalMutation(
+            change = { ValidationRecallCorpusChange.memoryIds(setOf("second")) },
+        ) {
+            database.withTransaction { insertMemory("second", "zebraquasar") }
+        }
 
         val result = recall.retrieve(query("zebraquasar"))
 
@@ -366,6 +377,223 @@ class TargetedValidationMemoryRetrieverTest {
     }
 
     @Test
+    fun unrelatedConversationExperienceDoesNotRebuildWarmIndex() = runBlocking {
+        insertMemory("rain", "Shai likes rain.")
+        val reader = CountingReader(database.memoryDao())
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.Unconfined,
+            TargetedValidationRecallLimits(),
+            reader,
+        ).also(closeables::add)
+        assertReady(recall.retrieve(query("likes rain")))
+        val initialPageReads = reader.memoryPageCalls
+        insertExperienceOnly("unrelated-conversation", "A new unrelated user message.")
+
+        val second = recall.retrieve(query("likes rain"))
+
+        assertReady(second)
+        assertEquals(initialPageReads, reader.memoryPageCalls)
+        assertEquals(0, reader.memoryRowsCalls)
+    }
+
+    @Test
+    fun sequentialAdmissionsUseBoundedIncrementalReadsInsteadOfCorpusRebuilds() = runBlocking {
+        insertMemory("rain", "Shai likes rain.")
+        val reader = CountingReader(database.memoryDao())
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.Unconfined,
+            TargetedValidationRecallLimits(),
+            reader,
+        ).also(closeables::add)
+        assertReady(recall.retrieve(query("likes rain")))
+        val initialPageReads = reader.memoryPageCalls
+        val fence = database.validationRecallCorpusFence()
+        val transactions = MemoryTransactionService(database)
+
+        repeat(3) { index ->
+            val experienceId = "incremental-experience-$index"
+            val memoryId = "incremental-memory-$index"
+            val marker = "incrementaltopic$index"
+            insertExperienceOnly(experienceId, marker)
+            fence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf(memoryId)) },
+            ) { mutation ->
+                database.withTransaction {
+                    val write = transactions.createValidatedInCurrentTransaction(
+                        ValidatedMemoryInput(
+                            memoryId = memoryId,
+                            kind = MemoryKind.SEMANTIC,
+                            scope = MemoryScope.SHAI,
+                            meaning = marker,
+                            epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                            certainty = MemoryCertainty.CERTAIN,
+                            learnedAt = 200L + index,
+                            sensitivity = SensitivityLevel.STANDARD,
+                            evidence = listOf(
+                                MemoryEvidenceInput(
+                                    experienceId = experienceId,
+                                    role = EvidenceRole.SUPPORTS,
+                                    epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                                    sourceCertainty = MemoryCertainty.CERTAIN,
+                                    lineageKey = "incremental-lineage-$index",
+                                ),
+                            ),
+                        ),
+                        occurredAt = 200L + index,
+                        mutation = mutation,
+                    )
+                    assertTrue(write is MemoryWriteResult.Success)
+                }
+            }
+            val result = recall.retrieve(query(marker))
+            assertReady(result)
+            assertEquals(listOf(memoryId), result.memoryIds)
+            assertEquals(initialPageReads, reader.memoryPageCalls)
+            assertEquals(index + 1, reader.memoryRowsCalls)
+        }
+    }
+
+    @Test
+    fun rolledBackCanonicalMutationPreservesGenerationAndWarmIndex() = runBlocking {
+        insertMemory("rain", "Shai likes rain.")
+        val reader = CountingReader(database.memoryDao())
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.Unconfined,
+            TargetedValidationRecallLimits(),
+            reader,
+        ).also(closeables::add)
+        assertReady(recall.retrieve(query("likes rain")))
+        val initialPageReads = reader.memoryPageCalls
+        val fence = database.validationRecallCorpusFence()
+        val before = fence.snapshot()
+        insertExperienceOnly("rollback-experience", "rollback topic")
+
+        try {
+            fence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf("rollback-memory")) },
+            ) { mutation ->
+                database.withTransaction {
+                    val write = MemoryTransactionService(database).createValidatedInCurrentTransaction(
+                        validatedMemoryInput("rollback-memory", "rollback-experience", "rollback topic"),
+                        occurredAt = 300,
+                        mutation = mutation,
+                    )
+                    assertTrue(write is MemoryWriteResult.Success)
+                    error("SyntheticRollback")
+                }
+            }
+        } catch (failure: IllegalStateException) {
+            assertEquals("SyntheticRollback", failure.message)
+        }
+
+        assertEquals(before, fence.snapshot())
+        assertEquals(null, database.memoryDao().memory("rollback-memory"))
+        assertReady(recall.retrieve(query("likes rain")))
+        assertEquals(initialPageReads, reader.memoryPageCalls)
+    }
+
+    @Test
+    fun multipleCanonicalWritesInOneTransactionPublishOnePreciseGeneration() = runBlocking {
+        insertMemory("rain", "Shai likes rain.")
+        val reader = CountingReader(database.memoryDao())
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.Unconfined,
+            TargetedValidationRecallLimits(),
+            reader,
+        ).also(closeables::add)
+        assertReady(recall.retrieve(query("likes rain")))
+        val initialPageReads = reader.memoryPageCalls
+        insertExperienceOnly("multi-experience-a", "multitopica")
+        insertExperienceOnly("multi-experience-b", "multitopicb")
+        val fence = database.validationRecallCorpusFence()
+        val before = fence.snapshot()
+
+        fence.withCanonicalMutation(
+            change = {
+                ValidationRecallCorpusChange.memoryIds(setOf("multi-memory-a", "multi-memory-b"))
+            },
+        ) { mutation ->
+            database.withTransaction {
+                val transactions = MemoryTransactionService(database)
+                assertTrue(
+                    transactions.createValidatedInCurrentTransaction(
+                        validatedMemoryInput("multi-memory-a", "multi-experience-a", "multitopica"),
+                        occurredAt = 310,
+                        mutation = mutation,
+                    ) is MemoryWriteResult.Success,
+                )
+                assertTrue(
+                    transactions.createValidatedInCurrentTransaction(
+                        validatedMemoryInput("multi-memory-b", "multi-experience-b", "multitopicb"),
+                        occurredAt = 311,
+                        mutation = mutation,
+                    ) is MemoryWriteResult.Success,
+                )
+            }
+        }
+
+        assertEquals(before.corpusGeneration + 1L, fence.snapshot().corpusGeneration)
+        assertEquals(listOf("multi-memory-a"), recall.retrieve(query("multitopica")).memoryIds)
+        assertEquals(listOf("multi-memory-b"), recall.retrieve(query("multitopicb")).memoryIds)
+        assertEquals(initialPageReads, reader.memoryPageCalls)
+        assertEquals(1, reader.memoryRowsCalls)
+    }
+
+    @Test
+    fun corpusTextBudgetStopsBeforeReadingAnotherPage() = runBlocking {
+        repeat(3) { index -> insertMemory("text-$index", "m$index", sourceContent = "x".repeat(20)) }
+        val reader = CountingReader(database.memoryDao())
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.Unconfined,
+            TargetedValidationRecallLimits(pageSize = 1, maxCorpusTextChars = 30),
+            reader,
+        ).also(closeables::add)
+
+        val result = recall.retrieve(query("m0"))
+
+        assertEquals(ValidationRecallReadiness.CAPACITY_EXCEEDED, result.readiness)
+        assertEquals(2, reader.memoryPageCalls)
+    }
+
+    @Test
+    fun closeDuringBuildCannotRepublishIndex() = runBlocking {
+        val reader = BlockingReader()
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.IO,
+            TargetedValidationRecallLimits(),
+            reader,
+        ).also(closeables::add)
+        val retrieval = async(Dispatchers.IO) { recall.retrieve(query("rain")) }
+        assertTrue(reader.started.await(5, TimeUnit.SECONDS))
+
+        recall.close()
+        reader.release.countDown()
+
+        assertTrue(retrieval.await().readiness != ValidationRecallReadiness.READY)
+        assertEquals(ValidationRecallReadiness.NOT_READY, recall.retrieve(query("rain")).readiness)
+    }
+
+    @Test
+    fun repeatedRetrieverLifecycleDetachesFenceListeners() = runBlocking {
+        val fence = database.validationRecallCorpusFence()
+        val baseline = fence.liveInvalidationListenerCount()
+
+        repeat(25) {
+            val recall = TargetedValidationMemoryRetriever(database, Dispatchers.Unconfined)
+            assertEquals(baseline + 1, fence.liveInvalidationListenerCount())
+            assertReady(recall.retrieve(query("rain")))
+            recall.close()
+            assertEquals(baseline, fence.liveInvalidationListenerCount())
+        }
+    }
+
+    @Test
     fun closingRetrieverDiscardsPublishedProcessLocalIndex() = runBlocking {
         insertMemory("rain", "Shai likes rain.")
         val recall = retriever()
@@ -385,11 +613,19 @@ class TargetedValidationMemoryRetrieverTest {
             queryPlan("SELECT * FROM memory_evidence WHERE memory_id IN ('a') ORDER BY memory_id, experience_id LIMIT 10"),
             queryPlan("SELECT * FROM memory_entity_links WHERE memory_id IN ('a') ORDER BY memory_id, entity_id, role LIMIT 10"),
             queryPlan("SELECT * FROM memory_relationships WHERE source_memory_id IN ('a') ORDER BY source_memory_id, target_memory_id, relationship_type LIMIT 10"),
-            queryPlan("SELECT * FROM memory_relationships WHERE target_memory_id IN ('a') ORDER BY target_memory_id, source_memory_id, relationship_type LIMIT 10"),
+            queryPlan("SELECT * FROM memory_relationships WHERE target_memory_id IN ('a') LIMIT 10"),
         )
 
         assertTrue(plans.all { plan -> plan.any { "INDEX" in it.uppercase() } })
         assertTrue(plans.none { plan -> plan.any { it.uppercase().contains("SCAN MEMORIES") } })
+        val incomingPlan = plans.last().joinToString(" ").uppercase()
+        assertTrue(incomingPlan.contains("INDEX_MEMORY_RELATIONSHIPS_TARGET_MEMORY_ID"))
+        assertFalse(incomingPlan.contains("TEMP B-TREE"))
+        val incomingOpcodes = queryOpcodes(
+            "SELECT * FROM memory_relationships WHERE target_memory_id IN ('a') LIMIT 5",
+        )
+        assertFalse(incomingOpcodes.any { it.startsWith("SORTER") || it == "SORT" })
+        assertTrue(incomingOpcodes.any { it == "DECRJUMPZERO" })
     }
 
     private fun retriever(
@@ -488,6 +724,46 @@ class TargetedValidationMemoryRetrieverTest {
         database.memoryDao().insertEntity(KnownEntityEntity(id, EntityKind.SUBJECT, name, name.lowercase(), 1, 1))
     }
 
+    private fun insertExperienceOnly(id: String, sourceContent: String) {
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = id,
+                eventOrder = eventOrder++,
+                experienceType = ExperienceType.CONVERSATION_MESSAGE,
+                actor = ExperienceActor.SHAI,
+                sourceContent = sourceContent,
+                occurredAt = eventOrder,
+                recordedAt = eventOrder,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = ExperienceAvailability.AVAILABLE,
+            ),
+        )
+    }
+
+    private fun validatedMemoryInput(
+        memoryId: String,
+        experienceId: String,
+        meaning: String,
+    ) = ValidatedMemoryInput(
+        memoryId = memoryId,
+        kind = MemoryKind.SEMANTIC,
+        scope = MemoryScope.SHAI,
+        meaning = meaning,
+        epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+        certainty = MemoryCertainty.CERTAIN,
+        learnedAt = eventOrder,
+        sensitivity = SensitivityLevel.STANDARD,
+        evidence = listOf(
+            MemoryEvidenceInput(
+                experienceId = experienceId,
+                role = EvidenceRole.SUPPORTS,
+                epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                sourceCertainty = MemoryCertainty.CERTAIN,
+                lineageKey = "lineage-$experienceId",
+            ),
+        ),
+    )
+
     private fun insertRelationship(source: String, target: String, type: MemoryRelationshipType) {
         database.memoryDao().insertMemoryRelationship(
             MemoryRelationshipEntity(source, target, type, createdByExperienceId = null, createdAt = eventOrder++),
@@ -500,6 +776,15 @@ class TargetedValidationMemoryRetrieverTest {
             val detail = cursor.getColumnIndexOrThrow("detail")
             buildList {
                 while (cursor.moveToNext()) add(cursor.getString(detail))
+            }
+        }
+
+    private fun queryOpcodes(sql: String): List<String> = database.openHelper.readableDatabase
+        .query("EXPLAIN $sql")
+        .use { cursor ->
+            val opcode = cursor.getColumnIndexOrThrow("opcode")
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(opcode).uppercase())
             }
         }
 
@@ -541,5 +826,77 @@ class TargetedValidationMemoryRetrieverTest {
             memoryIds: List<String>,
             limit: Int,
         ): List<MemoryRelationshipEntity> = error("unused")
+    }
+
+    private class CountingReader(
+        private val dao: MemoryDao,
+    ) : ValidationRecallCorpusReader {
+        var memoryPageCalls = 0
+        var memoryRowsCalls = 0
+
+        override fun memoryPage(
+            afterMemoryId: String,
+            limit: Int,
+            maxMeaningCharsPlusOne: Int,
+        ): List<ValidationRecallMemoryRow> {
+            memoryPageCalls++
+            return dao.validationRecallMemoryPage(afterMemoryId, limit, maxMeaningCharsPlusOne)
+        }
+
+        override fun memoryRows(
+            memoryIds: List<String>,
+            maxMeaningCharsPlusOne: Int,
+        ): List<ValidationRecallMemoryRow> {
+            memoryRowsCalls++
+            return dao.validationRecallMemoryRows(memoryIds, maxMeaningCharsPlusOne)
+        }
+
+        override fun evidenceRows(
+            memoryIds: List<String>,
+            limit: Int,
+            maxSourceCharsPlusOne: Int,
+        ) = dao.validationRecallEvidenceRows(memoryIds, limit, maxSourceCharsPlusOne)
+
+        override fun memoryEntityRows(memoryIds: List<String>, limit: Int) =
+            dao.validationRecallMemoryEntityRows(memoryIds, limit)
+
+        override fun outgoingRelationships(memoryIds: List<String>, limit: Int) =
+            dao.validationRecallOutgoingRelationships(memoryIds, limit)
+
+        override fun incomingRelationships(memoryIds: List<String>, limit: Int) =
+            dao.validationRecallIncomingRelationships(memoryIds, limit)
+    }
+
+    private class BlockingReader : ValidationRecallCorpusReader {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+
+        override fun memoryPage(
+            afterMemoryId: String,
+            limit: Int,
+            maxMeaningCharsPlusOne: Int,
+        ): List<ValidationRecallMemoryRow> {
+            started.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            return emptyList()
+        }
+
+        override fun evidenceRows(
+            memoryIds: List<String>,
+            limit: Int,
+            maxSourceCharsPlusOne: Int,
+        ): List<ValidationRecallEvidenceRow> = emptyList()
+
+        override fun memoryEntityRows(memoryIds: List<String>, limit: Int): List<ValidationRecallEntityRow> = emptyList()
+
+        override fun outgoingRelationships(
+            memoryIds: List<String>,
+            limit: Int,
+        ): List<MemoryRelationshipEntity> = emptyList()
+
+        override fun incomingRelationships(
+            memoryIds: List<String>,
+            limit: Int,
+        ): List<MemoryRelationshipEntity> = emptyList()
     }
 }

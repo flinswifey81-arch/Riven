@@ -22,20 +22,29 @@ import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.TemporalState
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 
 class CandidateValidationService(
     private val database: RivenDatabase,
-    private val retriever: ValidationMemoryRetriever = TargetedValidationMemoryRetriever(database),
+    retriever: ValidationMemoryRetriever? = null,
     private val decider: CandidateValidationDecider,
     private val memoryIdGenerator: ValidatedMemoryIdGenerator =
         ValidatedMemoryIdGenerator { UUID.randomUUID().toString() },
     private val memoryTransactions: MemoryTransactionService = MemoryTransactionService(database),
-) {
+) : AutoCloseable {
+    private val retriever = retriever ?: TargetedValidationMemoryRetriever(database)
+    private val ownedRetriever = if (retriever == null) this.retriever as? AutoCloseable else null
     private val grounding = CandidateValidationGrounding(database)
     private val validationRecallFence = database.validationRecallCorpusFence()
+    private val closed = AtomicBoolean(false)
 
     suspend fun validate(input: ValidateCandidateInput): CandidateValidationResult {
+        if (closed.get()) {
+            return CandidateValidationResult.Failure(
+                CandidateValidationError.ValidationRecallUnavailable(ValidationRecallReadiness.NOT_READY),
+            )
+        }
         val initial = try {
             database.withTransaction {
                 val context = grounding.readCandidateInCurrentTransaction(input.candidateId)
@@ -126,9 +135,14 @@ class CandidateValidationService(
             }
         } else null
 
-        return try {
+        val applyInTransaction: suspend (ValidationRecallMutationToken?) -> CandidateValidationResult = { mutation ->
             database.withTransaction {
-                if (!validationRecallFence.matches(retrieval.generation)) {
+                val generationMatches = if (mutation == null) {
+                    validationRecallFence.matches(retrieval.generation)
+                } else {
+                    validationRecallFence.matchesDuringMutation(retrieval.generation, mutation)
+                }
+                if (!generationMatches) {
                     abort(CandidateValidationError.StaleValidationRecall(input.candidateId))
                 }
                 val currentContext = try {
@@ -151,7 +165,18 @@ class CandidateValidationService(
                 if (currentMemories != initialMemories) {
                     abort(CandidateValidationError.StaleValidationContext(input.candidateId))
                 }
-                applyDecision(input, currentContext, decision, newMemoryId)
+                applyDecision(input, currentContext, decision, newMemoryId, mutation)
+            }
+        }
+        return try {
+            if (decision.outcome.mutatesCanonicalMemory()) {
+                validationRecallFence.withCanonicalMutation(
+                    change = { result -> ValidationRecallCorpusChange.memoryIds(result.affectedMemoryIds()) },
+                ) { mutation ->
+                    applyInTransaction(mutation)
+                }
+            } else {
+                applyInTransaction(null)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -159,6 +184,12 @@ class CandidateValidationService(
             CandidateValidationResult.Failure(abort.error)
         } catch (failure: Exception) {
             storageFailure(CandidateValidationOperation.APPLY_DECISION, failure)
+        }
+    }
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            ownedRetriever?.close()
         }
     }
 
@@ -356,6 +387,7 @@ class CandidateValidationService(
         context: GroundedCandidateValidationContext,
         decision: CandidateValidationDecision,
         newMemoryId: String?,
+        mutation: ValidationRecallMutationToken?,
     ): CandidateValidationResult {
         val candidateId = context.candidate.candidateId
         val seedExperienceId = context.seedEvidence.experienceId
@@ -366,6 +398,7 @@ class CandidateValidationService(
                 requireWriteSuccess(
                     memoryTransactions.admitCandidateInCurrentTransaction(
                         context.toAdmitInput(memoryId, input.validatedAt, requireNotNull(decision.admission)),
+                        requireNotNull(mutation),
                     ),
                 )
                 CandidateValidationResult.AcceptedNew(candidateId, memoryId)
@@ -388,6 +421,7 @@ class CandidateValidationService(
                             occurredAt = input.validatedAt,
                             triggeringExperienceId = seedExperienceId,
                         ),
+                        requireNotNull(mutation),
                     ),
                 )
                 requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(candidateId))
@@ -409,6 +443,7 @@ class CandidateValidationService(
                             occurredAt = input.validatedAt,
                             triggeringExperienceId = seedExperienceId,
                         ),
+                        requireNotNull(mutation),
                     ),
                 )
                 requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(candidateId))
@@ -429,6 +464,7 @@ class CandidateValidationService(
                             occurredAt = input.validatedAt,
                             triggeringExperienceId = seedExperienceId,
                         ),
+                        requireNotNull(mutation),
                     ),
                 )
                 requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(candidateId))
@@ -449,6 +485,7 @@ class CandidateValidationService(
                             occurredAt = input.validatedAt,
                             triggeringExperienceId = seedExperienceId,
                         ),
+                        requireNotNull(mutation),
                     ),
                 )
                 requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(candidateId))
@@ -464,6 +501,7 @@ class CandidateValidationService(
                             input.validatedAt,
                             requireNotNull(decision.admission),
                         ),
+                        requireNotNull(mutation),
                     ),
                 )
                 requireWriteSuccess(
@@ -474,6 +512,7 @@ class CandidateValidationService(
                             occurredAt = input.validatedAt,
                             triggeringExperienceId = seedExperienceId,
                         ),
+                        requireNotNull(mutation),
                     ),
                 )
                 CandidateValidationResult.Disputed(
@@ -647,4 +686,28 @@ private fun CandidateValidationOutcome.createsMemory(): Boolean = when (this) {
     CandidateValidationOutcome.DISPUTE_EXISTING,
     -> true
     else -> false
+}
+
+private fun CandidateValidationOutcome.mutatesCanonicalMemory(): Boolean = when (this) {
+    CandidateValidationOutcome.ACCEPT_NEW,
+    CandidateValidationOutcome.REINFORCE_EXISTING,
+    CandidateValidationOutcome.REFINE_EXISTING,
+    CandidateValidationOutcome.SUPERSEDE_EXISTING,
+    CandidateValidationOutcome.CORRECT_EXISTING,
+    CandidateValidationOutcome.DISPUTE_EXISTING,
+    -> true
+    CandidateValidationOutcome.MERGE,
+    CandidateValidationOutcome.DEFER,
+    CandidateValidationOutcome.REJECT,
+    -> false
+}
+
+private fun CandidateValidationResult.affectedMemoryIds(): Set<String> = when (this) {
+    is CandidateValidationResult.AcceptedNew -> setOf(memoryId)
+    is CandidateValidationResult.ReinforcedExisting -> setOf(memoryId)
+    is CandidateValidationResult.Refined -> setOf(oldMemoryId, newMemoryId)
+    is CandidateValidationResult.Superseded -> setOf(oldMemoryId, newMemoryId)
+    is CandidateValidationResult.Corrected -> setOf(oldMemoryId, newMemoryId)
+    is CandidateValidationResult.Disputed -> setOf(existingMemoryId, competingMemoryId)
+    else -> emptySet()
 }

@@ -28,6 +28,8 @@ import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.validation.validationRecallCorpusFence
+import com.shai.riven.data.validation.ValidationRecallCorpusChange
+import com.shai.riven.data.validation.ValidationRecallMutationToken
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -175,7 +177,8 @@ class MemoryTransactionService(
 
     internal fun admitCandidateInCurrentTransaction(
         input: AdmitCandidateMemoryInput,
-    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.ADMIT_CANDIDATE) {
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(MemoryWriteOperation.ADMIT_CANDIDATE, mutation) {
         admitCandidateOrThrow(input)
     }
 
@@ -194,7 +197,8 @@ class MemoryTransactionService(
 
     internal fun reinforceInCurrentTransaction(
         input: ReinforceMemorySetInput,
-    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.REINFORCE) {
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(MemoryWriteOperation.REINFORCE, mutation) {
         reinforceOrThrow(input)
     }
 
@@ -209,7 +213,8 @@ class MemoryTransactionService(
     internal fun createValidatedInCurrentTransaction(
         input: ValidatedMemoryInput,
         occurredAt: Long,
-    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.CREATE_VALIDATED) {
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(MemoryWriteOperation.CREATE_VALIDATED, mutation) {
         insertValidatedMemory(input, occurredAt)
         MemoryWriteResult.Success(
             operation = MemoryWriteOperation.CREATE_VALIDATED,
@@ -222,8 +227,11 @@ class MemoryTransactionService(
      * Manual Correct uses this so its provenance Experience and the complete correction either both
      * commit or both roll back.
      */
-    internal fun correctInCurrentTransaction(input: CorrectMemoryInput): MemoryWriteResult =
-        executeInCurrentTransaction(MemoryWriteOperation.CORRECT) {
+    internal fun correctInCurrentTransaction(
+        input: CorrectMemoryInput,
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult =
+        executeCanonicalInCurrentTransaction(MemoryWriteOperation.CORRECT, mutation) {
             correctInCurrentTransactionOrThrow(input)
         }
 
@@ -267,7 +275,8 @@ class MemoryTransactionService(
 
     internal fun supersedeInCurrentTransaction(
         input: SupersedeMemoryInput,
-    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.SUPERSEDE) {
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(MemoryWriteOperation.SUPERSEDE, mutation) {
         supersedeOrThrow(input)
     }
 
@@ -278,7 +287,8 @@ class MemoryTransactionService(
 
     internal fun refineInCurrentTransaction(
         input: RefineMemoryInput,
-    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.REFINE) {
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(MemoryWriteOperation.REFINE, mutation) {
         refineOrThrow(input)
     }
 
@@ -289,7 +299,8 @@ class MemoryTransactionService(
 
     internal fun disputeInCurrentTransaction(
         input: DisputeMemoryInput,
-    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.DISPUTE) {
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(MemoryWriteOperation.DISPUTE, mutation) {
         disputeOrThrow(input)
     }
 
@@ -902,12 +913,14 @@ class MemoryTransactionService(
         operation: MemoryWriteOperation,
         block: suspend () -> MemoryWriteResult.Success,
     ): MemoryWriteResult = try {
-        database.withTransaction {
-            block().also {
-                if (operation in VALIDATION_RECALL_MUTATIONS) {
-                    validationRecallFence.markCanonicalMutation()
-                }
+        if (operation in VALIDATION_RECALL_MUTATIONS) {
+            validationRecallFence.withCanonicalMutation(
+                change = { result -> ValidationRecallCorpusChange.memoryIds(result.affectedMemoryIds) },
+            ) {
+                database.withTransaction { block() }
             }
+        } else {
+            database.withTransaction { block() }
         }
     } catch (abort: MemoryWriteAbort) {
         MemoryWriteResult.Failure(abort.error)
@@ -923,11 +936,7 @@ class MemoryTransactionService(
         operation: MemoryWriteOperation,
         block: () -> MemoryWriteResult.Success,
     ): MemoryWriteResult = try {
-        block().also {
-            if (operation in VALIDATION_RECALL_MUTATIONS) {
-                validationRecallFence.markCanonicalMutation()
-            }
-        }
+        block()
     } catch (abort: MemoryWriteAbort) {
         MemoryWriteResult.Failure(abort.error)
     } catch (cancelled: CancellationException) {
@@ -974,5 +983,16 @@ class MemoryTransactionService(
             MemoryWriteOperation.REACTIVATE,
             MemoryWriteOperation.FORGET,
         )
+    }
+
+    private fun executeCanonicalInCurrentTransaction(
+        operation: MemoryWriteOperation,
+        mutation: ValidationRecallMutationToken,
+        block: () -> MemoryWriteResult.Success,
+    ): MemoryWriteResult {
+        check(validationRecallFence.ownsActiveMutation(mutation)) {
+            "Canonical recall mutation must be owned by the surrounding transaction"
+        }
+        return executeInCurrentTransaction(operation, block)
     }
 }

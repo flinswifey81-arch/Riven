@@ -237,15 +237,52 @@ interface MemoryDao {
 
     @Query(
         """
+        SELECT memory_id AS memoryId,
+               kind,
+               scope,
+               substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
+               length(meaning) AS meaningLength,
+               truth_state AS truthState,
+               retention_state AS retentionState,
+               lifecycle_state AS lifecycleState,
+               sensitivity
+        FROM memories
+        WHERE memory_id IN (:memoryIds)
+        ORDER BY memory_id
+        """,
+    )
+    fun validationRecallMemoryRows(
+        memoryIds: List<String>,
+        maxMeaningCharsPlusOne: Int,
+    ): List<ValidationRecallMemoryRow>
+
+    @Query(
+        """
         SELECT memory_evidence.memory_id AS memoryId,
                memory_evidence.experience_id AS sourceExperienceId,
-               substr(experiences.source_content, 1, :maxSourceCharsPlusOne) AS sourceContent,
-               length(experiences.source_content) AS sourceLength,
+               CASE
+                   WHEN memories.retention_state != 'FORGOTTEN'
+                    AND memories.sensitivity = 'STANDARD'
+                    AND experiences.availability = 'AVAILABLE'
+                    AND experiences.sensitivity = 'STANDARD'
+                   THEN substr(experiences.source_content, 1, :maxSourceCharsPlusOne)
+                   ELSE NULL
+               END AS sourceContent,
+               CASE
+                   WHEN memories.retention_state != 'FORGOTTEN'
+                    AND memories.sensitivity = 'STANDARD'
+                    AND experiences.availability = 'AVAILABLE'
+                    AND experiences.sensitivity = 'STANDARD'
+                   THEN length(experiences.source_content)
+                   ELSE NULL
+               END AS sourceLength,
                experiences.availability AS sourceAvailability,
                experiences.sensitivity AS sourceSensitivity
         FROM memory_evidence
         INNER JOIN experiences
             ON experiences.experience_id = memory_evidence.experience_id
+        INNER JOIN memories
+            ON memories.memory_id = memory_evidence.memory_id
         WHERE memory_evidence.memory_id IN (:memoryIds)
         ORDER BY memory_evidence.memory_id, memory_evidence.experience_id
         LIMIT :limit
@@ -288,7 +325,6 @@ interface MemoryDao {
         """
         SELECT * FROM memory_relationships
         WHERE target_memory_id IN (:memoryIds)
-        ORDER BY target_memory_id, source_memory_id, relationship_type
         LIMIT :limit
         """,
     )
