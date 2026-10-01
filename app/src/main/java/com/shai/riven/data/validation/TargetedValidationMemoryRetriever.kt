@@ -91,6 +91,12 @@ data class TargetedValidationRecallLimits(
     }
 }
 
+internal data class ValidationRecallIncrementalWork(
+    val changedMemories: Int,
+    val incidentRelationshipsRemoved: Int,
+    val adjacencyVerticesVisitedForRemoval: Int,
+)
+
 /**
  * Best-effort lexical and structural recall for validation comparison only.
  *
@@ -119,6 +125,7 @@ class TargetedValidationMemoryRetriever internal constructor(
     private val buildMutex = Mutex()
     private val stateLock = Any()
     private var publishedIndex: ValidationRecallIndex? = null
+    private var lastIncrementalWork: ValidationRecallIncrementalWork? = null
     private var closed = false
     private val pendingMutations = mutableListOf<ValidationRecallCommittedMutation>()
     private var observerSawActiveMutation = false
@@ -189,6 +196,7 @@ class TargetedValidationMemoryRetriever internal constructor(
                 publishedIndex = null
                 pendingMutations.clear()
                 observerGenerationsToIgnore.clear()
+                lastIncrementalWork = null
                 true
             }
         }
@@ -315,6 +323,9 @@ class TargetedValidationMemoryRetriever internal constructor(
     ): ValidationRecallIndex {
         if (changedIds.isEmpty()) {
             index.generation = generation
+            synchronized(stateLock) {
+                lastIncrementalWork = ValidationRecallIncrementalWork(0, 0, 0)
+            }
             return index
         }
         coroutineContext.ensureActive()
@@ -351,15 +362,18 @@ class TargetedValidationMemoryRetriever internal constructor(
             .filter { it.relationshipType in COMPARISON_RELATIONSHIPS }
             .map { RecallRelationship(it.sourceMemoryId, it.targetMemoryId, it.relationshipType) }
             .toSet()
-        index.replaceDocuments(
+        val work = index.replaceDocuments(
             changedIds = changedIds,
             replacements = builders.mapValues { (_, builder) -> builder.build() },
             replacementRelationships = relationships,
             nextGeneration = generation,
-            limits = limits,
         )
+        synchronized(stateLock) { lastIncrementalWork = work }
         return index
     }
+
+    internal fun incrementalWorkSnapshot(): ValidationRecallIncrementalWork? =
+        synchronized(stateLock) { lastIncrementalWork }
 
     private fun contiguousChanges(
         from: ValidationRecallGeneration,
@@ -706,20 +720,23 @@ private class ValidationRecallIndex(
         replacements: Map<String, RecallDocument>,
         replacementRelationships: Set<RecallRelationship>,
         nextGeneration: ValidationRecallGeneration,
-        limits: TargetedValidationRecallLimits,
-    ) {
+    ): ValidationRecallIncrementalWork {
         val relationshipsToRemove = changedIds
             .flatMapTo(linkedSetOf()) { relationshipsByMemory[it].orEmpty() }
-        relationshipsToRemove.forEach(::removeRelationship)
-        changedIds.forEach(::removeDocument)
+        val work = MutableIncrementalWork(
+            changedMemories = changedIds.size,
+            incidentRelationshipsRemoved = relationshipsToRemove.size,
+        )
+        relationshipsToRemove.forEach { relationship -> removeRelationship(relationship, work) }
+        changedIds.forEach { memoryId -> removeDocument(memoryId, work) }
         replacements.toSortedMap().values.forEach(::addDocument)
         replacementRelationships.sortedWith(
             compareBy<RecallRelationship>(RecallRelationship::sourceMemoryId)
                 .thenBy(RecallRelationship::targetMemoryId)
                 .thenBy { it.relationshipType.name },
         ).forEach(::addRelationship)
-        if (documents.size > limits.maxMemories) throw ValidationRecallCapacityExceeded()
         generation = nextGeneration
+        return work.snapshot()
     }
 
     fun budgetUsage(): ValidationRecallBudgetUsage = ValidationRecallBudgetUsage(
@@ -728,7 +745,7 @@ private class ValidationRecallIndex(
         structuralRowsVisited = structuralRows,
     )
 
-    private fun removeDocument(memoryId: String) {
+    private fun removeDocument(memoryId: String, work: MutableIncrementalWork) {
         val document = documents.remove(memoryId) ?: return
         indexedTextChars -= document.textChars
         indexedTokens -= document.documentLength
@@ -747,19 +764,24 @@ private class ValidationRecallIndex(
         if (document.rowRetentionState != MemoryRetentionState.FORGOTTEN) {
             document.sourceExperienceIds.forEach { sourceId -> sourceIndex.removeMember(sourceId, memoryId) }
         }
+        work.adjacencyVerticesVisitedForRemoval++
         adjacency.remove(memoryId)
-        adjacency.values.forEach { it.remove(memoryId) }
     }
 
-    private fun removeRelationship(relationship: RecallRelationship) {
+    private fun removeRelationship(
+        relationship: RecallRelationship,
+        work: MutableIncrementalWork,
+    ) {
         if (!relationships.remove(relationship)) return
         structuralRows--
         relationshipsByMemory.removeMember(relationship.sourceMemoryId, relationship)
         relationshipsByMemory.removeMember(relationship.targetMemoryId, relationship)
+        work.adjacencyVerticesVisitedForRemoval++
         adjacency[relationship.sourceMemoryId]?.let { neighbors ->
             neighbors.remove(relationship.targetMemoryId)
             if (neighbors.isEmpty()) adjacency.remove(relationship.sourceMemoryId)
         }
+        work.adjacencyVerticesVisitedForRemoval++
         adjacency[relationship.targetMemoryId]?.let { neighbors ->
             neighbors.remove(relationship.sourceMemoryId)
             if (neighbors.isEmpty()) adjacency.remove(relationship.targetMemoryId)
@@ -924,6 +946,18 @@ private class ValidationRecallIndex(
         const val SAME_SCOPE_BONUS = 0.25
         const val BM25_K = 1.2
         const val BM25_B = 0.75
+    }
+
+    private data class MutableIncrementalWork(
+        val changedMemories: Int,
+        val incidentRelationshipsRemoved: Int,
+        var adjacencyVerticesVisitedForRemoval: Int = 0,
+    ) {
+        fun snapshot() = ValidationRecallIncrementalWork(
+            changedMemories = changedMemories,
+            incidentRelationshipsRemoved = incidentRelationshipsRemoved,
+            adjacencyVerticesVisitedForRemoval = adjacencyVerticesVisitedForRemoval,
+        )
     }
 
     private fun <K, V> MutableMap<K, MutableSet<V>>.removeMember(key: K, value: V) {

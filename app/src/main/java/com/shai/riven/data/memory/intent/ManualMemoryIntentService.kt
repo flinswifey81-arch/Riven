@@ -30,6 +30,7 @@ import com.shai.riven.data.persistence.model.ExperienceType
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.ValidationRecallMutationToken
+import com.shai.riven.data.validation.requireTopLevelValidationRecallMutation
 import com.shai.riven.data.validation.validationRecallCorpusFence
 import kotlinx.coroutines.CancellationException
 
@@ -363,20 +364,23 @@ class ManualMemoryIntentService(
         kind: ManualMemoryIntentKind,
         affectedMemoryIds: Set<String>,
         block: suspend (ValidationRecallMutationToken) -> ManualMemoryIntentResult,
-    ): ManualMemoryIntentResult = try {
-        validationRecallFence.withCanonicalMutation(
-            change = { ValidationRecallCorpusChange.memoryIds(affectedMemoryIds) },
-        ) { mutation ->
-            database.withTransaction { block(mutation) }
+    ): ManualMemoryIntentResult {
+        database.requireTopLevelValidationRecallMutation()
+        return try {
+            validationRecallFence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(affectedMemoryIds) },
+            ) { mutation ->
+                database.withTransaction { block(mutation) }
+            }
+        } catch (abort: ManualMemoryIntentAbort) {
+            failure(abort.error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: SQLiteConstraintException) {
+            storageFailure(kind)
+        } catch (_: Exception) {
+            storageFailure(kind)
         }
-    } catch (abort: ManualMemoryIntentAbort) {
-        failure(abort.error)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (_: SQLiteConstraintException) {
-        storageFailure(kind)
-    } catch (_: Exception) {
-        storageFailure(kind)
     }
 
     private fun generateMemoryId(): String? = try {

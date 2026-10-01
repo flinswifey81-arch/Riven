@@ -56,10 +56,15 @@ import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -1088,6 +1093,150 @@ class CandidateValidationServiceTest {
     }
 
     @Test
+    fun cancellationAfterWalCommitBeforeCallerResumeRejectsTheOldReceipt() = runBlocking {
+        replaceWithDiskWalDatabase()
+        val fence = database.validationRecallCorpusFence()
+        insertExperience("cancel-evidence", sourceContent = "cancellation commit marker")
+        val recall = TargetedValidationMemoryRetriever(database, Dispatchers.IO)
+        val query = ValidationMemoryQuery(
+            candidateId = CANDIDATE,
+            proposedMeaning = "cancellation commit marker",
+            proposedKind = MemoryKind.SEMANTIC,
+            proposedScope = MemoryScope.SHAI,
+            proposedEpistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+            proposedCertainty = MemoryCertainty.CERTAIN,
+            sensitivity = SensitivityLevel.STANDARD,
+            groundedEntityIds = emptySet(),
+            sourceExperienceIds = emptyList(),
+            seedAttention = ValidationAttentionSignals(
+                AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+                1,
+                emptySet(),
+                emptySet(),
+            ),
+        )
+        val oldReceipt = recall.retrieve(query)
+        assertEquals(ValidationRecallReadiness.READY, oldReceipt.readiness)
+        val oldGeneration = requireNotNull(oldReceipt.generation)
+        val callerDispatcher = PausingDispatcher()
+        val transactionBodyReady = CompletableDeferred<Unit>()
+        val allowTransactionToFinish = CompletableDeferred<Unit>()
+        val writer = async(callerDispatcher) {
+            fence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf("cancel-committed-memory")) },
+            ) { mutation ->
+                database.withTransaction {
+                    val result = MemoryTransactionService(database).createValidatedInCurrentTransaction(
+                        ValidatedMemoryInput(
+                            memoryId = "cancel-committed-memory",
+                            kind = MemoryKind.SEMANTIC,
+                            scope = MemoryScope.SHAI,
+                            meaning = "cancellation commit marker",
+                            epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                            certainty = MemoryCertainty.CERTAIN,
+                            learnedAt = 460,
+                            sensitivity = SensitivityLevel.STANDARD,
+                            evidence = listOf(
+                                MemoryEvidenceInput(
+                                    experienceId = "cancel-evidence",
+                                    role = EvidenceRole.SUPPORTS,
+                                    epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                                    sourceCertainty = MemoryCertainty.CERTAIN,
+                                    lineageKey = "cancel-lineage",
+                                ),
+                            ),
+                        ),
+                        occurredAt = 460,
+                        mutation = mutation,
+                    )
+                    assertTrue(result is MemoryWriteResult.Success)
+                    transactionBodyReady.complete(Unit)
+                    allowTransactionToFinish.await()
+                }
+            }
+        }
+        try {
+            withTimeout(10_000) { transactionBodyReady.await() }
+            callerDispatcher.pause()
+            allowTransactionToFinish.complete(Unit)
+            withTimeout(10_000) {
+                while (database.memoryDao().memory("cancel-committed-memory") == null ||
+                    callerDispatcher.queuedTaskCount == 0
+                ) {
+                    delay(10)
+                }
+            }
+
+            writer.cancel(CancellationException("cancel after Room commit"))
+
+            assertTrue(fence.isMutationInFlight())
+            assertFalse(fence.matches(oldGeneration))
+            assertEquals(ValidationRecallReadiness.STALE, recall.retrieve(query).readiness)
+
+            callerDispatcher.resumeQueued()
+            withTimeout(10_000) { writer.join() }
+
+            assertTrue(writer.isCancelled)
+            assertFalse(fence.isMutationInFlight())
+            assertFalse(fence.matches(oldGeneration))
+            assertEquals(oldGeneration.corpusGeneration + 1L, fence.snapshot().corpusGeneration)
+            assertNotNull(database.memoryDao().memory("cancel-committed-memory"))
+            val after = recall.retrieve(query)
+            assertEquals(ValidationRecallReadiness.READY, after.readiness)
+            assertTrue("cancel-committed-memory" in after.memoryIds)
+        } finally {
+            allowTransactionToFinish.complete(Unit)
+            callerDispatcher.resumeQueued()
+            withTimeout(10_000) { writer.join() }
+            recall.close()
+        }
+    }
+
+    @Test
+    fun cancellationWhileWalTransactionIsOpenKeepsFenceBusyUntilOutcomeSettles() = runBlocking {
+        replaceWithDiskWalDatabase()
+        val fence = database.validationRecallCorpusFence()
+        val generation = fence.snapshot()
+        val transactionBodyReady = CompletableDeferred<Unit>()
+        val allowTransactionToFinish = CompletableDeferred<Unit>()
+        val writer = async(Dispatchers.IO) {
+            fence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.memoryIds(setOf("cancel-open-memory")) },
+            ) {
+                database.withTransaction {
+                    insertTargetMemory(
+                        id = "cancel-open-memory",
+                        meaning = "Committed after caller cancellation.",
+                    )
+                    transactionBodyReady.complete(Unit)
+                    allowTransactionToFinish.await()
+                }
+            }
+        }
+        try {
+            withTimeout(10_000) { transactionBodyReady.await() }
+
+            writer.cancel(CancellationException("cancel while Room transaction is open"))
+
+            assertTrue(fence.isMutationInFlight())
+            assertFalse(fence.matches(generation))
+            assertFalse(writer.isCompleted)
+
+            allowTransactionToFinish.complete(Unit)
+            withTimeout(10_000) { writer.join() }
+
+            assertTrue(writer.isCancelled)
+            assertFalse(fence.isMutationInFlight())
+            assertFalse(fence.matches(generation))
+            assertEquals(generation.corpusGeneration + 1L, fence.snapshot().corpusGeneration)
+            assertNotNull(database.memoryDao().memory("cancel-open-memory"))
+        } finally {
+            allowTransactionToFinish.complete(Unit)
+            withTimeout(10_000) { writer.join() }
+        }
+    }
+
+    @Test
     fun defaultRetrieverHydratesExactCanonicalComparisonBeforeDecision() = runBlocking {
         insertTargetMemory(meaning = "Shai likes rainy afternoons.")
         decider.decision = CandidateValidationDecision(
@@ -1435,6 +1584,36 @@ class CandidateValidationServiceTest {
             this.snapshot = snapshot
             onDecide()
             return decision
+        }
+    }
+
+    private class PausingDispatcher(
+        private val delegate: CoroutineDispatcher = Dispatchers.Default,
+    ) : CoroutineDispatcher() {
+        private val paused = AtomicBoolean(false)
+        private val queued = ConcurrentLinkedQueue<Runnable>()
+
+        val queuedTaskCount: Int
+            get() = queued.size
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            if (paused.get()) {
+                queued += block
+            } else {
+                delegate.dispatch(context, block)
+            }
+        }
+
+        fun pause() {
+            paused.set(true)
+        }
+
+        fun resumeQueued() {
+            paused.set(false)
+            while (true) {
+                val task = queued.poll() ?: return
+                task.run()
+            }
         }
     }
 

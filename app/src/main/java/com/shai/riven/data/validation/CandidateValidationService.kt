@@ -45,6 +45,7 @@ class CandidateValidationService(
                 CandidateValidationError.ValidationRecallUnavailable(ValidationRecallReadiness.NOT_READY),
             )
         }
+        database.requireTopLevelValidationRecallMutation()
         val initial = try {
             database.withTransaction {
                 val context = grounding.readCandidateInCurrentTransaction(input.candidateId)

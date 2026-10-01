@@ -30,6 +30,7 @@ import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.validation.validationRecallCorpusFence
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.ValidationRecallMutationToken
+import com.shai.riven.data.validation.requireTopLevelValidationRecallMutation
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -912,24 +913,29 @@ class MemoryTransactionService(
     private suspend fun execute(
         operation: MemoryWriteOperation,
         block: suspend () -> MemoryWriteResult.Success,
-    ): MemoryWriteResult = try {
+    ): MemoryWriteResult {
         if (operation in VALIDATION_RECALL_MUTATIONS) {
-            validationRecallFence.withCanonicalMutation(
-                change = { result -> ValidationRecallCorpusChange.memoryIds(result.affectedMemoryIds) },
-            ) {
+            database.requireTopLevelValidationRecallMutation()
+        }
+        return try {
+            if (operation in VALIDATION_RECALL_MUTATIONS) {
+                validationRecallFence.withCanonicalMutation(
+                    change = { result -> ValidationRecallCorpusChange.memoryIds(result.affectedMemoryIds) },
+                ) {
+                    database.withTransaction { block() }
+                }
+            } else {
                 database.withTransaction { block() }
             }
-        } else {
-            database.withTransaction { block() }
+        } catch (abort: MemoryWriteAbort) {
+            MemoryWriteResult.Failure(abort.error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (constraint: SQLiteConstraintException) {
+            MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, constraint::class.java.simpleName))
+        } catch (failure: Exception) {
+            MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, failure::class.java.simpleName))
         }
-    } catch (abort: MemoryWriteAbort) {
-        MemoryWriteResult.Failure(abort.error)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (constraint: SQLiteConstraintException) {
-        MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, constraint::class.java.simpleName))
-    } catch (failure: Exception) {
-        MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, failure::class.java.simpleName))
     }
 
     private fun executeInCurrentTransaction(

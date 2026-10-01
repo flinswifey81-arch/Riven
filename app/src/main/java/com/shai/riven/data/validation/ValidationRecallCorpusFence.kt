@@ -5,8 +5,11 @@ import java.lang.ref.WeakReference
 import java.util.UUID
 import java.util.WeakHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 internal sealed interface ValidationRecallCorpusChange {
     data class MemoryIdsChanged(val memoryIds: Set<String>) : ValidationRecallCorpusChange
@@ -36,6 +39,11 @@ internal class ValidationRecallMutationToken internal constructor(
  * rollback removes the in-flight barrier and preserves the prior generation. A new database
  * instance (relaunch, restore, reset, or replacement) receives a new session id and cannot reuse an
  * old process index.
+ *
+ * Callers must start this fence outside any existing Room transaction. The fenced block settles in
+ * a non-cancellable context so the in-flight barrier remains active until Room has actually ended
+ * the transaction. Caller cancellation is delivered only after the committed or rolled-back
+ * outcome has been published to the fence.
  */
 internal class ValidationRecallCorpusFence {
     private val stateLock = Any()
@@ -74,20 +82,25 @@ internal class ValidationRecallCorpusFence {
         block: suspend (ValidationRecallMutationToken) -> T,
     ): T = mutationMutex.withLock {
         val token = beginMutation()
-        val result = try {
-            block(token)
-        } catch (failure: Throwable) {
-            completeRolledBackMutation(token)
-            throw failure
+        withContext(NonCancellable) {
+            val result = try {
+                block(token)
+            } catch (cancelled: CancellationException) {
+                completeCommittedMutation(token, ValidationRecallCorpusChange.Unknown)
+                throw cancelled
+            } catch (failure: Throwable) {
+                completeRolledBackMutation(token)
+                throw failure
+            }
+            val committedChange = try {
+                change(result)
+            } catch (failure: Throwable) {
+                completeCommittedMutation(token, ValidationRecallCorpusChange.Unknown)
+                throw failure
+            }
+            completeCommittedMutation(token, committedChange)
+            result
         }
-        val committedChange = try {
-            change(result)
-        } catch (failure: Throwable) {
-            completeCommittedMutation(token, ValidationRecallCorpusChange.Unknown)
-            throw failure
-        }
-        completeCommittedMutation(token, committedChange)
-        result
     }
 
     fun addInvalidationListener(listener: (ValidationRecallCommittedMutation) -> Unit) {
@@ -165,3 +178,10 @@ private object ValidationRecallCorpusFences {
 
 internal fun RivenDatabase.validationRecallCorpusFence(): ValidationRecallCorpusFence =
     ValidationRecallCorpusFences.forDatabase(this)
+
+internal fun RivenDatabase.requireTopLevelValidationRecallMutation() {
+    check(!inTransaction()) {
+        "Canonical recall writers cannot start inside an existing Room transaction; " +
+            "use the explicit in-current-transaction API under one outer recall fence"
+    }
+}

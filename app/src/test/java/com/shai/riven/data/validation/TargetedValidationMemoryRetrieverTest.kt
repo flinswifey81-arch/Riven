@@ -456,6 +456,38 @@ class TargetedValidationMemoryRetrieverTest {
     }
 
     @Test
+    fun isolatedIncrementalChangeDoesNotSweepUnrelatedAdjacencyVertices() = runBlocking {
+        val reader = LargeUnrelatedGraphReader(vertexCount = 4_000)
+        val recall = TargetedValidationMemoryRetriever(
+            database,
+            Dispatchers.Unconfined,
+            TargetedValidationRecallLimits(pageSize = 256, maxMemories = 5_000),
+            reader,
+        ).also(closeables::add)
+        assertEquals(listOf("isolated"), recall.retrieve(query("isolatedbefore")).memoryIds)
+        val initialPageReads = reader.memoryPageCalls
+        reader.updateIsolatedMeaning("isolatedafter")
+
+        database.validationRecallCorpusFence().withCanonicalMutation(
+            change = { ValidationRecallCorpusChange.memoryIds(setOf("isolated")) },
+        ) { Unit }
+        val result = recall.retrieve(query("isolatedafter"))
+
+        assertReady(result)
+        assertEquals(listOf("isolated"), result.memoryIds)
+        assertEquals(initialPageReads, reader.memoryPageCalls)
+        assertEquals(1, reader.memoryRowsCalls)
+        assertEquals(
+            ValidationRecallIncrementalWork(
+                changedMemories = 1,
+                incidentRelationshipsRemoved = 0,
+                adjacencyVerticesVisitedForRemoval = 1,
+            ),
+            recall.incrementalWorkSnapshot(),
+        )
+    }
+
+    @Test
     fun rolledBackCanonicalMutationPreservesGenerationAndWarmIndex() = runBlocking {
         insertMemory("rain", "Shai likes rain.")
         val reader = CountingReader(database.memoryDao())
@@ -898,5 +930,93 @@ class TargetedValidationMemoryRetrieverTest {
             memoryIds: List<String>,
             limit: Int,
         ): List<MemoryRelationshipEntity> = emptyList()
+    }
+
+    private class LargeUnrelatedGraphReader(vertexCount: Int) : ValidationRecallCorpusReader {
+        private val rows = buildList {
+            repeat(vertexCount) { index ->
+                val id = "graph-${index.toString().padStart(4, '0')}"
+                add(memoryRow(id, "graphtopic$index"))
+            }
+            add(memoryRow("isolated", "isolatedbefore"))
+        }.associateByTo(sortedMapOf()) { it.memoryId }
+        private val relationships = (0 until vertexCount - 1).map { index ->
+            MemoryRelationshipEntity(
+                sourceMemoryId = "graph-${index.toString().padStart(4, '0')}",
+                targetMemoryId = "graph-${(index + 1).toString().padStart(4, '0')}",
+                relationshipType = MemoryRelationshipType.REFINES,
+                createdByExperienceId = null,
+                createdAt = index.toLong(),
+            )
+        }
+        var memoryPageCalls = 0
+        var memoryRowsCalls = 0
+
+        fun updateIsolatedMeaning(meaning: String) {
+            rows["isolated"] = memoryRow("isolated", meaning)
+        }
+
+        override fun memoryPage(
+            afterMemoryId: String,
+            limit: Int,
+            maxMeaningCharsPlusOne: Int,
+        ): List<ValidationRecallMemoryRow> {
+            memoryPageCalls++
+            return rows.values.asSequence()
+                .filter { row -> row.memoryId > afterMemoryId }
+                .take(limit)
+                .toList()
+        }
+
+        override fun memoryRows(
+            memoryIds: List<String>,
+            maxMeaningCharsPlusOne: Int,
+        ): List<ValidationRecallMemoryRow> {
+            memoryRowsCalls++
+            return memoryIds.mapNotNull(rows::get)
+        }
+
+        override fun evidenceRows(
+            memoryIds: List<String>,
+            limit: Int,
+            maxSourceCharsPlusOne: Int,
+        ): List<ValidationRecallEvidenceRow> = emptyList()
+
+        override fun memoryEntityRows(
+            memoryIds: List<String>,
+            limit: Int,
+        ): List<ValidationRecallEntityRow> = emptyList()
+
+        override fun outgoingRelationships(
+            memoryIds: List<String>,
+            limit: Int,
+        ): List<MemoryRelationshipEntity> = relationships
+            .asSequence()
+            .filter { relationship -> relationship.sourceMemoryId in memoryIds }
+            .take(limit)
+            .toList()
+
+        override fun incomingRelationships(
+            memoryIds: List<String>,
+            limit: Int,
+        ): List<MemoryRelationshipEntity> = relationships
+            .asSequence()
+            .filter { relationship -> relationship.targetMemoryId in memoryIds }
+            .take(limit)
+            .toList()
+
+        private companion object {
+            fun memoryRow(memoryId: String, meaning: String) = ValidationRecallMemoryRow(
+                memoryId = memoryId,
+                kind = MemoryKind.SEMANTIC,
+                scope = MemoryScope.SHAI,
+                meaning = meaning,
+                meaningLength = meaning.length.toLong(),
+                truthState = MemoryTruthState.SUPPORTED,
+                retentionState = MemoryRetentionState.ACTIVE,
+                lifecycleState = MemoryLifecycleState.VALIDATED,
+                sensitivity = SensitivityLevel.STANDARD,
+            )
+        }
     }
 }

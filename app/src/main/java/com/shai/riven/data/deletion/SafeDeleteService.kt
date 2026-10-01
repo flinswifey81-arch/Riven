@@ -19,8 +19,9 @@ import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.memory.sourceLineageHash
-import com.shai.riven.data.validation.validationRecallCorpusFence
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
+import com.shai.riven.data.validation.requireTopLevelValidationRecallMutation
+import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 
@@ -535,62 +536,68 @@ class SafeDeleteService(
 
     private suspend fun executeMemoryDelete(
         block: suspend () -> MemoryDeleteResult.Deleted,
-    ): MemoryDeleteResult = try {
-        validationRecallFence.withCanonicalMutation(
-            change = { result ->
-                ValidationRecallCorpusChange.memoryIds(
-                    result.neighboringMemoryIdsRequiringReassessment + result.deletedMemoryId,
-                )
-            },
-        ) {
-            database.withTransaction { block() }
+    ): MemoryDeleteResult {
+        database.requireTopLevelValidationRecallMutation()
+        return try {
+            validationRecallFence.withCanonicalMutation(
+                change = { result ->
+                    ValidationRecallCorpusChange.memoryIds(
+                        result.neighboringMemoryIdsRequiringReassessment + result.deletedMemoryId,
+                    )
+                },
+            ) {
+                database.withTransaction { block() }
+            }
+        } catch (abort: SafeDeleteAbort) {
+            MemoryDeleteResult.Failure(abort.error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (constraint: SQLiteConstraintException) {
+            MemoryDeleteResult.Failure(
+                SafeDeleteError.StorageFailure(
+                    SafeDeleteOperation.DELETE_MEMORY,
+                    constraint::class.java.simpleName,
+                ),
+            )
+        } catch (failure: Exception) {
+            MemoryDeleteResult.Failure(
+                SafeDeleteError.StorageFailure(
+                    SafeDeleteOperation.DELETE_MEMORY,
+                    failure::class.java.simpleName,
+                ),
+            )
         }
-    } catch (abort: SafeDeleteAbort) {
-        MemoryDeleteResult.Failure(abort.error)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (constraint: SQLiteConstraintException) {
-        MemoryDeleteResult.Failure(
-            SafeDeleteError.StorageFailure(
-                SafeDeleteOperation.DELETE_MEMORY,
-                constraint::class.java.simpleName,
-            ),
-        )
-    } catch (failure: Exception) {
-        MemoryDeleteResult.Failure(
-            SafeDeleteError.StorageFailure(
-                SafeDeleteOperation.DELETE_MEMORY,
-                failure::class.java.simpleName,
-            ),
-        )
     }
 
     private suspend fun executeTimelineDelete(
         block: suspend () -> TimelineDeleteResult.Deleted,
-    ): TimelineDeleteResult = try {
-        validationRecallFence.withCanonicalMutation(
-            change = { ValidationRecallCorpusChange.Unknown },
-        ) {
-            database.withTransaction { block() }
+    ): TimelineDeleteResult {
+        database.requireTopLevelValidationRecallMutation()
+        return try {
+            validationRecallFence.withCanonicalMutation(
+                change = { ValidationRecallCorpusChange.Unknown },
+            ) {
+                database.withTransaction { block() }
+            }
+        } catch (abort: SafeDeleteAbort) {
+            TimelineDeleteResult.Failure(abort.error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (constraint: SQLiteConstraintException) {
+            TimelineDeleteResult.Failure(
+                SafeDeleteError.StorageFailure(
+                    SafeDeleteOperation.DELETE_TIMELINE_MESSAGE,
+                    constraint::class.java.simpleName,
+                ),
+            )
+        } catch (failure: Exception) {
+            TimelineDeleteResult.Failure(
+                SafeDeleteError.StorageFailure(
+                    SafeDeleteOperation.DELETE_TIMELINE_MESSAGE,
+                    failure::class.java.simpleName,
+                ),
+            )
         }
-    } catch (abort: SafeDeleteAbort) {
-        TimelineDeleteResult.Failure(abort.error)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (constraint: SQLiteConstraintException) {
-        TimelineDeleteResult.Failure(
-            SafeDeleteError.StorageFailure(
-                SafeDeleteOperation.DELETE_TIMELINE_MESSAGE,
-                constraint::class.java.simpleName,
-            ),
-        )
-    } catch (failure: Exception) {
-        TimelineDeleteResult.Failure(
-            SafeDeleteError.StorageFailure(
-                SafeDeleteOperation.DELETE_TIMELINE_MESSAGE,
-                failure::class.java.simpleName,
-            ),
-        )
     }
 
     private fun DeleteAccumulator.queueRepair(

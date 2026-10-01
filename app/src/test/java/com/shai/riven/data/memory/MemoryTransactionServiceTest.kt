@@ -1096,6 +1096,30 @@ class MemoryTransactionServiceTest {
         }
     }
 
+    @Test
+    fun publicCanonicalWriterRejectsAnExistingOuterRoomTransaction() = runBlocking {
+        insertExperience("nested-experience", 1)
+        insertCanonicalMemory("nested-memory", "nested-experience")
+        val original = database.memoryDao().memory("nested-memory")
+        val fence = database.validationRecallCorpusFence()
+        val generation = fence.snapshot()
+        var failure: IllegalStateException? = null
+
+        database.withTransaction {
+            try {
+                service.moveDormant(MemoryStateTransitionInput("nested-memory", 100))
+            } catch (caught: IllegalStateException) {
+                failure = caught
+            }
+        }
+
+        assertNotNull(failure)
+        assertTrue(failure?.message.orEmpty().contains("existing Room transaction"))
+        assertEquals(original, database.memoryDao().memory("nested-memory"))
+        assertEquals(generation, fence.snapshot())
+        assertFalse(fence.isMutationInFlight())
+    }
+
     private suspend fun assertAdvanced(
         before: ValidationRecallGeneration,
         mutation: suspend () -> Unit,
