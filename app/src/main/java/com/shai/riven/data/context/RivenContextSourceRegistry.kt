@@ -214,6 +214,7 @@ class RivenContextSourceRegistry(
         observedAt = payload.observedAt,
         validUntil = payload.validUntil,
         contentAuthority = contentAuthority,
+        conversationRole = payload.conversationRole,
     )
 
     private fun RivenContextFragment.omission() = RivenContextBudgetOmission(sourceId, fragmentId)

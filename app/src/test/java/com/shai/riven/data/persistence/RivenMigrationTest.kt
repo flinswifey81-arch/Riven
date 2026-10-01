@@ -717,7 +717,71 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun historicalSchemaExportsOneThroughSixRemainByteIdentical() {
+    fun migrationSevenToEightPreservesCanonicalRowsAndCreatesEmptyConversationRuns() {
+        migrationHelper.createDatabase(7).apply {
+            execSQL("INSERT INTO conversations VALUES ('conversation-v7', 1, 2, 'ACTIVE', 'Preserved')")
+            execSQL(
+                "INSERT INTO messages (message_id, conversation_id, sequence_number, role, " +
+                    "delivery_state, content, created_at, updated_at) VALUES " +
+                    "('message-v7', 'conversation-v7', 1, 'USER', 'PERSISTED', 'Exact', 1, 1)",
+            )
+            execSQL("INSERT INTO conversation_timeline_heads VALUES ('conversation-v7', 'message-v7', 4, 2)")
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(8, listOf(MIGRATION_7_8))
+
+        assertEquals("Exact", migrated.singleString("SELECT content FROM messages WHERE message_id='message-v7'"))
+        assertEquals(4L, migrated.singleLong(
+            "SELECT timeline_revision FROM conversation_timeline_heads WHERE conversation_id='conversation-v7'",
+        ))
+        assertEquals(0L, migrated.rowCount("conversation_runs"))
+        assertEquals(3L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('conversation_runs')",
+        ))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_index_list('conversation_runs') " +
+                "WHERE name='index_conversation_runs_active_conversation_id' AND `unique`=1",
+        ))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationOneToEightRunsFullNonDestructiveChain() {
+        migrationHelper.createDatabase(1).apply {
+            execSQL("INSERT INTO conversations VALUES ('conversation-v1-v8', 1, 1, 'ACTIVE', 'Preserved')")
+            execSQL(
+                "INSERT INTO messages (message_id, conversation_id, sequence_number, role, " +
+                    "delivery_state, content, created_at, updated_at) VALUES " +
+                    "('message-v1-v8', 'conversation-v1-v8', 1, 'USER', 'PERSISTED', 'Exact', 1, 1)",
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(
+            version = 8,
+            migrations = listOf(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+                MIGRATION_7_8,
+            ),
+        )
+
+        assertEquals("Exact", migrated.singleString("SELECT content FROM messages WHERE message_id='message-v1-v8'"))
+        assertEquals("message-v1-v8", migrated.singleString(
+            "SELECT active_head_message_id FROM conversation_timeline_heads " +
+                "WHERE conversation_id='conversation-v1-v8'",
+        ))
+        assertEquals(0L, migrated.rowCount("conversation_runs"))
+        migrated.close()
+    }
+
+    @Test
+    fun historicalSchemaExportsOneThroughSevenRemainByteIdentical() {
         val expected = mapOf(
             1 to "8021b472cb9147553b9d9fda9e89716f82e927d7",
             2 to "c0242ecce351766e8c084026bf7750904409d8ac",
@@ -725,6 +789,7 @@ class RivenMigrationTest {
             4 to "761805095ce31a2ac81adcff4f3620aeb81c22c0",
             5 to "85eaaa7d2f6e9d2a6be7d6b63b8b9e0d1428929f",
             6 to "fc9a21739fb265eee6472b0e242714539194cfed",
+            7 to "65a8942ad575919cf61fb8c8e8f3f4fcacf40fa2",
         )
         val assets = InstrumentationRegistry.getInstrumentation().targetContext.assets
 
@@ -774,6 +839,21 @@ class RivenMigrationTest {
             """.trimIndent(),
         )
         assertEquals(36L, count)
+        created.close()
+    }
+
+    @Test
+    fun databaseVersionEightHasExactlyThirtySevenApplicationTables() {
+        val created = migrationHelper.createDatabase(8)
+        val count = created.singleLong(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT IN ('android_metadata', 'room_master_table')
+              AND name NOT LIKE 'sqlite_%'
+            """.trimIndent(),
+        )
+        assertEquals(37L, count)
         created.close()
     }
 

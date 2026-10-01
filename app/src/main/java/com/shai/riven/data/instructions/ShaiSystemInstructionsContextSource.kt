@@ -2,6 +2,7 @@ package com.shai.riven.data.instructions
 
 import com.shai.riven.data.context.RivenContextBudgetBehavior
 import com.shai.riven.data.context.RivenContextContentAuthority
+import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextLayer
 import com.shai.riven.data.context.RivenContextPayload
 import com.shai.riven.data.context.RivenContextProvenanceClass
@@ -38,7 +39,7 @@ class ShaiSystemInstructionsContextSource(
             is ShaiSystemInstructionsReadResult.Success -> {
                 val snapshot = result.snapshot
                 RivenContextSourceResult.Success(
-                    if (!snapshot.isEnabled || snapshot.content.isBlank()) {
+                    payloads = if (!snapshot.isEnabled || snapshot.content.isBlank()) {
                         emptyList()
                     } else {
                         listOf(
@@ -50,6 +51,12 @@ class ShaiSystemInstructionsContextSource(
                             ),
                         )
                     },
+                    freshnessReceipts = setOf(
+                        RivenContextFreshnessReceipt.ShaiSystemInstructions(
+                            revision = snapshot.revision,
+                            isEnabled = snapshot.isEnabled,
+                        ),
+                    ),
                 )
             }
         }

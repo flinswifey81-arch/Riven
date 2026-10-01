@@ -35,6 +35,8 @@ internal class ValidationRecallMutationToken internal constructor(
     internal val id: Long,
 )
 
+internal class StaleValidationRecallGenerationException : IllegalStateException()
+
 /**
  * Process-local, database-instance-scoped commit fence for validation recall.
  *
@@ -84,6 +86,14 @@ internal class ValidationRecallCorpusFence {
         token: ValidationRecallMutationToken,
     ): Boolean = synchronized(stateLock) {
         activeMutationId == token.id && snapshot == generationLocked()
+    }
+
+    suspend fun <T> withStableGeneration(
+        snapshot: ValidationRecallGeneration,
+        block: suspend () -> T,
+    ): T = mutationMutex.withLock {
+        if (!matches(snapshot)) throw StaleValidationRecallGenerationException()
+        block()
     }
 
     suspend fun <T> withCanonicalMutation(

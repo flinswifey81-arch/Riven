@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import com.shai.riven.data.persistence.dao.ConversationDao
 import com.shai.riven.data.persistence.dao.ConversationDraftDao
+import com.shai.riven.data.persistence.dao.ConversationRunDao
 import com.shai.riven.data.persistence.dao.ConversationTimelineDao
 import com.shai.riven.data.persistence.dao.ExperienceAttentionDao
 import com.shai.riven.data.persistence.dao.AttachmentDao
@@ -21,6 +22,7 @@ import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationDraftEntity
+import com.shai.riven.data.persistence.entity.ConversationRunEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
@@ -93,8 +95,9 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         DraftAttachmentEntity::class,
         ExperienceAttentionAssessmentEntity::class,
         ExperienceAttentionSignalEntity::class,
+        ConversationRunEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -103,6 +106,8 @@ abstract class RivenDatabase : RoomDatabase() {
     abstract fun conversationTimelineDao(): ConversationTimelineDao
 
     abstract fun conversationDraftDao(): ConversationDraftDao
+
+    abstract fun conversationRunDao(): ConversationRunDao
 
     abstract fun memoryDao(): MemoryDao
 
@@ -154,6 +159,7 @@ abstract class RivenDatabase : RoomDatabase() {
             MIGRATION_4_5,
             MIGRATION_5_6,
             MIGRATION_6_7,
+            MIGRATION_7_8,
         )
     }
 }

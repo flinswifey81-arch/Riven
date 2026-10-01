@@ -15,29 +15,39 @@ class EphemeralAppStateContextSource(
         budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED,
     )
 
-    override suspend fun read(request: RivenContextReadRequest): RivenContextSourceResult =
-        RivenContextSourceResult.Success(
-            store.snapshot().entries
-                .asSequence()
-                .filter { entry -> entry.exposure == EphemeralAppStateExposure.RIVEN_CONTEXT }
-                .filterNot { entry ->
-                    entry.validUntil?.let { validUntil -> validUntil <= request.now } == true
-                }
-                .sortedWith(
-                    compareByDescending<EphemeralAppStateEntry>(EphemeralAppStateEntry::priority)
-                        .thenBy(EphemeralAppStateEntry::stateId),
+    override suspend fun read(request: RivenContextReadRequest): RivenContextSourceResult {
+        val snapshot = store.snapshot()
+        val eligible = snapshot.entries
+            .asSequence()
+            .filter { entry -> entry.exposure == EphemeralAppStateExposure.RIVEN_CONTEXT }
+            .filterNot { entry ->
+                entry.validUntil?.let { validUntil -> validUntil <= request.now } == true
+            }
+            .sortedWith(
+                compareByDescending<EphemeralAppStateEntry>(EphemeralAppStateEntry::priority)
+                    .thenBy(EphemeralAppStateEntry::stateId),
+            )
+            .map { entry ->
+                RivenContextPayload(
+                    fragmentId = entry.stateId,
+                    content = entry.content,
+                    revision = entry.revision,
+                    observedAt = entry.observedAt,
+                    validUntil = entry.validUntil,
                 )
-                .map { entry ->
-                    RivenContextPayload(
-                        fragmentId = entry.stateId,
-                        content = entry.content,
-                        revision = entry.revision,
-                        observedAt = entry.observedAt,
-                        validUntil = entry.validUntil,
-                    )
-                }
-                .toList(),
+            }
+            .toList()
+        return RivenContextSourceResult.Success(
+            payloads = eligible,
+            freshnessReceipts = setOf(
+                RivenContextFreshnessReceipt.EphemeralAppState(
+                    storeSessionId = snapshot.storeSessionId,
+                    generation = snapshot.generation,
+                    earliestValidUntil = eligible.mapNotNull(RivenContextPayload::validUntil).minOrNull(),
+                ),
+            ),
         )
+    }
 
     companion object {
         const val SOURCE_ID = "EPHEMERAL_APP_STATE"

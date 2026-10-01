@@ -22,6 +22,24 @@ enum class MessageDeliveryState {
     CANCELLED,
 }
 
+enum class ConversationRunTrigger {
+    INITIAL,
+    RETRY,
+    REGENERATE,
+}
+
+enum class ConversationRunState {
+    PREPARING,
+    AWAITING_PROVIDER,
+    STREAMING,
+    CANCEL_REQUESTED,
+    SUCCEEDED,
+    FAILED,
+    CANCELLED,
+    STALE,
+    INTERRUPTED,
+}
+
 enum class AttachmentKind {
     IMAGE,
     FILE,

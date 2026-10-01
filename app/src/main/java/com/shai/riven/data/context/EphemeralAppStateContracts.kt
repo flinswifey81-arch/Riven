@@ -67,6 +67,8 @@ sealed interface EphemeralAppStateWriteResult {
 }
 
 data class EphemeralAppStateSnapshot(
+    val storeSessionId: String,
+    val generation: Long,
     val entries: List<EphemeralAppStateEntry>,
 )
 

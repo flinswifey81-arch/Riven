@@ -1,10 +1,14 @@
 package com.shai.riven.data.context
 
+import java.util.UUID
+
 class EphemeralAppStateStore internal constructor(
     initialEntries: Collection<EphemeralAppStateEntry>,
+    private val storeSessionId: String = UUID.randomUUID().toString(),
 ) {
     private val lock = Any()
     private val entries = linkedMapOf<String, EphemeralAppStateEntry>()
+    private var generation = 0L
 
     constructor() : this(emptyList())
 
@@ -52,6 +56,7 @@ class EphemeralAppStateStore internal constructor(
                 validUntil = input.validUntil,
             )
             entries[input.stateId] = published
+            advanceGeneration()
             EphemeralAppStateWriteResult.Published(published)
         }
     }
@@ -80,6 +85,7 @@ class EphemeralAppStateStore internal constructor(
                 )
             } else {
                 entries.remove(input.stateId)
+                advanceGeneration()
                 EphemeralAppStateWriteResult.Cleared(
                     stateId = input.stateId,
                     changed = true,
@@ -90,7 +96,11 @@ class EphemeralAppStateStore internal constructor(
     }
 
     fun snapshot(): EphemeralAppStateSnapshot = synchronized(lock) {
-        EphemeralAppStateSnapshot(entries.values.sortedBy(EphemeralAppStateEntry::stateId))
+        EphemeralAppStateSnapshot(
+            storeSessionId = storeSessionId,
+            generation = generation,
+            entries = entries.values.sortedBy(EphemeralAppStateEntry::stateId),
+        )
     }
 
     fun purgeExpired(now: Long): PurgeExpiredEphemeralAppStateResult = synchronized(lock) {
@@ -101,7 +111,35 @@ class EphemeralAppStateStore internal constructor(
             .sorted()
             .toList()
         expiredIds.forEach(entries::remove)
+        if (expiredIds.isNotEmpty()) advanceGeneration()
         PurgeExpiredEphemeralAppStateResult(expiredIds)
+    }
+
+    fun isCurrent(
+        receipt: RivenContextFreshnessReceipt.EphemeralAppState,
+        now: Long,
+    ): Boolean = synchronized(lock) {
+        matchesLocked(receipt, now)
+    }
+
+    internal fun <T : Any> withFreshnessGuard(
+        receipt: RivenContextFreshnessReceipt.EphemeralAppState?,
+        now: Long,
+        block: () -> T,
+    ): T? = synchronized(lock) {
+        if (receipt != null && !matchesLocked(receipt, now)) null else block()
+    }
+
+    private fun matchesLocked(
+        receipt: RivenContextFreshnessReceipt.EphemeralAppState,
+        now: Long,
+    ): Boolean = receipt.storeSessionId == storeSessionId &&
+        receipt.generation == generation &&
+        receipt.earliestValidUntil?.let { validUntil -> validUntil > now } != false
+
+    private fun advanceGeneration() {
+        check(generation != Long.MAX_VALUE) { "Ephemeral app-state generation exhausted" }
+        generation += 1L
     }
 
     private fun validate(input: PublishEphemeralAppStateInput): EphemeralAppStateError? {

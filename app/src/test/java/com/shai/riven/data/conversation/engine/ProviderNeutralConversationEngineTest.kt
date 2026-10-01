@@ -1,0 +1,1031 @@
+package com.shai.riven.data.conversation.engine
+
+import android.content.Context
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import com.shai.riven.data.context.ActiveConversationContextSource
+import com.shai.riven.data.context.ConversationalContextAssembler
+import com.shai.riven.data.context.EphemeralAppStateContextSource
+import com.shai.riven.data.context.EphemeralAppStateExposure
+import com.shai.riven.data.context.EphemeralAppStateStore
+import com.shai.riven.data.context.EphemeralAppStateWriteResult
+import com.shai.riven.data.context.PublishEphemeralAppStateInput
+import com.shai.riven.data.context.RivenContextBudgetBehavior
+import com.shai.riven.data.context.RivenContextCollectionResult
+import com.shai.riven.data.context.RivenContextContentAuthority
+import com.shai.riven.data.context.RivenContextFreshnessReceipt
+import com.shai.riven.data.context.RivenContextLayer
+import com.shai.riven.data.context.RivenContextPayload
+import com.shai.riven.data.context.RivenContextProvenanceClass
+import com.shai.riven.data.context.RivenContextReadRequest
+import com.shai.riven.data.context.RivenContextSource
+import com.shai.riven.data.context.RivenContextSourceCriticality
+import com.shai.riven.data.context.RivenContextSourceDescriptor
+import com.shai.riven.data.context.RivenContextSourceError
+import com.shai.riven.data.context.RivenContextSourceRegistry
+import com.shai.riven.data.context.RivenContextSourceResult
+import com.shai.riven.data.conversation.AppendTimelineMessageInput
+import com.shai.riven.data.conversation.ConversationTimelineService
+import com.shai.riven.data.conversation.CreateTimelineConversationInput
+import com.shai.riven.data.conversation.NewTimelineMessageInput
+import com.shai.riven.data.conversation.RewindTimelineInput
+import com.shai.riven.data.conversation.TimelineReadResult
+import com.shai.riven.data.conversation.TimelineWriteResult
+import com.shai.riven.data.credential.ClearProviderCredentialsResult
+import com.shai.riven.data.credential.DeleteProviderCredentialResult
+import com.shai.riven.data.credential.HasProviderCredentialResult
+import com.shai.riven.data.credential.ProviderCredentialStore
+import com.shai.riven.data.credential.ProviderCredentialError
+import com.shai.riven.data.credential.ProviderSecret
+import com.shai.riven.data.credential.PutProviderCredentialResult
+import com.shai.riven.data.credential.ReadProviderCredentialResult
+import com.shai.riven.data.deletion.DeleteTimelineMessageInput
+import com.shai.riven.data.deletion.SafeDeleteService
+import com.shai.riven.data.deletion.TimelineDeleteResult
+import com.shai.riven.data.experience.ConversationExperienceLookupResult
+import com.shai.riven.data.experience.ConversationExperienceService
+import com.shai.riven.data.instructions.SaveShaiSystemInstructionsInput
+import com.shai.riven.data.instructions.ShaiSystemInstructionsContextSource
+import com.shai.riven.data.instructions.ShaiSystemInstructionsService
+import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.MessageAttachmentEntity
+import com.shai.riven.data.persistence.model.AttachmentKind
+import com.shai.riven.data.persistence.model.AttachmentSource
+import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.ConversationRunState
+import com.shai.riven.data.persistence.model.ConversationRunTrigger
+import com.shai.riven.data.persistence.model.ConversationStatus
+import com.shai.riven.data.persistence.model.MessageDeliveryState
+import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.provider.CreateProviderProfileInput
+import com.shai.riven.data.provider.CreateProviderProfileResult
+import com.shai.riven.data.provider.ProviderCapability
+import com.shai.riven.data.provider.ProviderProfileService
+import com.shai.riven.data.provider.ProviderRuntimeProfileResolver
+import com.shai.riven.data.provider.UpdateProviderProfileInput
+import com.shai.riven.data.provider.UpdateProviderProfileResult
+import com.shai.riven.data.recall.ConversationalRecallReceiptValidator
+import com.shai.riven.data.validation.ValidationRecallCorpusChange
+import com.shai.riven.data.validation.ValidationRecallGeneration
+import com.shai.riven.data.validation.validationRecallCorpusFence
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
+class ProviderNeutralConversationEngineTest {
+    private lateinit var database: RivenDatabase
+    private lateinit var timeline: ConversationTimelineService
+    private lateinit var profileService: ProviderProfileService
+    private lateinit var instructions: ShaiSystemInstructionsService
+    private lateinit var ephemeral: EphemeralAppStateStore
+    private val clock = AtomicLong(100)
+    private val engines = mutableListOf<ProviderNeutralConversationEngine>()
+
+    @Before
+    fun setUp() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        database = Room.inMemoryDatabaseBuilder(context, RivenDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        timeline = ConversationTimelineService(database)
+        profileService = ProviderProfileService(database)
+        instructions = ShaiSystemInstructionsService(database)
+        ephemeral = EphemeralAppStateStore()
+    }
+
+    @After
+    fun tearDown() {
+        engines.forEach(ProviderNeutralConversationEngine::close)
+        database.close()
+    }
+
+    @Test
+    fun successPersistsPendingBeforeInvocationThenAtomicallySelectsSucceededAssistantAndExperience() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val adapter = FakeAdapter { request, emit ->
+            val pending = database.conversationTimelineDao().message("assistant-1")!!
+            val head = database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!
+            val run = database.conversationRunDao().run("run-1")!!
+            assertEquals(MessageDeliveryState.PENDING, pending.deliveryState)
+            assertEquals("user-1", head.activeHeadMessageId)
+            assertEquals(ConversationRunState.AWAITING_PROVIDER, run.state)
+            assertTrue(request.context.any { it.content.contains("Hello Riven") })
+            assertEquals(
+                listOf(MessageRole.USER),
+                request.context.filter { it.sourceId == ActiveConversationContextSource.SOURCE_ID }
+                    .map { it.conversationRole },
+            )
+            assertTrue(
+                ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                    ConversationExperienceLookupResult.NotRecorded,
+            )
+            emit(ProviderStreamEvent.Delta("Hello "))
+            emit(ProviderStreamEvent.Delta("Shai"))
+            emit(ProviderStreamEvent.Completed("provider-request-1"))
+        }
+        val engine = engine(adapter)
+
+        val result = engine.execute(input()) as ConversationEngineResult.Succeeded
+
+        assertEquals(3L, result.timelineRevision)
+        assertEquals(ConversationRunState.SUCCEEDED, result.run.state)
+        val assistant = database.conversationTimelineDao().message("assistant-1")!!
+        assertEquals(MessageDeliveryState.SUCCEEDED, assistant.deliveryState)
+        assertEquals("Hello Shai", assistant.content)
+        assertEquals("fake.adapter", assistant.providerName)
+        assertEquals("model-a", assistant.providerModel)
+        assertEquals("provider-request-1", assistant.providerRequestId)
+        val active = timeline.activeTimeline(CONVERSATION_ID) as TimelineReadResult.Success
+        assertEquals(listOf("user-1", "assistant-1"), active.messages.map { it.id })
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.Found,
+        )
+        assertEquals(1, adapter.invocationCount.get())
+    }
+
+    @Test
+    fun midstreamFailureDiscardsPartialOutputKeepsUserSelectedAndCreatesNoAssistantExperience() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val adapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("partial secret-looking response"))
+            emit(ProviderStreamEvent.Failure(ProviderFailureCode.UNAVAILABLE, "request-failed"))
+        }
+        val result = engine(adapter).execute(input()) as ConversationEngineResult.Failed
+
+        assertEquals(ConversationEngineErrorCode.PROVIDER_FAILURE, result.code)
+        val assistant = database.conversationTimelineDao().message("assistant-1")!!
+        assertEquals(MessageDeliveryState.FAILED, assistant.deliveryState)
+        assertEquals("", assistant.content)
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
+    }
+
+    @Test
+    fun duplicateKeySameInputReturnsExistingButMismatchedInputFailsWithoutSecondInvocation() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("done"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val firstEngine = engine(adapter)
+        val secondEngine = engine(adapter)
+        val first = async { firstEngine.execute(input()) }
+        entered.await()
+
+        assertTrue(secondEngine.execute(input()) is ConversationEngineResult.Existing)
+        val mismatch = secondEngine.execute(input().copy(profileId = "different-profile"))
+            as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.IDEMPOTENCY_MISMATCH, mismatch.code)
+        assertEquals(1, adapter.invocationCount.get())
+        release.complete(Unit)
+        assertTrue(first.await() is ConversationEngineResult.Succeeded)
+    }
+
+    @Test
+    fun databaseActiveSlotRejectsDifferentConcurrentAttemptAcrossEngineInstances() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("done"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val first = async { engine(adapter).execute(input()) }
+        entered.await()
+
+        val second = engine(adapter).execute(
+            input().copy(runId = "run-2", idempotencyKey = "key-2", assistantMessageId = "assistant-2"),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.ACTIVE_RUN_EXISTS, second.code)
+        assertNull(database.conversationTimelineDao().message("assistant-2"))
+        release.complete(Unit)
+        first.await()
+        Unit
+    }
+
+    @Test
+    fun persistedCancellationWinsAgainstLateNonCancellableCompletion() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            withContext(NonCancellable) {
+                release.await()
+                emit(ProviderStreamEvent.Delta("too late"))
+                emit(ProviderStreamEvent.Completed("late-request"))
+            }
+        }
+        val engine = engine(adapter)
+        val execution = async { engine.execute(input()) }
+        entered.await()
+
+        val cancelled = engine.cancel("run-1")
+        assertTrue(cancelled is ConversationRunControlResult.Updated)
+        release.complete(Unit)
+        runCatching { execution.await() }
+
+        val run = database.conversationRunDao().run("run-1")!!
+        assertEquals(ConversationRunState.CANCELLED, run.state)
+        assertEquals(MessageDeliveryState.CANCELLED, database.conversationTimelineDao().message("assistant-1")!!.deliveryState)
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
+    }
+
+    @Test
+    fun liveOwnerIsNotRecoveredButClosedOwnerIsInterruptedWithoutReplay() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            withContext(NonCancellable) {
+                release.await()
+                emit(ProviderStreamEvent.Delta("late"))
+                emit(ProviderStreamEvent.Completed())
+            }
+        }
+        val owner = engine(adapter)
+        val execution = async { owner.execute(input()) }
+        entered.await()
+        val recovery = engine(adapter)
+
+        assertTrue(recovery.recoverInterruptedRuns().interruptedRunIds.isEmpty())
+        owner.close()
+        assertEquals(listOf("run-1"), recovery.recoverInterruptedRuns().interruptedRunIds)
+        release.complete(Unit)
+        runCatching { execution.await() }
+
+        assertEquals(ConversationRunState.INTERRUPTED, database.conversationRunDao().run("run-1")!!.state)
+        assertEquals(1, adapter.invocationCount.get())
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
+    }
+
+    @Test
+    fun regenerationRequestExcludesOldAnswerAndFailurePreservesSelectedHead() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val first = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("old answer"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val firstResult = engine(first).execute(input()) as ConversationEngineResult.Succeeded
+        assertEquals("assistant-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        val regenerate = FakeAdapter { request, emit ->
+            assertFalse(request.context.any { it.content.contains("old answer") })
+            assertEquals("assistant-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+            emit(ProviderStreamEvent.Failure(ProviderFailureCode.UNAVAILABLE))
+        }
+
+        val result = engine(regenerate).execute(
+            input().copy(
+                runId = "run-regen",
+                idempotencyKey = "key-regen",
+                assistantMessageId = "assistant-regen",
+                trigger = ConversationRunTrigger.REGENERATE,
+                regenerateOfMessageId = "assistant-1",
+                expectedTimelineRevision = firstResult.timelineRevision,
+            ),
+        ) as ConversationEngineResult.Failed
+
+        assertEquals(ConversationEngineErrorCode.PROVIDER_FAILURE, result.code)
+        assertEquals("assistant-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertEquals(MessageDeliveryState.FAILED, database.conversationTimelineDao().message("assistant-regen")!!.deliveryState)
+    }
+
+    @Test
+    fun retryCreatesANewSiblingAttemptWithoutDuplicatingTheUserExperience() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val failed = engine(FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Failure(ProviderFailureCode.UNAVAILABLE))
+        }).execute(input()) as ConversationEngineResult.Failed
+        val retryRevision = database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.timelineRevision
+        val retried = engine(FakeAdapter { request, emit ->
+            assertFalse(request.context.any { it.content.contains("assistant-1") })
+            emit(ProviderStreamEvent.Delta("recovered"))
+            emit(ProviderStreamEvent.Completed("retry-request"))
+        }).execute(
+            input().copy(
+                runId = "run-retry",
+                idempotencyKey = "key-retry",
+                assistantMessageId = "assistant-retry",
+                trigger = ConversationRunTrigger.RETRY,
+                retryOfRunId = failed.run!!.runId,
+                expectedTimelineRevision = retryRevision,
+            ),
+        ) as ConversationEngineResult.Succeeded
+
+        assertEquals(ConversationRunTrigger.RETRY, retried.run.trigger)
+        assertEquals("run-1", retried.run.retryOfRunId)
+        assertEquals("assistant-retry", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertEquals("user-1", database.conversationTimelineDao().parentEdge("assistant-1")!!.parentMessageId)
+        assertEquals("user-1", database.conversationTimelineDao().parentEdge("assistant-retry")!!.parentMessageId)
+        database.openHelper.writableDatabase.query(
+            "SELECT COUNT(*) FROM experience_message_sources WHERE message_id = ?",
+            arrayOf("user-1"),
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(1, cursor.getInt(0))
+        }
+    }
+
+    @Test
+    fun profileMutationWhileProviderIsRunningRejectsBufferedOutputBeforeCommit() = runBlocking {
+        createConversationAndUser()
+        val profile = createProfile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("must not persist"))
+            emit(ProviderStreamEvent.Completed("stale-profile-request"))
+        }
+        val execution = async { engine(adapter).execute(input()) }
+        entered.await()
+        assertTrue(
+            profileService.update(
+                UpdateProviderProfileInput(
+                    profileId = profile.profileId,
+                    expectedRevision = profile.revision,
+                    displayName = profile.displayName,
+                    adapterId = profile.adapterId,
+                    endpointBaseUrl = profile.endpointBaseUrl,
+                    modelId = "model-after-dispatch",
+                    credentialSlotId = profile.credentialSlotId,
+                    isEnabled = true,
+                    capabilities = profile.capabilities.toList(),
+                    occurredAt = 200,
+                ),
+            ) is UpdateProviderProfileResult.Success,
+        )
+        release.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+    }
+
+    @Test
+    fun rewindWhileProviderIsRunningMakesTheResultStaleAndPreservesTheRewoundHead() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        assertTrue(
+            timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    conversationId = CONVERSATION_ID,
+                    message = NewTimelineMessageInput(
+                        messageId = "user-2",
+                        role = MessageRole.USER,
+                        deliveryState = MessageDeliveryState.PERSISTED,
+                        content = "A follow-up",
+                        createdAt = 3,
+                        updatedAt = 3,
+                    ),
+                    expectedTimelineRevision = 1,
+                    occurredAt = 3,
+                ),
+            ) is TimelineWriteResult.MessageAppended,
+        )
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("late result"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val execution = async {
+            engine(adapter).execute(
+                input().copy(
+                    userMessageId = "user-2",
+                    expectedTimelineRevision = 2,
+                ),
+            )
+        }
+        entered.await()
+        assertTrue(
+            timeline.rewindTo(
+                RewindTimelineInput(
+                    conversationId = CONVERSATION_ID,
+                    targetMessageId = "user-1",
+                    expectedTimelineRevision = 3,
+                    occurredAt = 20,
+                ),
+            ) is TimelineWriteResult.Rewound,
+        )
+        release.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+    }
+
+    @Test
+    fun deletingThePendingAssistantWhileProviderRunsMakesLateCallbacksHarmless() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("orphaned callback"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val execution = async { engine(adapter).execute(input()) }
+        entered.await()
+        val deleted = SafeDeleteService(database).deleteLeafMessage(
+            DeleteTimelineMessageInput(
+                conversationId = CONVERSATION_ID,
+                messageId = "assistant-1",
+                expectedTimelineRevision = 2,
+                occurredAt = 20,
+            ),
+        )
+        assertTrue(deleted is TimelineDeleteResult.Deleted)
+        release.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CANCELLED, result.code)
+        assertNull(database.conversationRunDao().run("run-1"))
+        assertNull(database.conversationTimelineDao().message("assistant-1"))
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+    }
+
+    @Test
+    fun recallMutationWhileProviderIsRunningInvalidatesTheReadReceipt() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val fence = database.validationRecallCorpusFence()
+        val recallSource = object : RivenContextSource {
+            override val descriptor = HoldingSource.DESCRIPTOR.copy(
+                sourceId = "TEST_RECALL",
+                layer = RivenContextLayer.RETRIEVED_DYNAMIC_MEMORY_OPEN_LOOPS_AND_TOOL_CONTEXT,
+                provenanceClass = RivenContextProvenanceClass.RETRIEVED_MEMORY,
+                orderWithinLayer = 100,
+            )
+
+            override suspend fun read(request: RivenContextReadRequest): RivenContextSourceResult {
+                val generation = fence.snapshot()
+                return RivenContextSourceResult.Success(
+                    payloads = listOf(RivenContextPayload("memory", "remembered", observedAt = request.now)),
+                    freshnessReceipts = setOf(
+                        RivenContextFreshnessReceipt.ConversationalRecall(
+                            databaseSessionId = generation.databaseSessionId,
+                            algorithmVersion = generation.algorithmVersion,
+                            corpusGeneration = generation.corpusGeneration,
+                        ),
+                    ),
+                )
+            }
+        }
+        val receiptValidator = ConversationalRecallReceiptValidator { receipt ->
+            fence.matches(
+                ValidationRecallGeneration(
+                    databaseSessionId = receipt.databaseSessionId,
+                    corpusGeneration = receipt.corpusGeneration,
+                    algorithmVersion = receipt.algorithmVersion,
+                ),
+            )
+        }
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, emit ->
+            entered.complete(Unit)
+            release.await()
+            emit(ProviderStreamEvent.Delta("stale memory answer"))
+            emit(ProviderStreamEvent.Completed())
+        }
+        val execution = async {
+            engine(adapter, listOf(recallSource), receiptValidator).execute(input())
+        }
+        entered.await()
+        fence.withCanonicalMutation(change = { ValidationRecallCorpusChange.Unknown }) { Unit }
+        release.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+    }
+
+    @Test
+    fun failedSuccessTransactionRollsBackMessageHeadExperienceAndRunTogether() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        database.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER reject_succeeded_assistant
+            BEFORE UPDATE ON messages
+            WHEN NEW.delivery_state = 'SUCCEEDED'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced success rollback');
+            END
+            """.trimIndent(),
+        )
+        val result = engine(FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("rolled back"))
+            emit(ProviderStreamEvent.Completed())
+        }).execute(input()) as ConversationEngineResult.Failed
+
+        assertEquals(ConversationEngineErrorCode.STORAGE_FAILURE, result.code)
+        assertEquals(MessageDeliveryState.FAILED, database.conversationTimelineDao().message("assistant-1")!!.deliveryState)
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+        assertEquals("user-1", database.conversationTimelineDao().timelineHead(CONVERSATION_ID)!!.activeHeadMessageId)
+        assertEquals(ConversationRunState.FAILED, database.conversationRunDao().run("run-1")!!.state)
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
+    }
+
+    @Test
+    fun outputAndProviderDurationBoundsFailClosed() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val output = engine(
+            adapter = FakeAdapter { _, emit -> emit(ProviderStreamEvent.Delta("toolong")) },
+            limits = ConversationEngineLimits(maxOutputChars = 4, maxDeltaChars = 4),
+        ).execute(input()) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.OUTPUT_LIMIT, output.code)
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+
+        createConversationAndUser("conversation-2", "user-2")
+        createProfile("profile-2")
+        val timeout = engine(
+            adapter = FakeAdapter { _, _ -> delay(1_000) },
+            limits = ConversationEngineLimits(maxProviderDurationMillis = 10),
+        ).execute(
+            input().copy(
+                runId = "run-timeout",
+                idempotencyKey = "key-timeout",
+                conversationId = "conversation-2",
+                userMessageId = "user-2",
+                assistantMessageId = "assistant-timeout",
+                profileId = "profile-2",
+            ),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.PROVIDER_TIMEOUT, timeout.code)
+        assertEquals("", database.conversationTimelineDao().message("assistant-timeout")!!.content)
+    }
+
+    @Test
+    fun profileInstructionAndEphemeralChangesDuringPreparationBlockDispatch() = runBlocking {
+        createConversationAndUser()
+        val profile = createProfile()
+        instructions.save(SaveShaiSystemInstructionsInput("Be precise", true, 0, 10))
+        assertTrue(
+            ephemeral.publish(
+                PublishEphemeralAppStateInput(
+                    stateId = "timer",
+                    content = "running",
+                    exposure = EphemeralAppStateExposure.RIVEN_CONTEXT,
+                    priority = 1,
+                    expectedRevision = 0,
+                    observedAt = 10,
+                    validUntil = 1_000,
+                ),
+            ) is EphemeralAppStateWriteResult.Published,
+        )
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val blocker = HoldingSource(entered, release)
+        val adapter = FakeAdapter { _, _ -> error("must not be invoked") }
+        val engine = engine(adapter, extraSources = listOf(blocker))
+        val execution = async { engine.execute(input()) }
+        entered.await()
+
+        val updated = profileService.update(
+            UpdateProviderProfileInput(
+                profileId = profile.profileId,
+                expectedRevision = profile.revision,
+                displayName = profile.displayName,
+                adapterId = profile.adapterId,
+                endpointBaseUrl = profile.endpointBaseUrl,
+                modelId = "model-b",
+                credentialSlotId = profile.credentialSlotId,
+                isEnabled = true,
+                capabilities = profile.capabilities.toList(),
+                occurredAt = 20,
+            ),
+        )
+        assertTrue(updated is UpdateProviderProfileResult.Success)
+        instructions.save(SaveShaiSystemInstructionsInput("Changed", true, 1, 20))
+        ephemeral.publish(
+            PublishEphemeralAppStateInput(
+                stateId = "timer",
+                content = "changed",
+                exposure = EphemeralAppStateExposure.RIVEN_CONTEXT,
+                priority = 1,
+                expectedRevision = 1,
+                observedAt = 20,
+                validUntil = 1_000,
+            ),
+        )
+        release.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals(0, adapter.invocationCount.get())
+    }
+
+    @Test
+    fun ephemeralExpiryDuringPreparationBlocksDispatchWithoutStoreMutation() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        ephemeral.publish(
+            PublishEphemeralAppStateInput(
+                stateId = "short",
+                content = "temporary",
+                exposure = EphemeralAppStateExposure.RIVEN_CONTEXT,
+                priority = 1,
+                expectedRevision = 0,
+                observedAt = 100,
+                validUntil = 150,
+            ),
+        )
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val adapter = FakeAdapter { _, _ -> error("must not be invoked") }
+        val execution = async { engine(adapter, listOf(HoldingSource(entered, release))).execute(input()) }
+        entered.await()
+        clock.set(151)
+        release.complete(Unit)
+
+        val result = execution.await() as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, result.code)
+        assertEquals(0, adapter.invocationCount.get())
+    }
+
+    @Test
+    fun malformedAndUnboundedStreamsFailClosedWithoutPartialPersistence() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val adapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("ok"))
+            emit(ProviderStreamEvent.Completed())
+            emit(ProviderStreamEvent.Completed())
+        }
+        val result = engine(adapter).execute(input()) as ConversationEngineResult.Failed
+
+        assertEquals(ConversationEngineErrorCode.PROVIDER_PROTOCOL, result.code)
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")!!.content)
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
+    }
+
+    @Test
+    fun profileAdapterSystemAndAttachmentCapabilitiesFailBeforeProviderInvocation() = runBlocking {
+        createConversationAndUser()
+        createProfile(capabilities = listOf(ProviderCapability.TEXT_CHAT))
+        val never = FakeAdapter { _, _ -> error("must not be invoked") }
+        val profileCapability = engine(never).execute(input()) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.PROFILE_CAPABILITY_MISSING, profileCapability.code)
+        assertEquals(0, never.invocationCount.get())
+
+        createConversationAndUser("conversation-2", "user-2")
+        createProfile("profile-2")
+        val limitedAdapter = FakeAdapter(
+            descriptor = ProviderAdapterDescriptor(
+                adapterId = "fake.adapter",
+                capabilities = setOf(ProviderCapability.TEXT_CHAT),
+                systemContextMode = ProviderSystemContextMode.NATIVE_INSTRUCTIONS,
+            ),
+        ) { _, _ -> error("must not be invoked") }
+        val adapterCapability = engine(limitedAdapter).execute(
+            input().copy(
+                runId = "run-2",
+                idempotencyKey = "key-2",
+                conversationId = "conversation-2",
+                userMessageId = "user-2",
+                assistantMessageId = "assistant-2",
+                profileId = "profile-2",
+            ),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.ADAPTER_CAPABILITY_MISSING, adapterCapability.code)
+        assertEquals(0, limitedAdapter.invocationCount.get())
+
+        createConversationAndUser("conversation-3", "user-3")
+        createProfile("profile-3")
+        instructions.save(SaveShaiSystemInstructionsInput("Never invent facts", true, 0, 10))
+        val noSystem = FakeAdapter(
+            descriptor = ProviderAdapterDescriptor(
+                adapterId = "fake.adapter",
+                capabilities = setOf(ProviderCapability.TEXT_CHAT, ProviderCapability.STREAMING),
+                systemContextMode = ProviderSystemContextMode.UNSUPPORTED,
+            ),
+        ) { _, _ -> error("must not be invoked") }
+        val systemCapability = engine(noSystem).execute(
+            input().copy(
+                runId = "run-3",
+                idempotencyKey = "key-3",
+                conversationId = "conversation-3",
+                userMessageId = "user-3",
+                assistantMessageId = "assistant-3",
+                profileId = "profile-3",
+            ),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.SYSTEM_CONTEXT_UNSUPPORTED, systemCapability.code)
+        assertEquals(0, noSystem.invocationCount.get())
+
+        createConversationAndUser("conversation-4", "user-4")
+        createProfile("profile-4")
+        database.attachmentDao().insertAttachment(
+            AttachmentEntity(
+                id = "attachment-1",
+                kind = AttachmentKind.IMAGE,
+                mimeType = "image/png",
+                state = AttachmentState.AVAILABLE,
+                storageKey = "attachments/attachment-1.blob",
+                byteSize = 1,
+                contentSha256 = "0".repeat(64),
+                source = AttachmentSource.SHAI_IMPORT,
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+        database.attachmentDao().insertMessageAttachment(
+            MessageAttachmentEntity("user-4", "attachment-1", 0, 1),
+        )
+        val attachmentCapability = engine(never).execute(
+            input().copy(
+                runId = "run-4",
+                idempotencyKey = "key-4",
+                conversationId = "conversation-4",
+                userMessageId = "user-4",
+                assistantMessageId = "assistant-4",
+                profileId = "profile-4",
+            ),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.ATTACHMENTS_UNSUPPORTED, attachmentCapability.code)
+        assertEquals(0, never.invocationCount.get())
+
+        createConversationAndUser("conversation-5", "user-5")
+        createProfile("profile-5", credentialSlotId = "missing-slot")
+        val missingCredentialStore = object : ProviderCredentialStore by EmptyCredentialStore {
+            override fun readCredential(credentialSlotId: String) = ReadProviderCredentialResult.Failure(
+                ProviderCredentialError.MissingCredential(credentialSlotId),
+            )
+        }
+        val credentialCapability = engine(
+            adapter = never,
+            credentialStore = missingCredentialStore,
+        ).execute(
+            input().copy(
+                runId = "run-5",
+                idempotencyKey = "key-5",
+                conversationId = "conversation-5",
+                userMessageId = "user-5",
+                assistantMessageId = "assistant-5",
+                profileId = "profile-5",
+            ),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CREDENTIAL_MISSING, credentialCapability.code)
+        assertEquals(0, never.invocationCount.get())
+    }
+
+    @Test
+    fun missingAdapterAndRequiredContextFailureNeverInvokeProvider() = runBlocking {
+        createConversationAndUser()
+        createProfile(adapterId = "missing.adapter")
+        val adapter = FakeAdapter { _, _ -> error("must not be invoked") }
+        val missing = engine(adapter).execute(input()) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.ADAPTER_MISSING, missing.code)
+        assertEquals(0, adapter.invocationCount.get())
+
+        // A fresh conversation isolates the required-context failure after the first terminal run.
+        createConversationAndUser("conversation-2", "user-2")
+        createProfile(profileId = "profile-2")
+        val failing = object : RivenContextSource {
+            override val descriptor = HoldingSource.DESCRIPTOR.copy(
+                sourceId = "REQUIRED_FAILURE",
+                criticality = RivenContextSourceCriticality.REQUIRED,
+            )
+            override suspend fun read(request: RivenContextReadRequest) = RivenContextSourceResult.Failure(
+                RivenContextSourceError.ReadFailure("ExpectedFailure"),
+            )
+        }
+        val contextFailure = engine(adapter, listOf(failing)).execute(
+            input().copy(
+                runId = "run-2",
+                idempotencyKey = "key-2",
+                conversationId = "conversation-2",
+                userMessageId = "user-2",
+                assistantMessageId = "assistant-2",
+                profileId = "profile-2",
+            ),
+        ) as ConversationEngineResult.Failed
+        assertEquals(ConversationEngineErrorCode.CONTEXT_ASSEMBLY_FAILED, contextFailure.code)
+        assertEquals(0, adapter.invocationCount.get())
+    }
+
+    private fun engine(
+        adapter: ConversationProviderAdapter,
+        extraSources: List<RivenContextSource> = emptyList(),
+        recallValidator: ConversationalRecallReceiptValidator =
+            ConversationalRecallReceiptValidator { true },
+        credentialStore: ProviderCredentialStore = EmptyCredentialStore,
+        limits: ConversationEngineLimits = ConversationEngineLimits(
+            maxOutputChars = 64,
+            maxDeltaChars = 32,
+            maxStreamEvents = 8,
+            maxProviderDurationMillis = 5_000,
+            concurrencyWaitMillis = 1_000,
+        ),
+    ): ProviderNeutralConversationEngine {
+        val registry = RivenContextSourceRegistry(
+            listOf(
+                ShaiSystemInstructionsContextSource(instructions),
+                EphemeralAppStateContextSource(ephemeral),
+                ActiveConversationContextSource(timeline),
+            ) + extraSources,
+        )
+        return ProviderNeutralConversationEngine(
+            database = database,
+            contextAssembler = ConversationalContextAssembler(registry),
+            recallValidator = recallValidator,
+            profileService = profileService,
+            profileResolver = ProviderRuntimeProfileResolver(profileService, credentialStore),
+            instructionsService = instructions,
+            ephemeralStateStore = ephemeral,
+            adapterRegistry = ProviderAdapterRegistry(listOf(adapter)),
+            limits = limits,
+            clock = clock::incrementAndGet,
+        ).also(engines::add)
+    }
+
+    private suspend fun createConversationAndUser(
+        conversationId: String = CONVERSATION_ID,
+        userMessageId: String = "user-1",
+    ) {
+        assertTrue(
+            timeline.createConversationWithTimeline(
+                CreateTimelineConversationInput(
+                    conversationId = conversationId,
+                    createdAt = 1,
+                    updatedAt = 1,
+                    status = ConversationStatus.ACTIVE,
+                ),
+            ) is TimelineWriteResult.ConversationCreated,
+        )
+        assertTrue(
+            timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    conversationId = conversationId,
+                    message = NewTimelineMessageInput(
+                        messageId = userMessageId,
+                        role = MessageRole.USER,
+                        deliveryState = MessageDeliveryState.PERSISTED,
+                        content = "Hello Riven",
+                        createdAt = 2,
+                        updatedAt = 2,
+                    ),
+                    expectedTimelineRevision = 0,
+                    occurredAt = 2,
+                ),
+            ) is TimelineWriteResult.MessageAppended,
+        )
+    }
+
+    private suspend fun createProfile(
+        profileId: String = PROFILE_ID,
+        adapterId: String = "fake.adapter",
+        credentialSlotId: String? = null,
+        capabilities: List<ProviderCapability> =
+            listOf(ProviderCapability.TEXT_CHAT, ProviderCapability.STREAMING),
+    ) = (profileService.create(
+        CreateProviderProfileInput(
+            profileId = profileId,
+            displayName = "Fake",
+            adapterId = adapterId,
+            endpointBaseUrl = "https://example.invalid",
+            modelId = "model-a",
+            credentialSlotId = credentialSlotId,
+            capabilities = capabilities,
+            occurredAt = 1,
+        ),
+    ) as CreateProviderProfileResult.Success).profile
+
+    private fun input() = StartConversationRunInput(
+        runId = "run-1",
+        idempotencyKey = "key-1",
+        conversationId = CONVERSATION_ID,
+        userMessageId = "user-1",
+        assistantMessageId = "assistant-1",
+        profileId = PROFILE_ID,
+        expectedTimelineRevision = 1,
+        occurredAt = 3,
+    )
+
+    private class FakeAdapter(
+        override val descriptor: ProviderAdapterDescriptor = ProviderAdapterDescriptor(
+            adapterId = "fake.adapter",
+            capabilities = setOf(ProviderCapability.TEXT_CHAT, ProviderCapability.STREAMING),
+            systemContextMode = ProviderSystemContextMode.NATIVE_INSTRUCTIONS,
+        ),
+        private val script: suspend (
+            ProviderConversationRequest,
+            suspend (ProviderStreamEvent) -> Unit,
+        ) -> Unit,
+    ) : ConversationProviderAdapter {
+        val invocationCount = AtomicInteger()
+
+        override suspend fun stream(
+            request: ProviderConversationRequest,
+            emit: suspend (ProviderStreamEvent) -> Unit,
+        ) {
+            invocationCount.incrementAndGet()
+            script(request, emit)
+        }
+    }
+
+    private class HoldingSource(
+        private val entered: CompletableDeferred<Unit>,
+        private val release: CompletableDeferred<Unit>,
+    ) : RivenContextSource {
+        override val descriptor = DESCRIPTOR
+
+        override suspend fun read(request: RivenContextReadRequest): RivenContextSourceResult {
+            entered.complete(Unit)
+            release.await()
+            return RivenContextSourceResult.Success(
+                listOf(RivenContextPayload("hold", "held", observedAt = request.now)),
+            )
+        }
+
+        companion object {
+            val DESCRIPTOR = RivenContextSourceDescriptor(
+                sourceId = "HOLDING_SOURCE",
+                layer = RivenContextLayer.ACTIVE_CANONICAL_CONVERSATION_AND_CURRENT_INTERACTION,
+                provenanceClass = RivenContextProvenanceClass.OTHER_GROUNDED,
+                criticality = RivenContextSourceCriticality.OPTIONAL,
+                orderWithinLayer = 10,
+                maxFragments = 1,
+                maxCharsPerFragment = 32,
+                maxAggregateChars = 32,
+                budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED,
+                contentAuthority = RivenContextContentAuthority.UNTRUSTED_DATA,
+            )
+        }
+    }
+
+    private object EmptyCredentialStore : ProviderCredentialStore {
+        override fun putCredential(credentialSlotId: String, secret: ProviderSecret) =
+            PutProviderCredentialResult.Success
+        override fun readCredential(credentialSlotId: String) = error("Credential read was unexpected")
+        override fun hasCredential(credentialSlotId: String) = HasProviderCredentialResult.Success(false)
+        override fun deleteCredential(credentialSlotId: String) = DeleteProviderCredentialResult.Success
+        override fun clearAllCredentials() = ClearProviderCredentialsResult.Success(0)
+    }
+
+    private companion object {
+        const val CONVERSATION_ID = "conversation-1"
+        const val PROFILE_ID = "profile-1"
+    }
+}

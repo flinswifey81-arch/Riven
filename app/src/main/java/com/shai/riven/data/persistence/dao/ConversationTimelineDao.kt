@@ -30,6 +30,9 @@ interface ConversationTimelineDao {
     @Update
     fun updateTimelineHead(head: ConversationTimelineHeadEntity)
 
+    @Update
+    fun updateMessage(message: MessageEntity): Int
+
     @Query("SELECT * FROM conversations WHERE conversation_id = :conversationId")
     fun conversation(conversationId: String): ConversationEntity?
 

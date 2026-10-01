@@ -319,6 +319,21 @@ class RivenArchiveRestoreService(
                     "WHERE state = 'RUNNING'",
                 arrayOf(occurredAt),
             )
+            // Provider calls are never replayed from an archive. Any nonterminal attempt is
+            // converted to a durable interrupted result without entering the repair-job queue.
+            sqlite.execSQL(
+                "UPDATE messages SET delivery_state = 'CANCELLED', updated_at = ?, " +
+                    "error_code = 'INTERRUPTED' WHERE message_id IN (" +
+                    "SELECT assistant_message_id FROM conversation_runs " +
+                    "WHERE active_conversation_id IS NOT NULL)",
+                arrayOf(occurredAt),
+            )
+            sqlite.execSQL(
+                "UPDATE conversation_runs SET state = 'INTERRUPTED', " +
+                    "active_conversation_id = NULL, error_code = 'INTERRUPTED', " +
+                    "updated_at = ?, finished_at = ? WHERE active_conversation_id IS NOT NULL",
+                arrayOf(occurredAt, occurredAt),
+            )
             restored.attachmentDao().allAttachments()
         } catch (cancelled: CancellationException) {
             throw cancelled

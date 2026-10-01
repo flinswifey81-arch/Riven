@@ -1,5 +1,8 @@
 package com.shai.riven.data.context
 
+import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.provider.ProviderCapability
+
 enum class RivenContextLayer {
     APP_INVARIANTS_SAFETY_AND_TOOL_TRUTH,
     LOCKED_RIVEN_PERSONALITY_AND_IDENTITY_CANON,
@@ -96,6 +99,7 @@ data class RivenConversationContextRequest(
     val expectedTimelineRevision: Long,
     val currentInteraction: RivenCurrentInteraction,
     val recallCues: RivenGroundedRecallCues = RivenGroundedRecallCues(),
+    val contextHeadMessageId: String? = null,
 )
 
 data class RivenContextPayload(
@@ -104,6 +108,7 @@ data class RivenContextPayload(
     val revision: Long? = null,
     val observedAt: Long? = null,
     val validUntil: Long? = null,
+    val conversationRole: MessageRole? = null,
 )
 
 sealed interface RivenContextFreshnessReceipt {
@@ -116,6 +121,26 @@ sealed interface RivenContextFreshnessReceipt {
         val databaseSessionId: String,
         val algorithmVersion: String,
         val corpusGeneration: Long,
+    ) : RivenContextFreshnessReceipt
+
+    data class ShaiSystemInstructions(
+        val revision: Long,
+        val isEnabled: Boolean,
+    ) : RivenContextFreshnessReceipt
+
+    data class EphemeralAppState(
+        val storeSessionId: String,
+        val generation: Long,
+        val earliestValidUntil: Long?,
+    ) : RivenContextFreshnessReceipt
+
+    data class ProviderProfile(
+        val profileId: String,
+        val revision: Long,
+        val adapterId: String,
+        val endpointBaseUrl: String,
+        val modelId: String,
+        val capabilities: Set<ProviderCapability>,
     ) : RivenContextFreshnessReceipt
 }
 
@@ -133,6 +158,7 @@ data class RivenContextFragment(
     val observedAt: Long?,
     val validUntil: Long?,
     val contentAuthority: RivenContextContentAuthority,
+    val conversationRole: MessageRole? = null,
 )
 
 sealed interface RivenContextSourceError {

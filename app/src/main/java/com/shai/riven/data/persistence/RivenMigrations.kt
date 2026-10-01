@@ -304,3 +304,76 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
         )
     }
 }
+
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `conversation_runs` (
+                `run_id` TEXT NOT NULL,
+                `conversation_id` TEXT NOT NULL,
+                `user_message_id` TEXT NOT NULL,
+                `assistant_message_id` TEXT NOT NULL,
+                `trigger` TEXT NOT NULL,
+                `retry_of_run_id` TEXT,
+                `regenerate_of_message_id` TEXT,
+                `state` TEXT NOT NULL,
+                `active_conversation_id` TEXT,
+                `idempotency_key` TEXT NOT NULL,
+                `input_fingerprint` TEXT NOT NULL,
+                `owner_session_token` TEXT NOT NULL,
+                `profile_id` TEXT NOT NULL,
+                `profile_revision` INTEGER,
+                `adapter_id` TEXT,
+                `endpoint_base_url` TEXT,
+                `model_id` TEXT,
+                `selected_head_message_id` TEXT,
+                `context_head_message_id` TEXT NOT NULL,
+                `reserved_timeline_revision` INTEGER NOT NULL,
+                `provider_request_id` TEXT,
+                `error_code` TEXT,
+                `created_at` INTEGER NOT NULL,
+                `started_at` INTEGER,
+                `updated_at` INTEGER NOT NULL,
+                `finished_at` INTEGER,
+                PRIMARY KEY(`run_id`),
+                FOREIGN KEY(`conversation_id`) REFERENCES `conversations`(`conversation_id`) ON UPDATE CASCADE ON DELETE CASCADE,
+                FOREIGN KEY(`user_message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE RESTRICT,
+                FOREIGN KEY(`assistant_message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversation_runs_conversation_id` " +
+                "ON `conversation_runs` (`conversation_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversation_runs_user_message_id` " +
+                "ON `conversation_runs` (`user_message_id`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_conversation_runs_assistant_message_id` " +
+                "ON `conversation_runs` (`assistant_message_id`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_conversation_runs_idempotency_key` " +
+                "ON `conversation_runs` (`idempotency_key`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_conversation_runs_active_conversation_id` " +
+                "ON `conversation_runs` (`active_conversation_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversation_runs_owner_session_token` " +
+                "ON `conversation_runs` (`owner_session_token`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversation_runs_retry_of_run_id` " +
+                "ON `conversation_runs` (`retry_of_run_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversation_runs_regenerate_of_message_id` " +
+                "ON `conversation_runs` (`regenerate_of_message_id`)",
+        )
+    }
+}

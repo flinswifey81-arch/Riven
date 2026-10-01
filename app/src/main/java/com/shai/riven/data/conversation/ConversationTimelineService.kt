@@ -126,6 +126,40 @@ class ConversationTimelineService(
         }
     }
 
+    /**
+     * Reads a bounded canonical tail ending at the selected head or its direct parent. The direct
+     * parent form is used by retry/regeneration so the previously selected assistant response is
+     * never placed in the replacement request context and no temporary rewind is required.
+     */
+    internal suspend fun activeTimelineTailEndingAt(
+        conversationId: String,
+        contextHeadMessageId: String,
+        maximumMessages: Int,
+    ): TimelineReadResult {
+        require(maximumMessages > 0)
+        return executeRead(TimelineOperation.READ_ACTIVE_TIMELINE) {
+            requireConversation(conversationId)
+            val head = requireTimelineHead(conversationId)
+            val selectedHeadId = head.activeHeadMessageId
+                ?: abort(ConversationTimelineError.MessageNotOnActiveTimeline(conversationId, contextHeadMessageId))
+            val allowed = contextHeadMessageId == selectedHeadId ||
+                timelineDao.parentEdge(selectedHeadId)?.parentMessageId == contextHeadMessageId
+            if (!allowed) {
+                abort(ConversationTimelineError.MessageNotOnActiveTimeline(conversationId, contextHeadMessageId))
+            }
+            val contextHead = requireMessage(contextHeadMessageId)
+            requireMessageConversation(contextHead, conversationId)
+            TimelineReadResult.Success(
+                conversationId = conversationId,
+                timelineRevision = head.timelineRevision,
+                messages = walkActiveTail(
+                    head.copy(activeHeadMessageId = contextHeadMessageId),
+                    maximumMessages,
+                ),
+            )
+        }
+    }
+
     suspend fun allMessages(conversationId: String): TimelineReadResult =
         executeRead(TimelineOperation.READ_ALL_MESSAGES) {
             requireConversation(conversationId)

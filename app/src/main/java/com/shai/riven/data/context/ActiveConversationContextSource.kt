@@ -4,6 +4,7 @@ import com.shai.riven.data.conversation.ConversationTimelineService
 import com.shai.riven.data.conversation.TimelineReadResult
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.model.MessageDeliveryState
+import com.shai.riven.data.persistence.model.MessageRole
 
 /** Required, bounded transcript source. Only the canonical active parent-walk is observable. */
 class ActiveConversationContextSource(
@@ -27,7 +28,16 @@ class ActiveConversationContextSource(
         if (conversation.conversationId.isBlank() || conversation.expectedTimelineRevision < 0L) {
             return failure("InvalidConversationRequest")
         }
-        val read = timelineService.activeTimelineTail(conversation.conversationId, MAX_TRANSCRIPT_MESSAGES)
+        val read = conversation.contextHeadMessageId?.let { contextHeadMessageId ->
+            timelineService.activeTimelineTailEndingAt(
+                conversationId = conversation.conversationId,
+                contextHeadMessageId = contextHeadMessageId,
+                maximumMessages = MAX_TRANSCRIPT_MESSAGES,
+            )
+        } ?: timelineService.activeTimelineTail(
+            conversation.conversationId,
+            MAX_TRANSCRIPT_MESSAGES,
+        )
         if (read !is TimelineReadResult.Success) {
             val error = (read as TimelineReadResult.Failure).error
             return failure(error::class.java.simpleName)
@@ -52,6 +62,7 @@ class ActiveConversationContextSource(
                 content = "role=CURRENT_INTERACTION\n${interaction.content}",
                 revision = read.timelineRevision,
                 observedAt = request.now,
+                conversationRole = MessageRole.USER,
             )
         }
         return RivenContextSourceResult.Success(
@@ -80,6 +91,7 @@ class ActiveConversationContextSource(
         content = "role=${role.name}\n$content",
         revision = timelineRevision,
         observedAt = updatedAt,
+        conversationRole = role,
     )
 
     private fun failure(errorType: String) = RivenContextSourceResult.Failure(

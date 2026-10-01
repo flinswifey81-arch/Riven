@@ -15,6 +15,7 @@ import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationDraftEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
+import com.shai.riven.data.persistence.entity.ConversationRunEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
@@ -24,6 +25,8 @@ import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
+import com.shai.riven.data.persistence.entity.MessageEntity
+import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
@@ -34,6 +37,8 @@ import com.shai.riven.data.persistence.model.AttentionSignalPolarity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ConversationStatus
+import com.shai.riven.data.persistence.model.ConversationRunState
+import com.shai.riven.data.persistence.model.ConversationRunTrigger
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.DerivedArtifactType
 import com.shai.riven.data.persistence.model.GeneratedMediaKind
@@ -48,6 +53,8 @@ import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
+import com.shai.riven.data.persistence.model.MessageDeliveryState
+import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SensitivityLevel
@@ -132,7 +139,7 @@ class RivenArchiveExportAndStageTest {
         val manifest = checkNotNull(RivenArchiveManifestJson.decode(entries.single { it.first == ARCHIVE_MANIFEST_PATH }.second))
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
-        assertEquals(7, manifest.databaseSchemaVersion)
+        assertEquals(8, manifest.databaseSchemaVersion)
         assertFalse(manifest.secretsIncluded)
     }
 
@@ -405,18 +412,18 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(4, result.sourceDatabaseVersion)
-        assertEquals(7, result.resultingDatabaseVersion)
+        assertEquals(8, result.resultingDatabaseVersion)
     }
 
     @Test
     fun stageRejectsDatabaseNewerThanCurrentVersion() {
-        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 8") }
+        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 9") }
 
         val result = stage(archive)
 
         assertTrue(result is StageRivenRestoreResult.Failure)
         assertEquals(
-            RivenArchiveRestoreError.DatabaseTooNew(8, 7),
+            RivenArchiveRestoreError.DatabaseTooNew(9, 8),
             (result as StageRivenRestoreResult.Failure).error,
         )
     }
@@ -556,6 +563,85 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
+    fun stageInterruptsActiveConversationRunWithoutReplayingProviderWork() {
+        val conversationId = "active-run-conversation"
+        val user = MessageEntity(
+            id = "active-run-user",
+            conversationId = conversationId,
+            sequenceNumber = 1,
+            role = MessageRole.USER,
+            deliveryState = MessageDeliveryState.PERSISTED,
+            content = "Question",
+            createdAt = 1,
+            updatedAt = 1,
+        )
+        val assistant = MessageEntity(
+            id = "active-run-assistant",
+            conversationId = conversationId,
+            sequenceNumber = 2,
+            role = MessageRole.ASSISTANT,
+            deliveryState = MessageDeliveryState.PENDING,
+            content = "",
+            createdAt = 2,
+            updatedAt = 2,
+        )
+        database.conversationTimelineDao().insertConversation(
+            ConversationEntity(conversationId, 1, 2, ConversationStatus.ACTIVE),
+        )
+        database.conversationTimelineDao().insertMessage(user)
+        database.conversationTimelineDao().insertMessage(assistant)
+        database.conversationTimelineDao().insertParentEdge(
+            MessageParentEdgeEntity(assistant.id, user.id, 2),
+        )
+        database.conversationTimelineDao().insertTimelineHead(
+            ConversationTimelineHeadEntity(conversationId, user.id, 2, 2),
+        )
+        database.conversationRunDao().insert(
+            ConversationRunEntity(
+                runId = "active-run",
+                conversationId = conversationId,
+                userMessageId = user.id,
+                assistantMessageId = assistant.id,
+                trigger = ConversationRunTrigger.INITIAL,
+                state = ConversationRunState.STREAMING,
+                activeConversationId = conversationId,
+                idempotencyKey = "active-key",
+                inputFingerprint = "fingerprint",
+                ownerSessionToken = "dead-owner",
+                profileId = "profile",
+                profileRevision = 1,
+                adapterId = "fake.adapter",
+                endpointBaseUrl = "https://example.invalid",
+                modelId = "model-a",
+                selectedHeadMessageId = user.id,
+                contextHeadMessageId = user.id,
+                reservedTimelineRevision = 2,
+                createdAt = 2,
+                startedAt = 2,
+                updatedAt = 2,
+            ),
+        )
+
+        assertTrue(stage(validArchive(), occurredAt = 777) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            val restoredRun = checkNotNull(staged.conversationRunDao().run("active-run"))
+            assertEquals(ConversationRunState.INTERRUPTED, restoredRun.state)
+            assertNull(restoredRun.activeConversationId)
+            assertEquals("INTERRUPTED", restoredRun.errorCode)
+            assertEquals(777L, restoredRun.finishedAt)
+            val restoredAssistant = checkNotNull(
+                staged.conversationTimelineDao().message("active-run-assistant"),
+            )
+            assertEquals(MessageDeliveryState.CANCELLED, restoredAssistant.deliveryState)
+            assertEquals("", restoredAssistant.content)
+            assertEquals("INTERRUPTED", restoredAssistant.errorCode)
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
     fun stageMaterializesAndReverifiesAvailableRestoredAttachment() {
         val bytes = "restored available attachment".toByteArray()
         insertAttachment("restored", AttachmentState.AVAILABLE, bytes = bytes)
@@ -570,7 +656,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionFiveArchiveRestoresIntoVersionSevenWithoutInventingDraftRows() {
+    fun versionFiveArchiveRestoresIntoVersionEightWithoutInventingDraftRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(5).apply {
             execSQL(
@@ -586,7 +672,7 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(5, result.sourceDatabaseVersion)
-        assertEquals(7, result.resultingDatabaseVersion)
+        assertEquals(8, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertTrue(staged.conversationDraftDao().allDrafts().isEmpty())
@@ -597,7 +683,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionSixArchiveRestoresIntoVersionSevenWithoutInventingAttentionRows() {
+    fun versionSixArchiveRestoresIntoVersionEightWithoutInventingAttentionRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(6).apply {
             execSQL(
@@ -611,7 +697,7 @@ class RivenArchiveExportAndStageTest {
 
         val result = stage(archive) as StageRivenRestoreResult.RestoreStaged
         assertEquals(6, result.sourceDatabaseVersion)
-        assertEquals(7, result.resultingDatabaseVersion)
+        assertEquals(8, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertEquals(1, staged.memoryDao().experienceCount())
