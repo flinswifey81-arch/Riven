@@ -255,6 +255,30 @@ class TargetedConversationalMemoryRetrieverTest {
     }
 
     @Test
+    fun excludedRowsStillConsumeTheBoundedCorpusReadBudget() = runBlocking {
+        insertMemory("forgotten-a", "old topic a", retention = MemoryRetentionState.FORGOTTEN)
+        insertMemory("forgotten-b", "old topic b", retention = MemoryRetentionState.FORGOTTEN)
+
+        val result = retriever(ConversationalRecallLimits(pageSize = 1, maxMemories = 1))
+            .retrieve(query("topic"))
+
+        assertEquals(ConversationalRecallReadiness.CAPACITY_EXCEEDED, result.readiness)
+        assertTrue(result.memories.isEmpty())
+    }
+
+    @Test
+    fun recallReceiptBecomesStaleAfterForgetBeforeContextConsumption() = runBlocking {
+        insertMemory("tea", "Shai enjoys cardamom tea.")
+        val recall = retriever()
+        val receipt = recall.retrieve(query("cardamom tea")).generation!!
+        assertTrue(recall.isCurrent(receipt))
+
+        assertTrue(MemoryTransactionService(database).forget(MemoryStateTransitionInput("tea", 100)) is MemoryWriteResult.Success)
+
+        assertFalse(recall.isCurrent(receipt))
+    }
+
+    @Test
     fun inFlightCanonicalMutationMakesConversationalReceiptStaleUntilOutcomeSettles() = runBlocking {
         insertMemory("rain", "Shai enjoys rain.")
         val recall = retriever()

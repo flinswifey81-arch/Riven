@@ -17,6 +17,7 @@ const val CONVERSATIONAL_RECALL_ALGORITHM_VERSION = "conversational-recall-lexic
 data class ConversationalRecallLimits(
     val pageSize: Int = 128,
     val maxMemories: Int = 10_000,
+    val maxCorpusRowsExamined: Int = maxMemories,
     val maxMeaningChars: Int = 4_096,
     val maxTokensPerDocument: Int = 512,
     val maxTokenChars: Int = 64,
@@ -42,6 +43,7 @@ data class ConversationalRecallLimits(
             listOf(
                 pageSize,
                 maxMemories,
+                maxCorpusRowsExamined,
                 maxMeaningChars,
                 maxTokensPerDocument,
                 maxTokenChars,
@@ -139,4 +141,8 @@ data class ConversationalMemoryRetrieval(
 
 fun interface ConversationalMemoryRetriever {
     suspend fun retrieve(query: ConversationalMemoryQuery): ConversationalMemoryRetrieval
+}
+
+fun interface ConversationalRecallReceiptValidator {
+    fun isCurrent(receipt: ConversationalRecallGeneration): Boolean
 }

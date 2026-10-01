@@ -54,7 +54,15 @@ class ActiveConversationContextSource(
                 observedAt = request.now,
             )
         }
-        return RivenContextSourceResult.Success(payloads)
+        return RivenContextSourceResult.Success(
+            payloads = payloads,
+            freshnessReceipts = setOf(
+                RivenContextFreshnessReceipt.ActiveConversation(
+                    conversationId = conversation.conversationId,
+                    timelineRevision = read.timelineRevision,
+                ),
+            ),
+        )
     }
 
     private fun MessageEntity.isContextEligible(): Boolean = when (deliveryState) {

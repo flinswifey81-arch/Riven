@@ -398,7 +398,7 @@ class TargetedValidationMemoryRetrieverTest {
     }
 
     @Test
-    fun sequentialAdmissionsUseBoundedIncrementalReadsInsteadOfCorpusRebuilds() = runBlocking {
+    fun observerEnabledSequentialAdmissionsUseIncrementalReadsWithoutRepeatedRebuilds() = runBlocking {
         insertMemory("rain", "Shai likes rain.")
         val reader = CountingReader(database.memoryDao())
         val recall = TargetedValidationMemoryRetriever(
@@ -406,7 +406,6 @@ class TargetedValidationMemoryRetrieverTest {
             Dispatchers.Unconfined,
             TargetedValidationRecallLimits(),
             reader,
-            observeRoomInvalidations = false,
         ).also(closeables::add)
         assertReady(recall.retrieve(query("likes rain")))
         val initialPageReads = reader.memoryPageCalls
@@ -537,7 +536,6 @@ class TargetedValidationMemoryRetrieverTest {
             Dispatchers.Unconfined,
             TargetedValidationRecallLimits(),
             reader,
-            observeRoomInvalidations = false,
         ).also(closeables::add)
         assertReady(recall.retrieve(query("likes rain")))
         val initialPageReads = reader.memoryPageCalls

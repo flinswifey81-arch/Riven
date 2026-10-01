@@ -43,7 +43,7 @@ class TargetedConversationalMemoryRetriever internal constructor(
     private val dispatcher: CoroutineDispatcher,
     private val limits: ConversationalRecallLimits,
     private val reader: ConversationalRecallCorpusReader,
-) : ConversationalMemoryRetriever, AutoCloseable {
+) : ConversationalMemoryRetriever, ConversationalRecallReceiptValidator, AutoCloseable {
     constructor(
         database: RivenDatabase,
         dispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -57,13 +57,19 @@ class TargetedConversationalMemoryRetriever internal constructor(
     private var lastIncrementalWork: ConversationalRecallIncrementalWork? = null
     private var closed = false
     private val pendingMutations = mutableListOf<ValidationRecallCommittedMutation>()
+    // Mirror validation recall's ordering-safe coordination of delayed Room callbacks with precise
+    // fence generations; a callback from the prior commit must not invalidate the next commit.
     private var observerSawActiveMutation = false
     private val observerGenerationsToIgnore = mutableSetOf<ValidationRecallGeneration>()
+    private val observerGenerationsSeenBeforeListener = mutableSetOf<ValidationRecallGeneration>()
+    private var latestPreciseGeneration = fence.snapshot()
     private val synchronousInvalidationListener: (ValidationRecallCommittedMutation) -> Unit = { mutation ->
         synchronized(stateLock) {
             if (!closed) {
+                latestPreciseGeneration = mutation.generation
+                val observerRanBeforeListener = observerGenerationsSeenBeforeListener.remove(mutation.generation)
                 if (observerSawActiveMutation) observerSawActiveMutation = false
-                else observerGenerationsToIgnore += mutation.generation
+                else if (!observerRanBeforeListener) observerGenerationsToIgnore += mutation.generation
                 when (mutation.change) {
                     is ValidationRecallCorpusChange.MemoryIdsChanged -> if (publishedIndex != null) {
                         pendingMutations += mutation
@@ -121,6 +127,14 @@ class TargetedConversationalMemoryRetriever internal constructor(
         }
     }
 
+    override fun isCurrent(receipt: ConversationalRecallGeneration): Boolean {
+        if (receipt.algorithmVersion != CONVERSATIONAL_RECALL_ALGORITHM_VERSION) return false
+        val current = fence.snapshot()
+        return receipt.databaseSessionId == current.databaseSessionId &&
+            receipt.corpusGeneration == current.corpusGeneration &&
+            fence.matches(current)
+    }
+
     override fun close() {
         val detach = synchronized(stateLock) {
             if (closed) false else {
@@ -128,6 +142,7 @@ class TargetedConversationalMemoryRetriever internal constructor(
                 publishedIndex = null
                 pendingMutations.clear()
                 observerGenerationsToIgnore.clear()
+                observerGenerationsSeenBeforeListener.clear()
                 lastIncrementalWork = null
                 true
             }
@@ -193,13 +208,15 @@ class TargetedConversationalMemoryRetriever internal constructor(
         val index = ConversationalRecallIndex(generation, limits)
         var afterMemoryId = ""
         var structuralRows = 0
+        var corpusRowsExamined = 0
         while (true) {
             coroutineContext.ensureActive()
-            val remaining = limits.maxMemories - index.documentCount
-            val pageLimit = minOf(limits.pageSize, remaining + 1)
+            val remainingRows = limits.maxCorpusRowsExamined - corpusRowsExamined
+            val pageLimit = minOf(limits.pageSize, remainingRows + 1)
             val page = reader.memoryPage(afterMemoryId, pageLimit, limits.maxMeaningChars + 1)
-            if (page.size > remaining) throw BoundedRecallCapacityExceeded()
+            if (page.size > remainingRows) throw BoundedRecallCapacityExceeded()
             if (page.isEmpty()) break
+            corpusRowsExamined += page.size
             val builders = page.mapNotNull { row ->
                 ConversationalDocumentBuilder.create(row, limits)?.let { row.memoryId to it }
             }.toMap(linkedMapOf())
@@ -245,6 +262,7 @@ class TargetedConversationalMemoryRetriever internal constructor(
         val outgoing = boundedStructuralRows(structuralRows) { reader.outgoingRelationships(ids, it) }
         structuralRows += outgoing.size
         val incoming = boundedStructuralRows(structuralRows) { reader.incomingRelationships(ids, it) }
+        structuralRows += incoming.size
         val relationships = (outgoing + incoming).asSequence()
             .filter { it.relationshipType in CONVERSATIONAL_RELATIONSHIPS }
             .map(MemoryRelationshipEntity::toBounded)
@@ -305,18 +323,32 @@ class TargetedConversationalMemoryRetriever internal constructor(
     private fun isClosed() = synchronized(stateLock) { closed }
 
     internal fun onCanonicalTablesInvalidated() {
-        if (fence.isMutationInFlight()) {
-            synchronized(stateLock) { observerSawActiveMutation = true }
-            return
-        }
-        val generation = fence.snapshot()
+        val observation = fence.observationSnapshot()
         synchronized(stateLock) {
             if (closed) return
-            if (observerGenerationsToIgnore.remove(generation)) return
+            val consumedKnownGeneration = observerGenerationsToIgnore.removeAll { generation ->
+                generation.databaseSessionId == observation.generation.databaseSessionId &&
+                    generation.algorithmVersion == observation.generation.algorithmVersion &&
+                    generation.corpusGeneration <= observation.generation.corpusGeneration
+            }
+            if (consumedKnownGeneration) return
+            if (observation.mutationInFlight) {
+                observerSawActiveMutation = true
+                return
+            }
+            if (observation.generation.isAfter(latestPreciseGeneration)) {
+                observerGenerationsSeenBeforeListener += observation.generation
+                return
+            }
             publishedIndex = null
             pendingMutations.clear()
         }
     }
+
+    private fun ValidationRecallGeneration.isAfter(other: ValidationRecallGeneration): Boolean =
+        databaseSessionId == other.databaseSessionId &&
+            algorithmVersion == other.algorithmVersion &&
+            corpusGeneration > other.corpusGeneration
 
     private fun <T> boundedStructuralRows(rowsRead: Int, load: (Int) -> List<T>): List<T> {
         val remaining = limits.maxCorpusStructuralRows - rowsRead

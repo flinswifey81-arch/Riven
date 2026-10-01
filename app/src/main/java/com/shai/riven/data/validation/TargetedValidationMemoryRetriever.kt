@@ -120,7 +120,6 @@ class TargetedValidationMemoryRetriever internal constructor(
     private val dispatcher: CoroutineDispatcher,
     private val limits: TargetedValidationRecallLimits,
     private val reader: ValidationRecallCorpusReader,
-    private val observeRoomInvalidations: Boolean = true,
 ) : ValidationMemoryRetriever, AutoCloseable {
     constructor(
         database: RivenDatabase,
@@ -135,14 +134,21 @@ class TargetedValidationMemoryRetriever internal constructor(
     private var lastIncrementalWork: ValidationRecallIncrementalWork? = null
     private var closed = false
     private val pendingMutations = mutableListOf<ValidationRecallCommittedMutation>()
+    // Room invalidations may arrive after the precise fence listener or during the next mutation.
+    // A known committed generation must be consumed before an active mutation is blamed, while an
+    // observer callback that wins the commit-listener race is remembered for that exact generation.
     private var observerSawActiveMutation = false
     private val observerGenerationsToIgnore = mutableSetOf<ValidationRecallGeneration>()
+    private val observerGenerationsSeenBeforeListener = mutableSetOf<ValidationRecallGeneration>()
+    private var latestPreciseGeneration = fence.snapshot()
     private val synchronousInvalidationListener: (ValidationRecallCommittedMutation) -> Unit = { mutation ->
         synchronized(stateLock) {
             if (!closed) {
+                latestPreciseGeneration = mutation.generation
+                val observerRanBeforeListener = observerGenerationsSeenBeforeListener.remove(mutation.generation)
                 if (observerSawActiveMutation) {
                     observerSawActiveMutation = false
-                } else {
+                } else if (!observerRanBeforeListener) {
                     observerGenerationsToIgnore += mutation.generation
                 }
                 when (mutation.change) {
@@ -168,7 +174,7 @@ class TargetedValidationMemoryRetriever internal constructor(
 
     init {
         fence.addInvalidationListener(synchronousInvalidationListener)
-        if (observeRoomInvalidations) database.invalidationTracker.addObserver(invalidationObserver)
+        database.invalidationTracker.addObserver(invalidationObserver)
     }
 
     override suspend fun retrieve(query: ValidationMemoryQuery): ValidationMemoryRetrieval = withContext(dispatcher) {
@@ -203,13 +209,14 @@ class TargetedValidationMemoryRetriever internal constructor(
                 publishedIndex = null
                 pendingMutations.clear()
                 observerGenerationsToIgnore.clear()
+                observerGenerationsSeenBeforeListener.clear()
                 lastIncrementalWork = null
                 true
             }
         }
         if (!shouldDetach) return
         fence.removeInvalidationListener(synchronousInvalidationListener)
-        if (observeRoomInvalidations) database.invalidationTracker.removeObserver(invalidationObserver)
+        database.invalidationTracker.removeObserver(invalidationObserver)
     }
 
     private suspend fun readyIndexLocked(forceFullRebuild: Boolean): IndexBuildOutcome {
@@ -435,18 +442,32 @@ class TargetedValidationMemoryRetriever internal constructor(
     private fun isClosed(): Boolean = synchronized(stateLock) { closed }
 
     internal fun onCanonicalTablesInvalidated() {
-        if (fence.isMutationInFlight()) {
-            synchronized(stateLock) { observerSawActiveMutation = true }
-            return
-        }
-        val generation = fence.snapshot()
+        val observation = fence.observationSnapshot()
         synchronized(stateLock) {
             if (closed) return
-            if (observerGenerationsToIgnore.remove(generation)) return
+            val consumedKnownGeneration = observerGenerationsToIgnore.removeAll { generation ->
+                generation.databaseSessionId == observation.generation.databaseSessionId &&
+                    generation.algorithmVersion == observation.generation.algorithmVersion &&
+                    generation.corpusGeneration <= observation.generation.corpusGeneration
+            }
+            if (consumedKnownGeneration) return
+            if (observation.mutationInFlight) {
+                observerSawActiveMutation = true
+                return
+            }
+            if (observation.generation.isAfter(latestPreciseGeneration)) {
+                observerGenerationsSeenBeforeListener += observation.generation
+                return
+            }
             publishedIndex = null
             pendingMutations.clear()
         }
     }
+
+    private fun ValidationRecallGeneration.isAfter(other: ValidationRecallGeneration): Boolean =
+        databaseSessionId == other.databaseSessionId &&
+            algorithmVersion == other.algorithmVersion &&
+            corpusGeneration > other.corpusGeneration
 
     private fun <T> boundedStructuralRows(
         rowsAlreadyRead: Int,

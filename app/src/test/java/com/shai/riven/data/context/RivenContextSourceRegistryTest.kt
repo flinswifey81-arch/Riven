@@ -8,7 +8,7 @@ import org.junit.Test
 
 class RivenContextSourceRegistryTest {
     @Test
-    fun deterministicOrderingIgnoresRegistrationAndPayloadOrder() = runBlocking {
+    fun deterministicSourceOrderingPreservesEachSourcesSemanticPayloadOrder() = runBlocking {
         val sources = listOf(
             source(
                 descriptor(
@@ -59,8 +59,8 @@ class RivenContextSourceRegistryTest {
             "system-a:only",
             "system-z:only",
             "dynamic-a:only",
-            "dynamic-b:a",
             "dynamic-b:z",
+            "dynamic-b:a",
         )
 
         assertEquals(expected, first.fragments.map { "${it.sourceId}:${it.fragmentId}" })
@@ -292,6 +292,50 @@ class RivenContextSourceRegistryTest {
 
         assertEquals(listOf("transcript:turn"), result.fragments.map { "${it.sourceId}:${it.fragmentId}" })
         assertEquals(listOf(RivenContextBudgetOmission("optional", "memory")), result.budgetOmissions)
+    }
+
+    @Test
+    fun conversationalAssemblerPreservesChronologyAndRecallRankBeforeBudgetSelection() = runBlocking {
+        val rankedMemory = source(
+            descriptor(
+                sourceId = "memory",
+                layer = RivenContextLayer.RETRIEVED_DYNAMIC_MEMORY_OPEN_LOOPS_AND_TOOL_CONTEXT,
+                criticality = RivenContextSourceCriticality.OPTIONAL,
+                budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED,
+            ),
+            listOf(payload("z-best-ranked"), payload("a-lower-ranked")),
+        )
+        val transcript = source(
+            descriptor(
+                sourceId = "transcript",
+                layer = RivenContextLayer.ACTIVE_CANONICAL_CONVERSATION_AND_CURRENT_INTERACTION,
+            ),
+            listOf(payload("z-first-turn"), payload("a-second-turn"), payload("CURRENT_INTERACTION")),
+        )
+
+        val assembled = ConversationalContextAssembler(RivenContextSourceRegistry(listOf(transcript, rankedMemory)))
+            .assemble(
+                ConversationalContextAssemblyInput(
+                    now = 1,
+                    conversation = RivenConversationContextRequest(
+                        conversationId = "conversation",
+                        expectedTimelineRevision = 1,
+                        currentInteraction = RivenCurrentInteraction(content = "current"),
+                    ),
+                    budget = RivenContextCollectionBudget(maxFragments = 4, maxAggregateChars = 1_000),
+                ),
+            )
+        val snapshot = assertSuccess(assembled)
+
+        assertEquals(
+            listOf("z-first-turn", "a-second-turn", "CURRENT_INTERACTION"),
+            snapshot.fragments.filter { it.sourceId == "transcript" }.map { it.fragmentId },
+        )
+        assertEquals(
+            listOf("z-best-ranked"),
+            snapshot.fragments.filter { it.sourceId == "memory" }.map { it.fragmentId },
+        )
+        assertEquals(listOf(RivenContextBudgetOmission("memory", "a-lower-ranked")), snapshot.budgetOmissions)
     }
 
     @Test

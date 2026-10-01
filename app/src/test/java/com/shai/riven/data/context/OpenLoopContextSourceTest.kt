@@ -126,6 +126,24 @@ class OpenLoopContextSourceTest {
     }
 
     @Test
+    fun unresolvedDirectCueCannotMaskOrdinaryCandidateOverflow() = runBlocking {
+        insertLoop("garden-a", "plan garden beds", OpenLoopState.ACTIVE)
+        insertLoop("garden-b", "buy garden soil", OpenLoopState.ACTIVE)
+
+        val result = OpenLoopContextSource(database, limits = OpenLoopContextLimits(maxCandidates = 1))
+            .read(
+                request(
+                    "garden",
+                    RivenGroundedRecallCues(directlyRelevantOpenLoopIds = setOf("missing-direct")),
+                ),
+            )
+
+        assertTrue(result is RivenContextSourceResult.Failure)
+        val error = (result as RivenContextSourceResult.Failure).error as RivenContextSourceError.ReadFailure
+        assertEquals("OpenLoopRecall.CAPACITY_EXCEEDED", error.errorType)
+    }
+
+    @Test
     fun oversizedGroundedCueSetsAndIdsFailBeforeDatabaseReads() = runBlocking {
         val source = OpenLoopContextSource(
             database,

@@ -26,6 +26,11 @@ internal data class ValidationRecallCommittedMutation(
     val change: ValidationRecallCorpusChange,
 )
 
+internal data class ValidationRecallFenceObservation(
+    val generation: ValidationRecallGeneration,
+    val mutationInFlight: Boolean,
+)
+
 internal class ValidationRecallMutationToken internal constructor(
     internal val id: Long,
 )
@@ -61,6 +66,10 @@ internal class ValidationRecallCorpusFence {
     }
 
     fun isMutationInFlight(): Boolean = synchronized(stateLock) { activeMutationId != null }
+
+    fun observationSnapshot(): ValidationRecallFenceObservation = synchronized(stateLock) {
+        ValidationRecallFenceObservation(generationLocked(), activeMutationId != null)
+    }
 
     fun ownsActiveMutation(token: ValidationRecallMutationToken): Boolean = synchronized(stateLock) {
         activeMutationId == token.id

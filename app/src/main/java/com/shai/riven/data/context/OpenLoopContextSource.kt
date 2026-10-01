@@ -60,9 +60,8 @@ class OpenLoopContextSource(
                     else dao.conversationalContextByIds(directIds.toList(), activeStates)
                     val candidates = dao.conversationalContextCandidates(activeStates, limits.maxCandidates + 1)
                     val candidatesOverflowed = candidates.size > limits.maxCandidates
-                    if (directIds.isEmpty() && candidatesOverflowed) throw OpenLoopContextCapacityExceeded()
-                    val boundedCandidates = if (candidatesOverflowed) emptyList() else candidates
-                    val loops = (direct + boundedCandidates).associateBy(OpenLoopEntity::id)
+                    if (candidatesOverflowed) throw OpenLoopContextCapacityExceeded()
+                    val loops = (direct + candidates).associateBy(OpenLoopEntity::id)
                     if (loops.isEmpty()) return@withTransaction OpenLoopReadSnapshot(emptyList(), emptyMap())
                     val links = dao.conversationalContextEntityLinks(
                         loops.keys.sorted(),

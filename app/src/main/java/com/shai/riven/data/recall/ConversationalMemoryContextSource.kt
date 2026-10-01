@@ -2,6 +2,7 @@ package com.shai.riven.data.recall
 
 import com.shai.riven.data.context.RivenContextBudgetBehavior
 import com.shai.riven.data.context.RivenContextContentAuthority
+import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextLayer
 import com.shai.riven.data.context.RivenContextPayload
 import com.shai.riven.data.context.RivenContextProvenanceClass
@@ -39,16 +40,20 @@ class ConversationalMemoryContextSource(
         )
         return when (retrieval.readiness) {
             ConversationalRecallReadiness.READY -> RivenContextSourceResult.Success(
-                retrieval.memories.map { memory ->
+                payloads = retrieval.memories.map { memory ->
                     RivenContextPayload(
                         fragmentId = memory.memoryId,
-                        content = memory.toContextContent(),
+                        content = memory.toContextContent(request.now),
                         revision = retrieval.generation?.corpusGeneration,
                         observedAt = request.now,
                     )
                 },
+                freshnessReceipts = retrieval.generation.toFreshnessReceipts(),
             )
-            ConversationalRecallReadiness.QUERY_UNSELECTIVE -> RivenContextSourceResult.Success(emptyList())
+            ConversationalRecallReadiness.QUERY_UNSELECTIVE -> RivenContextSourceResult.Success(
+                payloads = emptyList(),
+                freshnessReceipts = retrieval.generation.toFreshnessReceipts(),
+            )
             ConversationalRecallReadiness.NOT_READY,
             ConversationalRecallReadiness.STALE,
             ConversationalRecallReadiness.FAILED,
@@ -58,15 +63,41 @@ class ConversationalMemoryContextSource(
         }
     }
 
-    private fun ConversationalMemoryItem.toContextContent(): String = buildString {
+    private fun ConversationalMemoryItem.toContextContent(now: Long): String = buildString {
         append("type=MEMORY\n")
         append("certainty=").append(certainty.name).append('\n')
         append("truth=").append(truthState.name).append('\n')
         append("temporal=").append(temporalState.name).append('\n')
+        append("validity_at_request=").append(validityAt(now)).append('\n')
+        validFrom?.let { append("valid_from=").append(it).append('\n') }
+        validUntil?.let { append("valid_until=").append(it).append('\n') }
+        append("selection_reasons=")
+            .append(selectionReasons.map { it.name }.sorted().joinToString(","))
+            .append('\n')
         append("lifecycle=").append(lifecycleState.name).append('\n')
         append("provenance=").append(epistemicBasis.name).append('\n')
         append("meaning=").append(meaning.replace('\u0000', ' '))
     }
+
+    private fun ConversationalMemoryItem.validityAt(now: Long): String = when {
+        validFrom != null && now < validFrom -> "NOT_YET_VALID"
+        validUntil != null && now >= validUntil -> "EXPIRED"
+        validFrom != null || validUntil != null -> "CURRENT"
+        else -> "UNBOUNDED"
+    }
+
+    private fun ConversationalRecallGeneration?.toFreshnessReceipts(): Set<RivenContextFreshnessReceipt> =
+        if (this == null) {
+            emptySet()
+        } else {
+            setOf(
+                RivenContextFreshnessReceipt.ConversationalRecall(
+                    databaseSessionId = databaseSessionId,
+                    algorithmVersion = algorithmVersion,
+                    corpusGeneration = corpusGeneration,
+                ),
+            )
+        }
 
     private fun failure(errorType: String) = RivenContextSourceResult.Failure(
         RivenContextSourceError.ReadFailure(errorType),

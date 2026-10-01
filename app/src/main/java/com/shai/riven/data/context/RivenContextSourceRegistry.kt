@@ -13,6 +13,7 @@ class RivenContextSourceRegistry(
         val fragments = mutableListOf<RivenContextFragment>()
         val optionalFailures = mutableListOf<RivenContextSourceFailure>()
         val requiredFailures = mutableListOf<RivenContextSourceFailure>()
+        val freshnessReceipts = linkedSetOf<RivenContextFreshnessReceipt>()
         val now = request.now
 
         sources.sortedWith(SOURCE_ORDER).forEach { source ->
@@ -46,12 +47,13 @@ class RivenContextSourceRegistry(
                             requiredFailures = requiredFailures,
                         )
                     } else {
+                        freshnessReceipts += result.freshnessReceipts
                         result.payloads
                             .asSequence()
                             .filterNot { payload ->
                                 payload.validUntil?.let { validUntil -> validUntil <= now } == true
                             }
-                            .map { payload -> source.descriptor.stamp(payload) }
+                            .mapIndexed { index, payload -> source.descriptor.stamp(payload, index) }
                             .forEach(fragments::add)
                     }
                 }
@@ -72,6 +74,7 @@ class RivenContextSourceRegistry(
             fragments = budgeted.fragments,
             optionalFailures = optionalFailures.toList(),
             budgetOmissions = budgeted.omissions,
+            freshnessReceipts = freshnessReceipts,
         )
         return if (requiredFailures.isEmpty()) {
             RivenContextCollectionResult.Success(snapshot)
@@ -194,7 +197,10 @@ class RivenContextSourceRegistry(
         return null
     }
 
-    private fun RivenContextSourceDescriptor.stamp(payload: RivenContextPayload) = RivenContextFragment(
+    private fun RivenContextSourceDescriptor.stamp(
+        payload: RivenContextPayload,
+        orderWithinSource: Int,
+    ) = RivenContextFragment(
         sourceId = sourceId,
         fragmentId = payload.fragmentId,
         content = payload.content,
@@ -202,6 +208,7 @@ class RivenContextSourceRegistry(
         provenanceClass = provenanceClass,
         criticality = criticality,
         orderWithinLayer = orderWithinLayer,
+        orderWithinSource = orderWithinSource,
         budgetBehavior = budgetBehavior,
         revision = payload.revision,
         observedAt = payload.observedAt,
@@ -264,6 +271,7 @@ class RivenContextSourceRegistry(
             { fragment -> fragment.layer.ordinal },
             { fragment -> fragment.orderWithinLayer },
             { fragment -> fragment.sourceId },
+            { fragment -> fragment.orderWithinSource },
             { fragment -> fragment.fragmentId },
         )
     }

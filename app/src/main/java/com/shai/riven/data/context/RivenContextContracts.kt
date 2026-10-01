@@ -106,6 +106,19 @@ data class RivenContextPayload(
     val validUntil: Long? = null,
 )
 
+sealed interface RivenContextFreshnessReceipt {
+    data class ActiveConversation(
+        val conversationId: String,
+        val timelineRevision: Long,
+    ) : RivenContextFreshnessReceipt
+
+    data class ConversationalRecall(
+        val databaseSessionId: String,
+        val algorithmVersion: String,
+        val corpusGeneration: Long,
+    ) : RivenContextFreshnessReceipt
+}
+
 data class RivenContextFragment(
     val sourceId: String,
     val fragmentId: String,
@@ -114,6 +127,7 @@ data class RivenContextFragment(
     val provenanceClass: RivenContextProvenanceClass,
     val criticality: RivenContextSourceCriticality,
     val orderWithinLayer: Int,
+    val orderWithinSource: Int,
     val budgetBehavior: RivenContextBudgetBehavior,
     val revision: Long?,
     val observedAt: Long?,
@@ -135,6 +149,7 @@ sealed interface RivenContextSourceError {
 sealed interface RivenContextSourceResult {
     data class Success(
         val payloads: List<RivenContextPayload>,
+        val freshnessReceipts: Set<RivenContextFreshnessReceipt> = emptySet(),
     ) : RivenContextSourceResult
 
     data class Failure(
@@ -205,7 +220,16 @@ data class RivenContextSnapshot(
     val fragments: List<RivenContextFragment>,
     val optionalFailures: List<RivenContextSourceFailure>,
     val budgetOmissions: List<RivenContextBudgetOmission> = emptyList(),
+    val freshnessReceipts: Set<RivenContextFreshnessReceipt> = emptySet(),
 )
+
+sealed interface RivenContextFreshnessValidation {
+    data object Current : RivenContextFreshnessValidation
+
+    data class Stale(
+        val receipts: Set<RivenContextFreshnessReceipt>,
+    ) : RivenContextFreshnessValidation
+}
 
 data class RivenContextBudgetOmission(
     val sourceId: String,
