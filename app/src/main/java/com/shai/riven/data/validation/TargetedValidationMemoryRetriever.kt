@@ -13,12 +13,18 @@ import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.recall.BoundedRecallCapacityExceeded
+import com.shai.riven.data.recall.BoundedRecallDocument
+import com.shai.riven.data.recall.BoundedRecallIndex
+import com.shai.riven.data.recall.BoundedRecallLimits
+import com.shai.riven.data.recall.BoundedRecallPolicy
+import com.shai.riven.data.recall.BoundedRecallQueryStatus
+import com.shai.riven.data.recall.BoundedRecallRelationship
+import com.shai.riven.data.recall.boundedRecallMeaningHash
 import java.lang.ref.WeakReference
-import java.security.MessageDigest
 import java.text.Normalizer
 import java.util.Locale
 import kotlin.coroutines.coroutineContext
-import kotlin.math.ln
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -114,6 +120,7 @@ class TargetedValidationMemoryRetriever internal constructor(
     private val dispatcher: CoroutineDispatcher,
     private val limits: TargetedValidationRecallLimits,
     private val reader: ValidationRecallCorpusReader,
+    private val observeRoomInvalidations: Boolean = true,
 ) : ValidationMemoryRetriever, AutoCloseable {
     constructor(
         database: RivenDatabase,
@@ -161,7 +168,7 @@ class TargetedValidationMemoryRetriever internal constructor(
 
     init {
         fence.addInvalidationListener(synchronousInvalidationListener)
-        database.invalidationTracker.addObserver(invalidationObserver)
+        if (observeRoomInvalidations) database.invalidationTracker.addObserver(invalidationObserver)
     }
 
     override suspend fun retrieve(query: ValidationMemoryQuery): ValidationMemoryRetrieval = withContext(dispatcher) {
@@ -202,7 +209,7 @@ class TargetedValidationMemoryRetriever internal constructor(
         }
         if (!shouldDetach) return
         fence.removeInvalidationListener(synchronousInvalidationListener)
-        database.invalidationTracker.removeObserver(invalidationObserver)
+        if (observeRoomInvalidations) database.invalidationTracker.removeObserver(invalidationObserver)
     }
 
     private suspend fun readyIndexLocked(forceFullRebuild: Boolean): IndexBuildOutcome {
@@ -634,6 +641,21 @@ private data class RecallDocument(
 ) {
     val structuralRows: Int
         get() = sourceExperienceIds.size + entityIds.size
+
+    fun toBounded() = BoundedRecallDocument(
+        id = memoryId,
+        metadata = this,
+        exactMeaningHash = meaningHash,
+        termFrequencies = termFrequencies,
+        documentLength = documentLength,
+        textChars = textChars,
+        sourceIds = sourceExperienceIds,
+        entityIds = entityIds,
+        exactSearchable = isBroadlyAccessible,
+        lexicallySearchable = isBroadlyAccessible,
+        sourceSearchable = rowRetentionState != MemoryRetentionState.FORGOTTEN,
+        entitySearchable = isBroadlyAccessible,
+    )
 }
 
 private data class RecallRelationship(
@@ -642,73 +664,49 @@ private data class RecallRelationship(
     val relationshipType: MemoryRelationshipType,
 )
 
+private fun RecallRelationship.toBounded() = BoundedRecallRelationship(
+    sourceId = sourceMemoryId,
+    targetId = targetMemoryId,
+    type = relationshipType.name,
+)
+
 private class ValidationRecallIndex(
     var generation: ValidationRecallGeneration,
     private val limits: TargetedValidationRecallLimits,
 ) {
-    private val documents = linkedMapOf<String, RecallDocument>()
-    private val postings = linkedMapOf<String, MutableMap<String, Int>>()
-    private val exactMeanings = linkedMapOf<String, MutableSet<String>>()
-    private val sourceIndex = linkedMapOf<String, MutableSet<String>>()
-    private val entityIndex = linkedMapOf<String, MutableSet<String>>()
-    private val relationships = linkedSetOf<RecallRelationship>()
-    private val relationshipsByMemory = linkedMapOf<String, MutableSet<RecallRelationship>>()
-    private val adjacency = linkedMapOf<String, MutableSet<String>>()
-    private var indexedTextChars = 0L
-    private var indexedTokens = 0
-    private var postingCount = 0
-    private var structuralRows = 0
-    private var broadDocumentCount = 0
-    private var positiveBroadDocumentCount = 0
-    private var broadDocumentTokens = 0L
-
+    private val sharedCore = BoundedRecallIndex<RecallDocument>(
+        BoundedRecallLimits(
+            maxDocuments = limits.maxMemories,
+            maxCorpusTextChars = limits.maxCorpusTextChars,
+            maxCorpusTokens = limits.maxCorpusTokens,
+            maxCorpusPostings = limits.maxCorpusPostings,
+            maxCorpusStructuralRows = limits.maxCorpusStructuralRows,
+            maxTokenChars = limits.maxTokenChars,
+            maxQueryTerms = limits.maxQueryTerms,
+            maxPostingVisits = limits.maxPostingVisits,
+            maxStructuralVisits = limits.maxStructuralVisits,
+            maxGraphSeeds = limits.maxGraphSeeds,
+            maxRelationshipVisits = limits.maxRelationshipVisits,
+            maxCandidatePool = limits.maxCandidatePool,
+        ),
+    )
     val documentCount: Int
-        get() = documents.size
+        get() = sharedCore.documentCount
 
     fun addDocument(document: RecallDocument) {
-        if (document.memoryId in documents) throw ValidationRecallCapacityExceeded()
-        if (documents.size >= limits.maxMemories ||
-            indexedTextChars > limits.maxCorpusTextChars - document.textChars ||
-            indexedTokens > limits.maxCorpusTokens - document.documentLength ||
-            postingCount > limits.maxCorpusPostings - document.termFrequencies.size ||
-            structuralRows > limits.maxCorpusStructuralRows - document.structuralRows
-        ) {
+        try {
+            sharedCore.addDocument(document.toBounded())
+        } catch (_: BoundedRecallCapacityExceeded) {
             throw ValidationRecallCapacityExceeded()
         }
-        documents[document.memoryId] = document
-        indexedTextChars += document.textChars
-        indexedTokens += document.documentLength
-        postingCount += document.termFrequencies.size
-        structuralRows += document.structuralRows
-        if (document.isBroadlyAccessible) {
-            broadDocumentCount++
-            if (document.documentLength > 0) {
-                positiveBroadDocumentCount++
-                broadDocumentTokens += document.documentLength.toLong()
-            }
-            exactMeanings.getOrPut(document.meaningHash) { sortedSetOf() } += document.memoryId
-            document.termFrequencies.forEach { (term, frequency) ->
-                postings.getOrPut(term) { linkedMapOf() }[document.memoryId] = frequency
-            }
-            document.entityIds.forEach { entityId ->
-                entityIndex.getOrPut(entityId) { sortedSetOf() } += document.memoryId
-            }
-        }
-        if (document.rowRetentionState != MemoryRetentionState.FORGOTTEN) {
-            document.sourceExperienceIds.forEach { sourceId ->
-                sourceIndex.getOrPut(sourceId) { sortedSetOf() } += document.memoryId
-            }
-        }
-        relationshipsByMemory[document.memoryId].orEmpty().forEach(::activateRelationship)
     }
 
     fun addRelationship(relationship: RecallRelationship) {
-        if (!relationships.add(relationship)) return
-        if (structuralRows >= limits.maxCorpusStructuralRows) throw ValidationRecallCapacityExceeded()
-        structuralRows++
-        relationshipsByMemory.getOrPut(relationship.sourceMemoryId) { linkedSetOf() } += relationship
-        relationshipsByMemory.getOrPut(relationship.targetMemoryId) { linkedSetOf() } += relationship
-        activateRelationship(relationship)
+        try {
+            sharedCore.addRelationship(relationship.toBounded())
+        } catch (_: BoundedRecallCapacityExceeded) {
+            throw ValidationRecallCapacityExceeded()
+        }
     }
 
     fun requireStructuralRowsWithinLimit(rowsRead: Int) {
@@ -721,77 +719,29 @@ private class ValidationRecallIndex(
         replacementRelationships: Set<RecallRelationship>,
         nextGeneration: ValidationRecallGeneration,
     ): ValidationRecallIncrementalWork {
-        val relationshipsToRemove = changedIds
-            .flatMapTo(linkedSetOf()) { relationshipsByMemory[it].orEmpty() }
-        val work = MutableIncrementalWork(
-            changedMemories = changedIds.size,
-            incidentRelationshipsRemoved = relationshipsToRemove.size,
-        )
-        relationshipsToRemove.forEach { relationship -> removeRelationship(relationship, work) }
-        changedIds.forEach { memoryId -> removeDocument(memoryId, work) }
-        replacements.toSortedMap().values.forEach(::addDocument)
-        replacementRelationships.sortedWith(
-            compareBy<RecallRelationship>(RecallRelationship::sourceMemoryId)
-                .thenBy(RecallRelationship::targetMemoryId)
-                .thenBy { it.relationshipType.name },
-        ).forEach(::addRelationship)
+        val work = try {
+            sharedCore.replaceDocuments(
+                changedIds = changedIds,
+                replacements = replacements.mapValues { it.value.toBounded() },
+                replacementRelationships = replacementRelationships.mapTo(linkedSetOf()) { it.toBounded() },
+            )
+        } catch (_: BoundedRecallCapacityExceeded) {
+            throw ValidationRecallCapacityExceeded()
+        }
         generation = nextGeneration
-        return work.snapshot()
+        return ValidationRecallIncrementalWork(
+            changedMemories = work.changedDocuments,
+            incidentRelationshipsRemoved = work.incidentRelationshipsRemoved,
+            adjacencyVerticesVisitedForRemoval = work.adjacencyVerticesVisitedForRemoval,
+        )
     }
 
-    fun budgetUsage(): ValidationRecallBudgetUsage = ValidationRecallBudgetUsage(
-        indexedMemories = documents.size,
-        indexedTokens = indexedTokens,
-        structuralRowsVisited = structuralRows,
-    )
-
-    private fun removeDocument(memoryId: String, work: MutableIncrementalWork) {
-        val document = documents.remove(memoryId) ?: return
-        indexedTextChars -= document.textChars
-        indexedTokens -= document.documentLength
-        postingCount -= document.termFrequencies.size
-        structuralRows -= document.structuralRows
-        if (document.isBroadlyAccessible) {
-            broadDocumentCount--
-            if (document.documentLength > 0) {
-                positiveBroadDocumentCount--
-                broadDocumentTokens -= document.documentLength.toLong()
-            }
-            exactMeanings.removeMember(document.meaningHash, memoryId)
-            document.termFrequencies.keys.forEach { term -> postings.removePosting(term, memoryId) }
-            document.entityIds.forEach { entityId -> entityIndex.removeMember(entityId, memoryId) }
-        }
-        if (document.rowRetentionState != MemoryRetentionState.FORGOTTEN) {
-            document.sourceExperienceIds.forEach { sourceId -> sourceIndex.removeMember(sourceId, memoryId) }
-        }
-        work.adjacencyVerticesVisitedForRemoval++
-        adjacency.remove(memoryId)
-    }
-
-    private fun removeRelationship(
-        relationship: RecallRelationship,
-        work: MutableIncrementalWork,
-    ) {
-        if (!relationships.remove(relationship)) return
-        structuralRows--
-        relationshipsByMemory.removeMember(relationship.sourceMemoryId, relationship)
-        relationshipsByMemory.removeMember(relationship.targetMemoryId, relationship)
-        work.adjacencyVerticesVisitedForRemoval++
-        adjacency[relationship.sourceMemoryId]?.let { neighbors ->
-            neighbors.remove(relationship.targetMemoryId)
-            if (neighbors.isEmpty()) adjacency.remove(relationship.sourceMemoryId)
-        }
-        work.adjacencyVerticesVisitedForRemoval++
-        adjacency[relationship.targetMemoryId]?.let { neighbors ->
-            neighbors.remove(relationship.sourceMemoryId)
-            if (neighbors.isEmpty()) adjacency.remove(relationship.targetMemoryId)
-        }
-    }
-
-    private fun activateRelationship(relationship: RecallRelationship) {
-        if (relationship.sourceMemoryId !in documents || relationship.targetMemoryId !in documents) return
-        adjacency.getOrPut(relationship.sourceMemoryId) { sortedSetOf() } += relationship.targetMemoryId
-        adjacency.getOrPut(relationship.targetMemoryId) { sortedSetOf() } += relationship.sourceMemoryId
+    fun budgetUsage(): ValidationRecallBudgetUsage = sharedCore.usage().let { usage ->
+        ValidationRecallBudgetUsage(
+            indexedMemories = usage.indexedDocuments,
+            indexedTokens = usage.indexedTokens,
+            structuralRowsVisited = usage.structuralRows,
+        )
     }
 
     suspend fun retrieve(
@@ -799,123 +749,34 @@ private class ValidationRecallIndex(
         limits: TargetedValidationRecallLimits,
     ): ValidationMemoryRetrieval {
         coroutineContext.ensureActive()
-        if (query.proposedMeaning.length > limits.maxQueryChars) {
+        if (query.proposedMeaning.length > limits.maxQueryChars ||
+            query.sourceExperienceIds.distinct().size > limits.maxQuerySourceIds ||
+            query.groundedEntityIds.size > limits.maxQueryEntityIds
+        ) {
             return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED)
         }
-        val sourceIds = query.sourceExperienceIds.distinct().sorted()
-        val entityIds = query.groundedEntityIds.toSortedSet().toList()
-        if (sourceIds.size > limits.maxQuerySourceIds || entityIds.size > limits.maxQueryEntityIds) {
-            return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED)
+        val result = sharedCore.query(query, ValidationRecallPolicy)
+        val readiness = when (result.status) {
+            BoundedRecallQueryStatus.READY -> ValidationRecallReadiness.READY
+            BoundedRecallQueryStatus.QUERY_UNSELECTIVE -> ValidationRecallReadiness.QUERY_UNSELECTIVE
+            BoundedRecallQueryStatus.BUDGET_EXCEEDED -> ValidationRecallReadiness.BUDGET_EXCEEDED
         }
-        val queryTerms = try {
-            RecallTokenizer.tokens(query.proposedMeaning, limits.maxTokenChars).distinct()
-        } catch (_: RecallTokenLimitExceeded) {
-            return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED)
-        }
-        if (queryTerms.size > limits.maxQueryTerms) {
-            return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED)
-        }
-
-        val scores = linkedMapOf<String, Double>()
-        var postingVisits = 0
-        var structuralVisits = 0
-        var relationshipVisits = 0
-
-        fun add(memoryId: String, score: Double): Boolean {
-            if (memoryId !in documents) return true
-            scores[memoryId] = (scores[memoryId] ?: 0.0) + score
-            return scores.size <= limits.maxCandidatePool
-        }
-
-        exactMeanings[meaningHash(query.proposedMeaning)].orEmpty().forEach { memoryId ->
-            if (!add(memoryId, EXACT_MEANING_SCORE)) return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED)
-        }
-        sourceIds.forEach { sourceId ->
-            sourceIndex[sourceId].orEmpty().forEach { memoryId ->
-                structuralVisits++
-                if (structuralVisits > limits.maxStructuralVisits || !add(memoryId, SOURCE_MATCH_SCORE)) {
-                    return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED, postingVisits, structuralVisits)
-                }
-            }
-        }
-        entityIds.forEach { entityId ->
-            entityIndex[entityId].orEmpty().forEach { memoryId ->
-                structuralVisits++
-                if (structuralVisits > limits.maxStructuralVisits || !add(memoryId, ENTITY_MATCH_SCORE)) {
-                    return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED, postingVisits, structuralVisits)
-                }
-            }
-        }
-
-        if (queryTerms.isEmpty() && scores.isEmpty()) {
-            return unavailable(ValidationRecallReadiness.QUERY_UNSELECTIVE, postingVisits, structuralVisits)
-        }
-        val orderedTerms = queryTerms.sortedWith(compareBy<String> { postings[it]?.size ?: 0 }.thenBy { it })
-        val plannedPostingVisits = orderedTerms.sumOf { postings[it]?.size ?: 0 }
-        if (plannedPostingVisits > limits.maxPostingVisits) {
-            return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED, postingVisits, structuralVisits)
-        }
-        orderedTerms.forEach { term ->
-            coroutineContext.ensureActive()
-            val termPostings = postings[term].orEmpty()
-            val averageDocumentLength = if (positiveBroadDocumentCount == 0) {
-                1.0
-            } else {
-                broadDocumentTokens.toDouble() / positiveBroadDocumentCount
-            }
-            val inverseDocumentFrequency = ln(
-                1.0 + (broadDocumentCount - termPostings.size + 0.5) / (termPostings.size + 0.5),
-            )
-            termPostings.forEach { (memoryId, termFrequency) ->
-                postingVisits++
-                val document = documents.getValue(memoryId)
-                val normalizedLength = document.documentLength / averageDocumentLength
-                val termFrequencyScore = termFrequency * (BM25_K + 1.0) /
-                    (termFrequency + BM25_K * (1.0 - BM25_B + BM25_B * normalizedLength))
-                val structuralBonus =
-                    (if (document.kind == query.proposedKind) SAME_KIND_BONUS else 0.0) +
-                        (if (document.scope == query.proposedScope) SAME_SCOPE_BONUS else 0.0)
-                if (!add(memoryId, inverseDocumentFrequency * termFrequencyScore + structuralBonus)) {
-                    return unavailable(ValidationRecallReadiness.BUDGET_EXCEEDED, postingVisits, structuralVisits)
-                }
-            }
-        }
-
-        val graphSeeds = scores.entries
-            .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key })
-            .take(limits.maxGraphSeeds)
-        graphSeeds.forEach { seed ->
-            coroutineContext.ensureActive()
-            adjacency[seed.key].orEmpty().forEach { relatedMemoryId ->
-                relationshipVisits++
-                if (relationshipVisits > limits.maxRelationshipVisits ||
-                    !add(relatedMemoryId, RELATION_MATCH_SCORE)
-                ) {
-                    return unavailable(
-                        ValidationRecallReadiness.BUDGET_EXCEEDED,
-                        postingVisits,
-                        structuralVisits,
-                        graphSeeds.size,
-                        relationshipVisits,
-                    )
-                }
-            }
-        }
-
-        val memoryIds = scores.entries
-            .sortedWith(compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key })
-            .take(limits.maxFinalIds)
-            .map { it.key }
         return ValidationMemoryRetrieval(
-            memoryIds = memoryIds,
-            readiness = ValidationRecallReadiness.READY,
+            memoryIds = if (readiness == ValidationRecallReadiness.READY) {
+                result.candidates.take(limits.maxFinalIds).map { it.document.id }
+            } else {
+                emptyList()
+            },
+            readiness = readiness,
             generation = generation,
-            budgetUsage = budgetUsage().copy(
-                postingVisits = postingVisits,
-                structuralRowsVisited = budgetUsage().structuralRowsVisited + structuralVisits,
-                graphSeedsVisited = graphSeeds.size,
-                relationshipRowsVisited = relationshipVisits,
-                candidatePoolSize = scores.size,
+            budgetUsage = ValidationRecallBudgetUsage(
+                indexedMemories = result.usage.indexedDocuments,
+                indexedTokens = result.usage.indexedTokens,
+                postingVisits = result.usage.postingVisits,
+                structuralRowsVisited = result.usage.structuralRows + result.usage.queryStructuralVisits,
+                graphSeedsVisited = result.usage.graphSeeds,
+                relationshipRowsVisited = result.usage.relationshipVisits,
+                candidatePoolSize = result.usage.candidatePoolSize,
             ),
         )
     }
@@ -937,6 +798,49 @@ private class ValidationRecallIndex(
         ),
     )
 
+    private object ValidationRecallPolicy : BoundedRecallPolicy<ValidationMemoryQuery, RecallDocument> {
+        override fun queryText(query: ValidationMemoryQuery) = query.proposedMeaning
+
+        override fun sourceIds(query: ValidationMemoryQuery) = query.sourceExperienceIds
+
+        override fun entityIds(query: ValidationMemoryQuery) = query.groundedEntityIds
+
+        override fun exactMeaningHash(query: ValidationMemoryQuery) = meaningHash(query.proposedMeaning)
+
+        override fun isEligible(
+            query: ValidationMemoryQuery,
+            document: BoundedRecallDocument<RecallDocument>,
+        ) = true
+
+        override fun exactScore(
+            query: ValidationMemoryQuery,
+            document: BoundedRecallDocument<RecallDocument>,
+        ) = EXACT_MEANING_SCORE
+
+        override fun sourceScore(
+            query: ValidationMemoryQuery,
+            document: BoundedRecallDocument<RecallDocument>,
+        ) = SOURCE_MATCH_SCORE
+
+        override fun entityScore(
+            query: ValidationMemoryQuery,
+            document: BoundedRecallDocument<RecallDocument>,
+        ) = ENTITY_MATCH_SCORE
+
+        override fun lexicalBonus(
+            query: ValidationMemoryQuery,
+            document: BoundedRecallDocument<RecallDocument>,
+        ) = (if (document.metadata.kind == query.proposedKind) SAME_KIND_BONUS else 0.0) +
+            (if (document.metadata.scope == query.proposedScope) SAME_SCOPE_BONUS else 0.0)
+
+        override fun relationshipScore(
+            query: ValidationMemoryQuery,
+            seed: BoundedRecallDocument<RecallDocument>,
+            related: BoundedRecallDocument<RecallDocument>,
+            relationshipType: String,
+        ) = RELATION_MATCH_SCORE
+    }
+
     private companion object {
         const val EXACT_MEANING_SCORE = 100.0
         const val SOURCE_MATCH_SCORE = 50.0
@@ -944,34 +848,6 @@ private class ValidationRecallIndex(
         const val RELATION_MATCH_SCORE = 5.0
         const val SAME_KIND_BONUS = 0.35
         const val SAME_SCOPE_BONUS = 0.25
-        const val BM25_K = 1.2
-        const val BM25_B = 0.75
-    }
-
-    private data class MutableIncrementalWork(
-        val changedMemories: Int,
-        val incidentRelationshipsRemoved: Int,
-        var adjacencyVerticesVisitedForRemoval: Int = 0,
-    ) {
-        fun snapshot() = ValidationRecallIncrementalWork(
-            changedMemories = changedMemories,
-            incidentRelationshipsRemoved = incidentRelationshipsRemoved,
-            adjacencyVerticesVisitedForRemoval = adjacencyVerticesVisitedForRemoval,
-        )
-    }
-
-    private fun <K, V> MutableMap<K, MutableSet<V>>.removeMember(key: K, value: V) {
-        this[key]?.let { values ->
-            values.remove(value)
-            if (values.isEmpty()) remove(key)
-        }
-    }
-
-    private fun <K, V> MutableMap<K, MutableMap<V, Int>>.removePosting(key: K, value: V) {
-        this[key]?.let { values ->
-            values.remove(value)
-            if (values.isEmpty()) remove(key)
-        }
     }
 }
 
@@ -1004,6 +880,4 @@ private fun safeIndexTokens(text: String, maxTokenChars: Int): List<String> = tr
 private class RecallTokenLimitExceeded : RuntimeException()
 private class ValidationRecallCapacityExceeded : RuntimeException()
 
-private fun meaningHash(meaning: String): String = MessageDigest.getInstance("SHA-256")
-    .digest(Normalizer.normalize(meaning, Normalizer.Form.NFKC).lowercase(Locale.ROOT).toByteArray(Charsets.UTF_8))
-    .joinToString("") { byte -> "%02x".format(byte) }
+private fun meaningHash(meaning: String): String = boundedRecallMeaningHash(meaning)

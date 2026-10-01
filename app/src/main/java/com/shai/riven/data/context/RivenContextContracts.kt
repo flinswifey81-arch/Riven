@@ -14,6 +14,7 @@ enum class RivenContextProvenanceClass {
     SHAI_CONFIGURATION,
     DYNAMIC_APP_STATE,
     RETRIEVED_MEMORY,
+    OPEN_LOOP,
     TOOL_OBSERVATION,
     ACTIVE_CONVERSATION,
     OTHER_GROUNDED,
@@ -30,6 +31,16 @@ enum class RivenContextBudgetBehavior {
     TRUNCATABLE,
 }
 
+/**
+ * Whether a context fragment is allowed to carry instructions or must remain inert source data.
+ * Dynamic state, memories, tools, and conversation text are data even when their text contains
+ * instruction-like language.
+ */
+enum class RivenContextContentAuthority {
+    INSTRUCTIONS,
+    UNTRUSTED_DATA,
+}
+
 data class RivenContextSourceDescriptor(
     val sourceId: String,
     val layer: RivenContextLayer,
@@ -40,10 +51,51 @@ data class RivenContextSourceDescriptor(
     val maxCharsPerFragment: Int,
     val maxAggregateChars: Int,
     val budgetBehavior: RivenContextBudgetBehavior,
+    val contentAuthority: RivenContextContentAuthority = RivenContextContentAuthority.UNTRUSTED_DATA,
 )
 
 data class RivenContextReadRequest(
     val now: Long,
+    val conversation: RivenConversationContextRequest? = null,
+    val budget: RivenContextCollectionBudget? = null,
+)
+
+data class RivenContextCollectionBudget(
+    val maxFragments: Int,
+    val maxAggregateChars: Int,
+) {
+    init {
+        require(maxFragments > 0)
+        require(maxAggregateChars > 0)
+    }
+}
+
+data class RivenCurrentInteraction(
+    val messageId: String? = null,
+    val content: String,
+)
+
+/**
+ * Explicit, already-grounded recall authorization. These ids must come from canonical application
+ * state or an explicit user action; a lexical score must never manufacture one of these cues.
+ */
+data class RivenGroundedRecallCues(
+    val groundedEntityIds: Set<String> = emptySet(),
+    val directlyRelevantMemoryIds: Set<String> = emptySet(),
+    val historicalMemoryIds: Set<String> = emptySet(),
+    val dormantMemoryIds: Set<String> = emptySet(),
+    val disputedMemoryIds: Set<String> = emptySet(),
+    val timeBoundMemoryIds: Set<String> = emptySet(),
+    val sensitiveMemoryIds: Set<String> = emptySet(),
+    val activeOpenLoopMemoryIds: Set<String> = emptySet(),
+    val directlyRelevantOpenLoopIds: Set<String> = emptySet(),
+)
+
+data class RivenConversationContextRequest(
+    val conversationId: String,
+    val expectedTimelineRevision: Long,
+    val currentInteraction: RivenCurrentInteraction,
+    val recallCues: RivenGroundedRecallCues = RivenGroundedRecallCues(),
 )
 
 data class RivenContextPayload(
@@ -66,6 +118,7 @@ data class RivenContextFragment(
     val revision: Long?,
     val observedAt: Long?,
     val validUntil: Long?,
+    val contentAuthority: RivenContextContentAuthority,
 )
 
 sealed interface RivenContextSourceError {
@@ -123,6 +176,13 @@ sealed interface RivenContextContractViolation {
         val observedAt: Long,
         val validUntil: Long,
     ) : RivenContextContractViolation
+
+    data class CollectionBudgetExceeded(
+        val maximumFragments: Int,
+        val requiredFragments: Int,
+        val maximumChars: Int,
+        val requiredChars: Long,
+    ) : RivenContextContractViolation
 }
 
 sealed interface RivenContextFailureCause {
@@ -144,6 +204,12 @@ data class RivenContextSourceFailure(
 data class RivenContextSnapshot(
     val fragments: List<RivenContextFragment>,
     val optionalFailures: List<RivenContextSourceFailure>,
+    val budgetOmissions: List<RivenContextBudgetOmission> = emptyList(),
+)
+
+data class RivenContextBudgetOmission(
+    val sourceId: String,
+    val fragmentId: String,
 )
 
 sealed interface RivenContextCollectionResult {

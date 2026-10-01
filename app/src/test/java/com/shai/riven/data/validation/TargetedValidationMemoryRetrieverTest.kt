@@ -406,6 +406,7 @@ class TargetedValidationMemoryRetrieverTest {
             Dispatchers.Unconfined,
             TargetedValidationRecallLimits(),
             reader,
+            observeRoomInvalidations = false,
         ).also(closeables::add)
         assertReady(recall.retrieve(query("likes rain")))
         val initialPageReads = reader.memoryPageCalls
@@ -536,6 +537,7 @@ class TargetedValidationMemoryRetrieverTest {
             Dispatchers.Unconfined,
             TargetedValidationRecallLimits(),
             reader,
+            observeRoomInvalidations = false,
         ).also(closeables::add)
         assertReady(recall.retrieve(query("likes rain")))
         val initialPageReads = reader.memoryPageCalls
@@ -567,12 +569,17 @@ class TargetedValidationMemoryRetrieverTest {
                 )
             }
         }
-
-        assertEquals(before.corpusGeneration + 1L, fence.snapshot().corpusGeneration)
-        assertEquals(listOf("multi-memory-a"), recall.retrieve(query("multitopica")).memoryIds)
-        assertEquals(listOf("multi-memory-b"), recall.retrieve(query("multitopicb")).memoryIds)
-        assertEquals(initialPageReads, reader.memoryPageCalls)
-        assertEquals(1, reader.memoryRowsCalls)
+        assertEquals(
+            "one outer transaction must publish exactly one corpus generation",
+            before.corpusGeneration + 1L,
+            fence.snapshot().corpusGeneration,
+        )
+        assertEquals(
+            listOf("multi-memory-a", "multi-memory-b"),
+            recall.retrieve(query("multitopica multitopicb")).memoryIds,
+        )
+        assertEquals("precise invalidation must not rebuild the full corpus", initialPageReads, reader.memoryPageCalls)
+        assertEquals("both writes must be loaded in one incremental read", 1, reader.memoryRowsCalls)
     }
 
     @Test

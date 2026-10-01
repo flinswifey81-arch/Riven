@@ -7,11 +7,13 @@ class RivenContextSourceRegistry(
 ) {
     private val sources = sources.toList().also(::validateConfiguration)
 
-    suspend fun collect(now: Long): RivenContextCollectionResult {
+    suspend fun collect(now: Long): RivenContextCollectionResult = collect(RivenContextReadRequest(now))
+
+    suspend fun collect(request: RivenContextReadRequest): RivenContextCollectionResult {
         val fragments = mutableListOf<RivenContextFragment>()
         val optionalFailures = mutableListOf<RivenContextSourceFailure>()
         val requiredFailures = mutableListOf<RivenContextSourceFailure>()
-        val request = RivenContextReadRequest(now)
+        val now = request.now
 
         sources.sortedWith(SOURCE_ORDER).forEach { source ->
             val result = try {
@@ -56,9 +58,20 @@ class RivenContextSourceRegistry(
             }
         }
 
+        val orderedFragments = fragments.sortedWith(FRAGMENT_ORDER)
+        val budgeted = request.budget?.let { budget -> applyCollectionBudget(orderedFragments, budget) }
+            ?: BudgetApplication(orderedFragments, emptyList(), null)
+        budgeted.violation?.let { violation ->
+            requiredFailures += RivenContextSourceFailure(
+                sourceId = REGISTRY_SOURCE_ID,
+                criticality = RivenContextSourceCriticality.REQUIRED,
+                cause = RivenContextFailureCause.ContractViolation(violation),
+            )
+        }
         val snapshot = RivenContextSnapshot(
-            fragments = fragments.sortedWith(FRAGMENT_ORDER),
+            fragments = budgeted.fragments,
             optionalFailures = optionalFailures.toList(),
+            budgetOmissions = budgeted.omissions,
         )
         return if (requiredFailures.isEmpty()) {
             RivenContextCollectionResult.Success(snapshot)
@@ -68,6 +81,50 @@ class RivenContextSourceRegistry(
                 requiredFailures = requiredFailures.toList(),
             )
         }
+    }
+
+    private fun applyCollectionBudget(
+        fragments: List<RivenContextFragment>,
+        budget: RivenContextCollectionBudget,
+    ): BudgetApplication {
+        val required = fragments.filter { fragment ->
+            fragment.criticality == RivenContextSourceCriticality.REQUIRED ||
+                fragment.budgetBehavior == RivenContextBudgetBehavior.REQUIRED
+        }
+        val requiredChars = required.sumOf { fragment -> fragment.content.length.toLong() }
+        if (required.size > budget.maxFragments || requiredChars > budget.maxAggregateChars) {
+            return BudgetApplication(
+                fragments = emptyList(),
+                omissions = emptyList(),
+                violation = RivenContextContractViolation.CollectionBudgetExceeded(
+                    maximumFragments = budget.maxFragments,
+                    requiredFragments = required.size,
+                    maximumChars = budget.maxAggregateChars,
+                    requiredChars = requiredChars,
+                ),
+            )
+        }
+
+        val selected = required.toMutableList()
+        val omissions = mutableListOf<RivenContextBudgetOmission>()
+        var remainingFragments = budget.maxFragments - required.size
+        var remainingChars = budget.maxAggregateChars.toLong() - requiredChars
+        fragments.filterNot(required::contains).forEach { fragment ->
+            if (remainingFragments == 0 || remainingChars == 0L) {
+                omissions += fragment.omission()
+            } else if (fragment.content.length <= remainingChars) {
+                selected += fragment
+                remainingFragments--
+                remainingChars -= fragment.content.length
+            } else if (fragment.budgetBehavior == RivenContextBudgetBehavior.TRUNCATABLE) {
+                selected += fragment.copy(content = fragment.content.take(remainingChars.toInt()))
+                remainingFragments--
+                remainingChars = 0
+            } else {
+                omissions += fragment.omission()
+            }
+        }
+        return BudgetApplication(selected.sortedWith(FRAGMENT_ORDER), omissions, null)
     }
 
     private fun recordFailure(
@@ -149,7 +206,10 @@ class RivenContextSourceRegistry(
         revision = payload.revision,
         observedAt = payload.observedAt,
         validUntil = payload.validUntil,
+        contentAuthority = contentAuthority,
     )
+
+    private fun RivenContextFragment.omission() = RivenContextBudgetOmission(sourceId, fragmentId)
 
     private fun validateConfiguration(sources: List<RivenContextSource>) {
         val seenSourceIds = mutableSetOf<String>()
@@ -193,6 +253,7 @@ class RivenContextSourceRegistry(
     }
 
     private companion object {
+        const val REGISTRY_SOURCE_ID = "RIVEN_CONTEXT_REGISTRY"
         val SOURCE_ORDER = compareBy<RivenContextSource>(
             { source -> source.descriptor.layer.ordinal },
             { source -> source.descriptor.orderWithinLayer },
@@ -206,4 +267,10 @@ class RivenContextSourceRegistry(
             { fragment -> fragment.fragmentId },
         )
     }
+
+    private data class BudgetApplication(
+        val fragments: List<RivenContextFragment>,
+        val omissions: List<RivenContextBudgetOmission>,
+        val violation: RivenContextContractViolation.CollectionBudgetExceeded?,
+    )
 }

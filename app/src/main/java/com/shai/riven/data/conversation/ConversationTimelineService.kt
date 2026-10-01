@@ -109,6 +109,23 @@ class ConversationTimelineService(
             )
         }
 
+    /** Reads only the newest canonical parent-walk segment needed for bounded context assembly. */
+    internal suspend fun activeTimelineTail(
+        conversationId: String,
+        maximumMessages: Int,
+    ): TimelineReadResult {
+        require(maximumMessages > 0)
+        return executeRead(TimelineOperation.READ_ACTIVE_TIMELINE) {
+            requireConversation(conversationId)
+            val head = requireTimelineHead(conversationId)
+            TimelineReadResult.Success(
+                conversationId = conversationId,
+                timelineRevision = head.timelineRevision,
+                messages = walkActiveTail(head, maximumMessages),
+            )
+        }
+    }
+
     suspend fun allMessages(conversationId: String): TimelineReadResult =
         executeRead(TimelineOperation.READ_ALL_MESSAGES) {
             requireConversation(conversationId)
@@ -326,6 +343,43 @@ class ConversationTimelineService(
             current = parent
         }
         return reversePath.asReversed()
+    }
+
+    private fun walkActiveTail(
+        head: ConversationTimelineHeadEntity,
+        maximumMessages: Int,
+    ): List<MessageEntity> {
+        requireValidStoredRevision(head)
+        val headMessageId = head.activeHeadMessageId ?: return emptyList()
+        val reverseTail = mutableListOf<MessageEntity>()
+        val visited = mutableSetOf<String>()
+        var current = requireMessage(headMessageId)
+        if (current.conversationId != head.conversationId) {
+            abort(
+                ConversationTimelineError.TimelineHeadBelongsToDifferentConversation(
+                    conversationId = head.conversationId,
+                    headMessageId = current.id,
+                    actualConversationId = current.conversationId,
+                ),
+            )
+        }
+        while (reverseTail.size < maximumMessages) {
+            if (!visited.add(current.id)) {
+                val next = timelineDao.parentEdge(current.id)?.parentMessageId ?: current.id
+                abort(ConversationTimelineError.CycleDetected(current.id, next))
+            }
+            reverseTail += current
+            val edge = timelineDao.parentEdge(current.id) ?: break
+            if (edge.parentMessageId == current.id) {
+                abort(ConversationTimelineError.SelfParent(current.id))
+            }
+            val parent = requireMessage(edge.parentMessageId)
+            if (parent.conversationId != head.conversationId) {
+                abort(ConversationTimelineError.ParentBelongsToDifferentConversation(current.id, parent.id))
+            }
+            current = parent
+        }
+        return reverseTail.asReversed()
     }
 
     private fun requireConversation(conversationId: String): ConversationEntity =

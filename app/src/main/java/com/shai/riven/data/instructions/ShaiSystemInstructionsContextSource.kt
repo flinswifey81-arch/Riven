@@ -1,6 +1,7 @@
 package com.shai.riven.data.instructions
 
 import com.shai.riven.data.context.RivenContextBudgetBehavior
+import com.shai.riven.data.context.RivenContextContentAuthority
 import com.shai.riven.data.context.RivenContextLayer
 import com.shai.riven.data.context.RivenContextPayload
 import com.shai.riven.data.context.RivenContextProvenanceClass
@@ -26,6 +27,7 @@ class ShaiSystemInstructionsContextSource(
         maxCharsPerFragment = MAX_CONTEXT_CHARS,
         maxAggregateChars = MAX_CONTEXT_CHARS,
         budgetBehavior = RivenContextBudgetBehavior.REQUIRED,
+        contentAuthority = RivenContextContentAuthority.INSTRUCTIONS,
     )
 
     override suspend fun read(request: RivenContextReadRequest): RivenContextSourceResult =

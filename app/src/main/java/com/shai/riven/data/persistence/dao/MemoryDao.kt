@@ -17,14 +17,18 @@ import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
+import com.shai.riven.data.persistence.model.EpistemicBasis
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.SignificanceLevel
+import com.shai.riven.data.persistence.model.TemporalState
 
 @Dao
 interface MemoryDao {
@@ -208,6 +212,76 @@ interface MemoryDao {
         relationshipType: MemoryRelationshipType,
     ): Int
 
+    @Query(
+        """
+        SELECT memory_id AS memoryId,
+               kind,
+               scope,
+               substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
+               length(meaning) AS meaningLength,
+               epistemic_basis AS epistemicBasis,
+               certainty,
+               truth_state AS truthState,
+               retention_state AS retentionState,
+               lifecycle_state AS lifecycleState,
+               temporal_state AS temporalState,
+               learned_at AS learnedAt,
+               valid_from AS validFrom,
+               valid_until AS validUntil,
+               last_confirmed_at AS lastConfirmedAt,
+               autobiographical_significance AS autobiographicalSignificance,
+               relationship_significance AS relationshipSignificance,
+               emotional_significance AS emotionalSignificance,
+               practical_significance AS practicalSignificance,
+               identity_significance AS identitySignificance,
+               sensitivity,
+               updated_at AS updatedAt
+        FROM memories
+        WHERE memory_id > :afterMemoryId
+        ORDER BY memory_id
+        LIMIT :limit
+        """,
+    )
+    fun conversationalRecallMemoryPage(
+        afterMemoryId: String,
+        limit: Int,
+        maxMeaningCharsPlusOne: Int,
+    ): List<ConversationalRecallMemoryRow>
+
+    @Query(
+        """
+        SELECT memory_id AS memoryId,
+               kind,
+               scope,
+               substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
+               length(meaning) AS meaningLength,
+               epistemic_basis AS epistemicBasis,
+               certainty,
+               truth_state AS truthState,
+               retention_state AS retentionState,
+               lifecycle_state AS lifecycleState,
+               temporal_state AS temporalState,
+               learned_at AS learnedAt,
+               valid_from AS validFrom,
+               valid_until AS validUntil,
+               last_confirmed_at AS lastConfirmedAt,
+               autobiographical_significance AS autobiographicalSignificance,
+               relationship_significance AS relationshipSignificance,
+               emotional_significance AS emotionalSignificance,
+               practical_significance AS practicalSignificance,
+               identity_significance AS identitySignificance,
+               sensitivity,
+               updated_at AS updatedAt
+        FROM memories
+        WHERE memory_id IN (:memoryIds)
+        ORDER BY memory_id
+        """,
+    )
+    fun conversationalRecallMemoryRows(
+        memoryIds: List<String>,
+        maxMeaningCharsPlusOne: Int,
+    ): List<ConversationalRecallMemoryRow>
+
     /**
      * Keyset-paged canonical corpus read for the rebuildable validation-recall index. The primary
      * key bounds every page; callers must still enforce a total corpus capacity.
@@ -333,6 +407,31 @@ interface MemoryDao {
         limit: Int,
     ): List<MemoryRelationshipEntity>
 }
+
+data class ConversationalRecallMemoryRow(
+    val memoryId: String,
+    val kind: MemoryKind,
+    val scope: MemoryScope,
+    val meaning: String,
+    val meaningLength: Long,
+    val epistemicBasis: EpistemicBasis,
+    val certainty: MemoryCertainty,
+    val truthState: MemoryTruthState,
+    val retentionState: MemoryRetentionState,
+    val lifecycleState: MemoryLifecycleState,
+    val temporalState: TemporalState,
+    val learnedAt: Long,
+    val validFrom: Long?,
+    val validUntil: Long?,
+    val lastConfirmedAt: Long?,
+    val autobiographicalSignificance: SignificanceLevel?,
+    val relationshipSignificance: SignificanceLevel?,
+    val emotionalSignificance: SignificanceLevel?,
+    val practicalSignificance: SignificanceLevel?,
+    val identitySignificance: SignificanceLevel?,
+    val sensitivity: SensitivityLevel,
+    val updatedAt: Long,
+)
 
 data class ValidationRecallEvidenceRow(
     val memoryId: String,
