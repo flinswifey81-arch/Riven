@@ -22,24 +22,30 @@ internal object ConversationEngineOwnerRegistry {
     fun newToken(): String = UUID.randomUUID().toString()
 }
 
-class ConversationRunLimiter(
+class ConversationRunLimiter internal constructor(
     maximumConcurrentRuns: Int,
+    private val afterPermitAcquired: suspend () -> Unit,
 ) {
+    constructor(maximumConcurrentRuns: Int) : this(maximumConcurrentRuns, {})
+
     private val semaphore = Semaphore(maximumConcurrentRuns)
 
     suspend fun <T> withPermitOrNull(
         timeoutMillis: Long,
         block: suspend () -> T,
     ): T? {
-        val acquired = withTimeoutOrNull(timeoutMillis) {
-            semaphore.acquire()
-            true
-        } ?: false
-        if (!acquired) return null
+        var permitOwned = false
         return try {
+            val acquired = withTimeoutOrNull(timeoutMillis) {
+                semaphore.acquire()
+                permitOwned = true
+                afterPermitAcquired()
+                true
+            } ?: false
+            if (!acquired) return null
             block()
         } finally {
-            semaphore.release()
+            if (permitOwned) semaphore.release()
         }
     }
 }

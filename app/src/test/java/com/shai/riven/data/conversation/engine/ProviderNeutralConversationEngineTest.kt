@@ -262,6 +262,33 @@ class ProviderNeutralConversationEngineTest {
     }
 
     @Test
+    fun permitReturnsWhenTimeoutWinsAfterAcquisitionBeforeResultDelivery() = runBlocking {
+        val permitRecorded = CompletableDeferred<Unit>()
+        val holdResultDelivery = CompletableDeferred<Unit>()
+        val acquisitionCount = AtomicInteger(0)
+        val limiter = ConversationRunLimiter(maximumConcurrentRuns = 1) {
+            if (acquisitionCount.getAndIncrement() == 0) {
+                permitRecorded.complete(Unit)
+                holdResultDelivery.await()
+            }
+        }
+        val timedOut = async {
+            limiter.withPermitOrNull(timeoutMillis = 50) {
+                error("timed-out acquisition must not run its block")
+            }
+        }
+        withTimeout(1_000) { permitRecorded.await() }
+
+        assertNull(withTimeout(1_000) { timedOut.await() })
+        val later = withTimeout(1_000) {
+            limiter.withPermitOrNull(timeoutMillis = 500) { "later request ran" }
+        }
+
+        assertEquals("later request ran", later)
+        assertEquals(2, acquisitionCount.get())
+    }
+
+    @Test
     fun saturatedPermitTimesOutQueuedRunWithoutInvokingItsAdapter() = runBlocking {
         createConversationAndUser()
         createProfile()
