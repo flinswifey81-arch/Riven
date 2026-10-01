@@ -4,6 +4,17 @@ import android.content.Context
 import androidx.room.Room
 import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
+import com.shai.riven.data.context.ActiveConversationReceiptValidator
+import com.shai.riven.data.context.ConversationalContextFreshnessValidator
+import com.shai.riven.data.context.RivenContextFreshnessReceipt
+import com.shai.riven.data.context.RivenContextFreshnessValidation
+import com.shai.riven.data.context.RivenContextSnapshot
+import com.shai.riven.data.conversation.AppendTimelineMessageInput
+import com.shai.riven.data.conversation.ConversationTimelineService
+import com.shai.riven.data.conversation.CreateTimelineConversationInput
+import com.shai.riven.data.conversation.NewTimelineMessageInput
+import com.shai.riven.data.conversation.TimelineReadResult
+import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.context.RivenGroundedRecallCues
 import com.shai.riven.data.deletion.DeleteMemoryInput
 import com.shai.riven.data.deletion.MemoryDeleteResult
@@ -19,6 +30,7 @@ import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.ConversationStatus
 import com.shai.riven.data.persistence.model.EvidenceRole
 import com.shai.riven.data.persistence.model.ExperienceActor
 import com.shai.riven.data.persistence.model.ExperienceAvailability
@@ -30,6 +42,8 @@ import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
+import com.shai.riven.data.persistence.model.MessageDeliveryState
+import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.TemporalState
@@ -276,6 +290,77 @@ class TargetedConversationalMemoryRetrieverTest {
         assertTrue(MemoryTransactionService(database).forget(MemoryStateTransitionInput("tea", 100)) is MemoryWriteResult.Success)
 
         assertFalse(recall.isCurrent(receipt))
+    }
+
+    @Test
+    fun registryOrderRecallReceiptIsRecheckedAfterQueuedTimelineReadAndConcurrentForget() = runBlocking {
+        insertMemory("tea", "Shai enjoys cardamom tea.")
+        val recall = retriever()
+        val recallGeneration = recall.retrieve(query("cardamom tea")).generation!!
+        val timeline = ConversationTimelineService(database)
+        assertTrue(
+            timeline.createConversationWithTimeline(
+                CreateTimelineConversationInput(
+                    conversationId = "freshness-conversation",
+                    createdAt = 1,
+                    updatedAt = 1,
+                    status = ConversationStatus.ACTIVE,
+                ),
+            ) is TimelineWriteResult.ConversationCreated,
+        )
+        assertTrue(
+            timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    conversationId = "freshness-conversation",
+                    message = NewTimelineMessageInput(
+                        messageId = "freshness-user",
+                        role = MessageRole.USER,
+                        deliveryState = MessageDeliveryState.PERSISTED,
+                        content = "cardamom tea",
+                        createdAt = 2,
+                        updatedAt = 2,
+                    ),
+                    expectedTimelineRevision = 0,
+                    occurredAt = 2,
+                ),
+            ) is TimelineWriteResult.MessageAppended,
+        )
+        val recallReceipt = RivenContextFreshnessReceipt.ConversationalRecall(
+            databaseSessionId = recallGeneration.databaseSessionId,
+            algorithmVersion = recallGeneration.algorithmVersion,
+            corpusGeneration = recallGeneration.corpusGeneration,
+        )
+        val timelineReceipt = RivenContextFreshnessReceipt.ActiveConversation(
+            conversationId = "freshness-conversation",
+            timelineRevision = 1,
+        )
+        val snapshot = RivenContextSnapshot(
+            fragments = emptyList(),
+            optionalFailures = emptyList(),
+            freshnessReceipts = linkedSetOf(recallReceipt, timelineReceipt),
+        )
+        val timelineReadStarted = CompletableDeferred<Unit>()
+        val releaseTimelineRead = CompletableDeferred<Unit>()
+        val validator = ConversationalContextFreshnessValidator(
+            activeConversationValidator = ActiveConversationReceiptValidator { receipt ->
+                timelineReadStarted.complete(Unit)
+                releaseTimelineRead.await()
+                val read = timeline.activeTimelineTail(receipt.conversationId, 1)
+                read is TimelineReadResult.Success && read.timelineRevision == receipt.timelineRevision
+            },
+            recallValidator = recall,
+        )
+
+        val validation = async { validator.validate(snapshot) }
+        timelineReadStarted.await()
+        assertTrue(
+            MemoryTransactionService(database).forget(MemoryStateTransitionInput("tea", 100)) is
+                MemoryWriteResult.Success,
+        )
+        releaseTimelineRead.complete(Unit)
+
+        val result = validation.await() as RivenContextFreshnessValidation.Stale
+        assertEquals(setOf(recallReceipt), result.receipts)
     }
 
     @Test
