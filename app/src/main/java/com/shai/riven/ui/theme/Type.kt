@@ -1,34 +1,46 @@
 package com.shai.riven.ui.theme
 
 import androidx.compose.material3.Typography
-import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.shai.riven.R
 
-// Set of Material typography styles to start with
+val LatoFamily = FontFamily(
+    Font(R.font.lato_regular, FontWeight.Normal),
+    Font(R.font.lato_bold, FontWeight.Bold),
+)
+
 val Typography = Typography(
-    bodyLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 16.sp,
-        lineHeight = 24.sp,
-        letterSpacing = 0.5.sp
-    )
-    /* Other default text styles to override
-    titleLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 22.sp,
-        lineHeight = 28.sp,
-        letterSpacing = 0.sp
+    displaySmall = Typography().displaySmall.copy(
+        fontFamily = LatoFamily,
+        fontWeight = FontWeight.Bold,
+        fontSize = 34.sp,
+        lineHeight = 38.sp,
     ),
-    labelSmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.5.sp
-    )
-    */
+    headlineMedium = Typography().headlineMedium.copy(
+        fontFamily = LatoFamily,
+        fontWeight = FontWeight.Bold,
+    ),
+    titleLarge = Typography().titleLarge.copy(
+        fontFamily = LatoFamily,
+        fontWeight = FontWeight.Bold,
+    ),
+    titleMedium = Typography().titleMedium.copy(
+        fontFamily = LatoFamily,
+        fontWeight = FontWeight.Bold,
+    ),
+    bodyLarge = Typography().bodyLarge.copy(fontFamily = LatoFamily),
+    bodyMedium = Typography().bodyMedium.copy(fontFamily = LatoFamily),
+    bodySmall = Typography().bodySmall.copy(fontFamily = LatoFamily),
+    labelLarge = Typography().labelLarge.copy(
+        fontFamily = LatoFamily,
+        fontWeight = FontWeight.Bold,
+    ),
+    labelMedium = Typography().labelMedium.copy(
+        fontFamily = LatoFamily,
+        fontWeight = FontWeight.Bold,
+    ),
+    labelSmall = Typography().labelSmall.copy(fontFamily = LatoFamily),
 )
