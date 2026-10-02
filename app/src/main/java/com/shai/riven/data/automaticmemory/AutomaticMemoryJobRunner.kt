@@ -84,6 +84,8 @@ class AutomaticMemoryJobRunner(
     private val clock: () -> Long = System::currentTimeMillis,
     private val maxAttempts: Int = com.shai.riven.data.background.MAX_AUTOMATIC_MEMORY_ATTEMPTS,
     private val runningLeaseMs: Long = com.shai.riven.data.background.AUTOMATIC_MEMORY_RUNNING_LEASE_MS,
+    /** Rearms the replaceable five-minute wake from the same completion timestamp used by due checks. */
+    private val scheduleShortWindowSweep: () -> Unit = {},
 ) : AutomaticMemoryJobOperations {
     private val dao = database.automaticMemoryDao()
     private val memoryDao = database.memoryDao()
@@ -442,21 +444,26 @@ class AutomaticMemoryJobRunner(
         updatedAt = clock(),
     ) == 1
 
-    private fun finishSucceeded(job: AutomaticMemoryJobEntity): AutomaticMemoryJobRunResult =
-        if (dao.finishClaimed(
+    private fun finishSucceeded(job: AutomaticMemoryJobEntity): AutomaticMemoryJobRunResult {
+        val completedAt = clock()
+        return if (dao.finishClaimed(
                 job.id,
                 AutomaticMemoryJobState.RUNNING,
                 AutomaticMemoryJobState.SUCCEEDED,
                 AutomaticMemoryJobStage.COMPLETE,
                 job.attemptCount,
-                clock(),
+                completedAt,
                 null,
             ) == 1
         ) {
+            if (dao.shortWindowEligibleJobCount(job.id, AutomaticMemoryJobState.SUCCEEDED) != 0) {
+                runCatching(scheduleShortWindowSweep)
+            }
             AutomaticMemoryJobRunResult.Succeeded(job.id)
         } else {
             AutomaticMemoryJobRunResult.LeaseLost(job.id)
         }
+    }
 
     private suspend fun exclude(
         job: AutomaticMemoryJobEntity,

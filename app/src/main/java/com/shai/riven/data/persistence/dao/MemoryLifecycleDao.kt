@@ -13,6 +13,7 @@ import com.shai.riven.data.persistence.entity.DerivedArtifactAttachmentDependenc
 import com.shai.riven.data.persistence.entity.DerivedArtifactOpenLoopDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactPayloadEntity
 import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
+import com.shai.riven.data.persistence.entity.MemoryAgingSweepCheckpointEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.AttachmentEntity
@@ -43,6 +44,7 @@ interface MemoryLifecycleDao {
           AND memories.lifecycle_state = 'VALIDATED'
           AND memories.temporal_state IN ('CURRENT', 'ATEMPORAL', 'UNKNOWN')
           AND memories.epistemic_basis != 'CONSOLIDATION'
+          AND memory_evidence.role = 'SUPPORTS'
           AND experiences.availability = 'AVAILABLE'
         ORDER BY memories.updated_at DESC, memories.memory_id
         LIMIT :limit
@@ -64,30 +66,77 @@ interface MemoryLifecycleDao {
 
     @Query(
         """
-        SELECT DISTINCT memories.* FROM memories
+        SELECT DISTINCT memories.memory_id FROM memories
         INNER JOIN memory_evidence ON memory_evidence.memory_id = memories.memory_id
         INNER JOIN experiences ON experiences.experience_id = memory_evidence.experience_id
-        LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
-        WHERE (memory_accessibility.evaluated_at IS NULL OR memory_accessibility.evaluated_at < :evaluatedBefore)
+        WHERE memories.memory_id > :afterMemoryId
           AND memories.truth_state = 'SUPPORTED'
           AND memories.retention_state != 'FORGOTTEN'
           AND memories.lifecycle_state = 'VALIDATED'
           AND experiences.availability = 'AVAILABLE'
-        ORDER BY memory_accessibility.evaluated_at IS NOT NULL,
-                 memory_accessibility.evaluated_at,
-                 memories.memory_id
+        ORDER BY memories.memory_id
         LIMIT :limit
         """,
     )
-    fun agingMemories(evaluatedBefore: Long, limit: Int): List<MemoryEntity>
+    fun agingMemoryIds(afterMemoryId: String, limit: Int): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    fun insertAgingSweepCheckpoint(value: MemoryAgingSweepCheckpointEntity): Long
+
+    @Query("SELECT * FROM memory_aging_sweep_checkpoints WHERE checkpoint_id = :checkpointId")
+    fun agingSweepCheckpoint(checkpointId: String): MemoryAgingSweepCheckpointEntity?
+
+    @Query(
+        """
+        UPDATE memory_aging_sweep_checkpoints
+        SET after_memory_id = :nextAfterMemoryId, updated_at = :updatedAt
+        WHERE checkpoint_id = :checkpointId
+          AND sweep_started_at = :sweepStartedAt
+          AND after_memory_id = :expectedAfterMemoryId
+        """,
+    )
+    fun advanceAgingSweepCheckpoint(
+        checkpointId: String,
+        sweepStartedAt: Long,
+        expectedAfterMemoryId: String,
+        nextAfterMemoryId: String,
+        updatedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        DELETE FROM memory_aging_sweep_checkpoints
+        WHERE checkpoint_id = :checkpointId
+          AND sweep_started_at = :sweepStartedAt
+          AND after_memory_id = :expectedAfterMemoryId
+        """,
+    )
+    fun finishAgingSweepCheckpoint(
+        checkpointId: String,
+        sweepStartedAt: Long,
+        expectedAfterMemoryId: String,
+    ): Int
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertConsolidationCheckpoint(value: ConsolidationCheckpointEntity)
 
-    @Query("SELECT * FROM consolidation_checkpoints WHERE corpus_fingerprint = :fingerprint")
-    fun consolidationCheckpointForCorpus(fingerprint: String): ConsolidationCheckpointEntity?
+    @Query(
+        "SELECT * FROM consolidation_checkpoints " +
+            "WHERE corpus_fingerprint = :fingerprint AND source_set_hash IS NULL LIMIT 1",
+    )
+    fun consolidationCompletionForCorpus(fingerprint: String): ConsolidationCheckpointEntity?
 
-    @Query("SELECT * FROM consolidation_checkpoints WHERE source_set_hash = :sourceSetHash")
+    @Query(
+        "SELECT * FROM consolidation_checkpoints " +
+            "WHERE corpus_fingerprint = :fingerprint AND source_set_hash IS NOT NULL " +
+            "ORDER BY created_at, checkpoint_id",
+    )
+    fun consolidationCheckpointsForCorpus(fingerprint: String): List<ConsolidationCheckpointEntity>
+
+    @Query(
+        "SELECT * FROM consolidation_checkpoints WHERE source_set_hash = :sourceSetHash " +
+            "ORDER BY created_at, checkpoint_id LIMIT 1",
+    )
     fun consolidationCheckpointForSourceSet(sourceSetHash: String): ConsolidationCheckpointEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -107,6 +156,23 @@ interface MemoryLifecycleDao {
         """,
     )
     fun unresolvedOpenLoops(states: List<OpenLoopState>, limit: Int): List<OpenLoopEntity>
+
+    @Query(
+        """
+        SELECT open_loops.* FROM open_loops
+        INNER JOIN experiences ON experiences.experience_id = open_loops.creation_experience_id
+        WHERE open_loops.state IN (:states)
+          AND open_loops.open_loop_id > :afterOpenLoopId
+          AND experiences.availability = 'AVAILABLE'
+        ORDER BY open_loops.open_loop_id
+        LIMIT :limit
+        """,
+    )
+    fun unresolvedOpenLoopPage(
+        states: List<OpenLoopState>,
+        afterOpenLoopId: String,
+        limit: Int,
+    ): List<OpenLoopEntity>
 
     @Query("SELECT * FROM open_loops WHERE open_loop_id = :openLoopId")
     fun openLoop(openLoopId: String): OpenLoopEntity?

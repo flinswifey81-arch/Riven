@@ -1,11 +1,13 @@
 package com.shai.riven.data.background
 
 import androidx.room.withTransaction
+import com.shai.riven.data.memory.isEvidenceSuppressedInCurrentTransaction
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactPayloadEntity
 import com.shai.riven.data.persistence.model.DerivedArtifactState
-import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.persistence.model.DerivedArtifactType
+import com.shai.riven.data.persistence.model.EvidenceRole
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryTruthState
@@ -14,7 +16,11 @@ import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 
-/** Rebuilds deterministic projections exclusively from current canonical source rows. */
+/**
+ * Rebuilds the one materialization with a truthful local producer: SEARCH_DOCUMENT. Other artifact
+ * kinds require producer-specific implementations and fail explicitly instead of being marked
+ * current with a generic raw-source projection.
+ */
 class DerivedArtifactRepairService(
     private val database: RivenDatabase,
     private val clock: RivenBackgroundClock = SystemRivenBackgroundClock,
@@ -26,16 +32,7 @@ class DerivedArtifactRepairService(
 
     suspend fun repair(targetType: String, targetId: String): RepairJobHandlerResult {
         val artifactIds = try {
-            when (targetType) {
-                TARGET_ARTIFACT -> listOf(targetId)
-                TARGET_MEMORY -> lifecycleDao.artifactIdsForMemory(targetId)
-                TARGET_EXPERIENCE -> lifecycleDao.artifactIdsForExperience(targetId)
-                TARGET_MESSAGE -> lifecycleDao.artifactIdsForMessage(targetId)
-                TARGET_OPEN_LOOP -> lifecycleDao.artifactIdsForOpenLoop(targetId)
-                TARGET_ATTACHMENT -> lifecycleDao.artifactIdsForAttachment(targetId)
-                TARGET_CANDIDATE -> emptyList()
-                else -> return RepairJobHandlerResult.PermanentFailure("UNKNOWN_REPAIR_TARGET")
-            }
+            artifactIdsForTarget(targetType, targetId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -50,6 +47,47 @@ class DerivedArtifactRepairService(
         return RepairJobHandlerResult.Success
     }
 
+    private fun artifactIdsForTarget(targetType: String, targetId: String): List<String> = when (targetType) {
+        TARGET_ARTIFACT -> listOf(targetId)
+        TARGET_MEMORY -> artifactIdsForMemoryLineage(targetId)
+        TARGET_EXPERIENCE -> artifactIdsForExperienceLineage(targetId)
+        TARGET_MESSAGE -> artifactIdsForMessageLineage(targetId)
+        TARGET_OPEN_LOOP -> lifecycleDao.artifactIdsForOpenLoop(targetId)
+        TARGET_ATTACHMENT -> lifecycleDao.artifactIdsForAttachment(targetId)
+        TARGET_CANDIDATE -> emptyList()
+        else -> error("Unknown repair target")
+    }
+
+    private fun artifactIdsForMemoryLineage(memoryId: String): List<String> {
+        val experienceIds = memoryDao.evidenceForMemory(memoryId).map { it.experienceId }
+        val messageIds = if (experienceIds.isEmpty()) emptyList()
+        else memoryDao.messageIdsForExperiences(experienceIds)
+        val openLoopIds = memoryDao.openLoopIdsForMemories(listOf(memoryId))
+        return buildList {
+            addAll(lifecycleDao.artifactIdsForMemory(memoryId))
+            experienceIds.forEach { addAll(lifecycleDao.artifactIdsForExperience(it)) }
+            messageIds.forEach { addAll(lifecycleDao.artifactIdsForMessage(it)) }
+            openLoopIds.forEach { addAll(lifecycleDao.artifactIdsForOpenLoop(it)) }
+        }
+    }
+
+    private fun artifactIdsForExperienceLineage(experienceId: String): List<String> = buildList {
+        addAll(lifecycleDao.artifactIdsForExperience(experienceId))
+        memoryDao.memoryEvidenceForExperience(experienceId).forEach { evidence ->
+            addAll(lifecycleDao.artifactIdsForMemory(evidence.memoryId))
+        }
+        memoryDao.messageSourcesForExperience(experienceId).forEach { source ->
+            addAll(lifecycleDao.artifactIdsForMessage(source.messageId))
+        }
+    }
+
+    private fun artifactIdsForMessageLineage(messageId: String): List<String> = buildList {
+        addAll(lifecycleDao.artifactIdsForMessage(messageId))
+        memoryDao.canonicalConversationExperiencesForMessage(messageId).forEach { experience ->
+            addAll(artifactIdsForExperienceLineage(experience.id))
+        }
+    }
+
     private suspend fun rebuild(artifactId: String): RepairJobHandlerResult {
         val generation = recallFence.snapshot()
         return try {
@@ -57,7 +95,12 @@ class DerivedArtifactRepairService(
                 database.withTransaction {
                     val artifact = maintenanceDao.derivedArtifact(artifactId)
                         ?: return@withTransaction RepairJobHandlerResult.Success
-                    val projection = buildProjection(artifact)
+                    if (artifact.artifactType != DerivedArtifactType.SEARCH_DOCUMENT) {
+                        return@withTransaction RepairJobHandlerResult.PermanentFailure(
+                            "UNSUPPORTED_ARTIFACT_TYPE_${artifact.artifactType.name}",
+                        )
+                    }
+                    val projection = buildSearchDocument(artifact)
                         ?: return@withTransaction RepairJobHandlerResult.PermanentFailure(
                             "NO_CURRENT_VALID_SOURCES",
                         )
@@ -66,9 +109,8 @@ class DerivedArtifactRepairService(
                     if (artifact.state == DerivedArtifactState.CURRENT &&
                         artifact.artifactHash == hash &&
                         existing?.content == projection
-                    ) {
-                        return@withTransaction RepairJobHandlerResult.Success
-                    }
+                    ) return@withTransaction RepairJobHandlerResult.Success
+
                     val now = clock.now()
                     lifecycleDao.upsertDerivedPayload(
                         DerivedArtifactPayloadEntity(
@@ -78,14 +120,12 @@ class DerivedArtifactRepairService(
                             builtAt = now,
                         ),
                     )
-                    check(
-                        lifecycleDao.finishDerivedRebuild(
-                            artifactId = artifactId,
-                            state = DerivedArtifactState.CURRENT,
-                            sourceRevision = artifact.sourceRevision + 1L,
-                            artifactHash = hash,
-                        ) == 1,
-                    )
+                    check(lifecycleDao.finishDerivedRebuild(
+                        artifactId = artifactId,
+                        state = DerivedArtifactState.CURRENT,
+                        sourceRevision = artifact.sourceRevision + 1L,
+                        artifactHash = hash,
+                    ) == 1)
                     RepairJobHandlerResult.Success
                 }
             }
@@ -98,56 +138,32 @@ class DerivedArtifactRepairService(
         }
     }
 
-    private fun buildProjection(artifact: DerivedArtifactEntity): String? {
-        val memoryIds = lifecycleDao.artifactMemoryDependencies(artifact.id).map { it.memoryId }
-        val experienceIds = lifecycleDao.artifactExperienceDependencies(artifact.id).map { it.experienceId }
-        val messageIds = lifecycleDao.artifactMessageDependencies(artifact.id).map { it.messageId }
-        val openLoopIds = lifecycleDao.artifactOpenLoopDependencies(artifact.id).map { it.openLoopId }
-        val attachmentIds = lifecycleDao.artifactAttachmentDependencies(artifact.id).map { it.attachmentId }
-        if (memoryIds.isEmpty() && experienceIds.isEmpty() && messageIds.isEmpty() &&
-            openLoopIds.isEmpty() && attachmentIds.isEmpty()
-        ) return null
-
-        val memories = memoryIds.map { id ->
-            val memory = memoryDao.memory(id) ?: return null
+    private fun buildSearchDocument(artifact: DerivedArtifactEntity): String? {
+        val memories = lifecycleDao.artifactMemoryDependencies(artifact.id).mapNotNull { dependency ->
+            val memory = memoryDao.memory(dependency.memoryId) ?: return@mapNotNull null
             if (memory.truthState != MemoryTruthState.SUPPORTED ||
                 memory.retentionState == MemoryRetentionState.FORGOTTEN ||
-                memory.lifecycleState != MemoryLifecycleState.VALIDATED ||
-                lifecycleDao.availableEvidence(listOf(id), 1).isEmpty()
-            ) return null
-            memory
+                memory.lifecycleState != MemoryLifecycleState.VALIDATED
+            ) return@mapNotNull null
+            val hasSafeSupport = lifecycleDao.availableEvidence(listOf(memory.id), MAX_EVIDENCE_SCAN)
+                .asSequence()
+                .filter { it.role == EvidenceRole.SUPPORTS }
+                .any { evidence ->
+                    !isEvidenceSuppressedInCurrentTransaction(
+                        maintenanceDao,
+                        evidence.experienceId,
+                        evidence.lineageKey,
+                    )
+                }
+            memory.takeIf { hasSafeSupport }
         }
-        val experiences = experienceIds.map { id ->
-            memoryDao.experience(id)?.takeIf { it.availability == ExperienceAvailability.AVAILABLE }
-                ?: return null
-        }
-        val messages = messageIds.map { lifecycleDao.eligibleArtifactMessage(it) ?: return null }
-        val loops = openLoopIds.map { lifecycleDao.openLoop(it) ?: return null }
-        val attachments = attachmentIds.map { lifecycleDao.eligibleArtifactAttachment(it) ?: return null }
-
+        if (memories.isEmpty()) return null
         return buildString {
             append("format=").append(PAYLOAD_FORMAT_VERSION)
-            append("\ntype=").append(artifact.artifactType.name)
-            memories.sortedBy { it.id }.forEach {
-                append("\nmemory|").append(it.id).append('|').append(it.updatedAt).append('|')
-                    .append(escaped(it.meaning))
-            }
-            experiences.sortedBy { it.id }.forEach {
-                append("\nexperience|").append(it.id).append('|').append(it.occurredAt).append('|')
-                    .append(escaped(it.sourceContent.orEmpty()))
-            }
-            messages.sortedBy { it.id }.forEach {
-                append("\nmessage|").append(it.id).append('|').append(it.updatedAt).append('|')
-                    .append(it.role.name).append('|').append(escaped(it.content))
-            }
-            loops.sortedBy { it.id }.forEach {
-                append("\nopen-loop|").append(it.id).append('|').append(it.updatedAt).append('|')
-                    .append(it.state.name).append('|').append(escaped(it.title)).append('|')
-                    .append(escaped(it.description.orEmpty()))
-            }
-            attachments.sortedBy { it.id }.forEach {
-                append("\nattachment|").append(it.id).append('|').append(it.updatedAt).append('|')
-                    .append(it.contentSha256.orEmpty()).append('|').append(it.mimeType)
+            append("\ntype=SEARCH_DOCUMENT")
+            memories.sortedBy { it.id }.forEach { memory ->
+                append("\nmemory|").append(escaped(memory.id)).append('|')
+                    .append(memory.updatedAt).append('|').append(escaped(memory.meaning))
             }
         }
     }
@@ -165,7 +181,7 @@ class DerivedArtifactRepairService(
         filter { it.isLetterOrDigit() || it == '_' }.ifBlank { "Exception" }.take(40)
 
     companion object {
-        const val PAYLOAD_FORMAT_VERSION = 1
+        const val PAYLOAD_FORMAT_VERSION = 2
         const val TARGET_ARTIFACT = "DERIVED_ARTIFACT"
         const val TARGET_MEMORY = "MEMORY"
         const val TARGET_EXPERIENCE = "EXPERIENCE"
@@ -173,6 +189,7 @@ class DerivedArtifactRepairService(
         const val TARGET_OPEN_LOOP = "OPEN_LOOP"
         const val TARGET_ATTACHMENT = "ATTACHMENT"
         const val TARGET_CANDIDATE = "CANDIDATE_MEMORY"
+        private const val MAX_EVIDENCE_SCAN = 65
     }
 }
 
@@ -184,8 +201,10 @@ class DerivedArtifactRepairHandler(
         service.repair(targetType, targetId)
 }
 
-fun derivedArtifactRepairHandlers(
-    service: DerivedArtifactRepairService,
-): List<RepairJobHandler> = RepairJobType.entries.map { type ->
-    DerivedArtifactRepairHandler(type, service)
-}
+fun derivedArtifactRepairHandlers(service: DerivedArtifactRepairService): List<RepairJobHandler> =
+    listOf(
+        RepairJobType.INVALIDATE_DERIVED,
+        RepairJobType.REBUILD_DERIVED,
+        RepairJobType.PROPAGATE_CORRECTION,
+        RepairJobType.PROPAGATE_DELETION,
+    ).map { type -> DerivedArtifactRepairHandler(type, service) }

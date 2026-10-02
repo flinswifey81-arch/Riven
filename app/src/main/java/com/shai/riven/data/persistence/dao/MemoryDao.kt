@@ -133,6 +133,12 @@ interface MemoryDao {
     fun candidateEvidence(candidateMemoryId: String): List<CandidateMemoryEvidenceEntity>
 
     @Query(
+        "DELETE FROM candidate_memory_evidence " +
+            "WHERE candidate_memory_id = :candidateMemoryId AND experience_id = :experienceId",
+    )
+    fun deleteCandidateEvidence(candidateMemoryId: String, experienceId: String): Int
+
+    @Query(
         """
         SELECT candidate_memory_evidence.* FROM candidate_memory_evidence
         INNER JOIN candidate_memories
@@ -196,6 +202,39 @@ interface MemoryDao {
     )
     fun directRelationshipsForMemory(memoryId: String): List<MemoryRelationshipEntity>
 
+    @Query(
+        """
+        SELECT DISTINCT memories.* FROM memories
+        INNER JOIN memory_relationships
+            ON memory_relationships.source_memory_id = memories.memory_id
+        WHERE memory_relationships.target_memory_id IN (:sourceMemoryIds)
+          AND memory_relationships.relationship_type = 'DERIVED_FROM'
+          AND memories.epistemic_basis = 'CONSOLIDATION'
+        ORDER BY memories.memory_id
+        LIMIT :limit
+        """,
+    )
+    fun consolidatedDependentsOf(sourceMemoryIds: List<String>, limit: Int): List<MemoryEntity>
+
+    @Query(
+        "DELETE FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId",
+    )
+    fun deleteMemoryEvidence(memoryId: String, experienceId: String): Int
+
+    @Query(
+        """
+        DELETE FROM memory_relationships
+        WHERE source_memory_id = :sourceMemoryId
+          AND target_memory_id = :targetMemoryId
+          AND relationship_type = :relationshipType
+        """,
+    )
+    fun deleteMemoryRelationship(
+        sourceMemoryId: String,
+        targetMemoryId: String,
+        relationshipType: MemoryRelationshipType,
+    ): Int
+
     @Query("SELECT COUNT(*) FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId")
     fun memoryEvidenceExists(memoryId: String, experienceId: String): Int
 
@@ -256,6 +295,8 @@ interface MemoryDao {
         FROM memories
         LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
         WHERE memories.memory_id > :afterMemoryId
+          AND memories.truth_state != 'UNSUPPORTED'
+          AND memories.lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -301,6 +342,8 @@ interface MemoryDao {
         FROM memories
         LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
         WHERE memories.memory_id IN (:memoryIds)
+          AND memories.truth_state != 'UNSUPPORTED'
+          AND memories.lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -333,6 +376,8 @@ interface MemoryDao {
                sensitivity
         FROM memories
         WHERE memory_id > :afterMemoryId
+          AND truth_state != 'UNSUPPORTED'
+          AND lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -363,6 +408,8 @@ interface MemoryDao {
                sensitivity
         FROM memories
         WHERE memory_id IN (:memoryIds)
+          AND truth_state != 'UNSUPPORTED'
+          AND lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences

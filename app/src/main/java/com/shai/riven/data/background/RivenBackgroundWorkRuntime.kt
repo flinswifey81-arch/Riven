@@ -44,7 +44,8 @@ class RivenBackgroundWorkRuntime private constructor(
                     attachmentService = attachmentService,
                 )
                 val repairRegistry = RepairJobHandlerRegistry(
-                    derivedArtifactRepairHandlers(DerivedArtifactRepairService(database)),
+                    derivedArtifactRepairHandlers(DerivedArtifactRepairService(database)) +
+                        ProvenanceRepairHandler(ProvenanceRepairService(database)),
                 )
                 val repairRunner = RepairJobRunner(
                     database = database,
@@ -66,6 +67,10 @@ class RivenBackgroundWorkRuntime private constructor(
                         httpClient = HttpUrlConnectionOpenRouterHttpClient(),
                         lockedPersonalityCanon = LockedRivenPersonalityContextSource(context)::verifiedCanon,
                     ),
+                    scheduleShortWindowSweep = {
+                        scheduler.enqueueAutomaticMemoryShortWindowSweep()
+                        Unit
+                    },
                 )
                 val automaticMemorySweep = AutomaticMemorySweepService(automaticMemoryQueue)
                 val memoryLifecycleSweep = MemoryLifecycleSweepService(MemoryAgingService(database))

@@ -17,6 +17,9 @@ import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
+import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.MemoryLifecycleState
+import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.OpenLoopAuditAction
 import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobState
@@ -426,6 +429,21 @@ class SafeDeleteService(
                 relationship.targetMemoryId
             } else {
                 relationship.sourceMemoryId
+            }
+            if (relationship.targetMemoryId == memoryId &&
+                relationship.relationshipType == MemoryRelationshipType.DERIVED_FROM
+            ) {
+                database.memoryDao().memory(relationship.sourceMemoryId)
+                    ?.takeIf { it.epistemicBasis == EpistemicBasis.CONSOLIDATION }
+                    ?.let { dependent ->
+                        database.memoryDao().updateMemory(
+                            dependent.copy(
+                                lifecycleState = MemoryLifecycleState.REASSESSMENT_PENDING,
+                                updatedAt = accumulator.occurredAt,
+                            ),
+                        )
+                        database.memoryLifecycleDao().deleteAccessibility(dependent.id)
+                    }
             }
             dao.deleteMemoryRelationship(relationship)
             if (neighborId != memoryId && dao.memory(neighborId) != null) {

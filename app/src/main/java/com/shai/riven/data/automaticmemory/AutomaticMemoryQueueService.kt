@@ -107,7 +107,6 @@ class AutomaticMemoryQueueService(
 
         val jobs = transaction.jobs
         val failed = schedule(jobs)
-        scheduler.enqueueAutomaticMemoryShortWindowSweep()
         return AutomaticMemoryEnqueueResult.Enqueued(
             jobIds = jobs.map { it.id },
             schedulingFailedJobIds = failed,

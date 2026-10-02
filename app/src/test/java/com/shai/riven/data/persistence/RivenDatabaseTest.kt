@@ -123,6 +123,7 @@ class RivenDatabaseTest {
             "conversation_runs",
             "automatic_memory_jobs",
             "memory_accessibility",
+            "memory_aging_sweep_checkpoints",
             "open_loop_pass_checkpoints",
             "consolidation_checkpoints",
             "derived_artifact_payloads",
@@ -155,7 +156,7 @@ class RivenDatabaseTest {
             .query("SELECT identity_hash FROM room_master_table WHERE id = 42")
             .use { cursor ->
                 assertTrue(cursor.moveToFirst())
-                assertEquals("42c22b855f3fd2f73ebac1c0dc5a5f4b", cursor.getString(0))
+                assertEquals("14a161706b91d1f944d0dfb05e68c708", cursor.getString(0))
                 assertFalse(cursor.moveToNext())
             }
     }

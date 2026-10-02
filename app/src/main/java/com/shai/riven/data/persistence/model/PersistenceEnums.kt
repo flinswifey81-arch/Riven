@@ -199,6 +199,7 @@ enum class MemoryTruthState {
     SUPPORTED,
     DISPUTED,
     CORRECTED_FALSE,
+    UNSUPPORTED,
 }
 
 enum class MemoryRetentionState {
@@ -218,6 +219,7 @@ enum class MemoryLifecycleState {
     VALIDATED,
     SUPERSEDED,
     RESOLVED,
+    REASSESSMENT_PENDING,
 }
 
 enum class TemporalState {

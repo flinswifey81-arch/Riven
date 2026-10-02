@@ -22,6 +22,7 @@ data class OpenLoopLifecycleItem(
     val description: String?,
     val state: OpenLoopState,
     val dueAt: Long?,
+    val sensitivity: SensitivityLevel,
     val updatedAt: Long,
 )
 
@@ -53,13 +54,17 @@ data class ConsolidationSourceMemory(
     val meaning: String,
     val certainty: MemoryCertainty,
     val sensitivity: SensitivityLevel,
+    /** AVAILABLE SUPPORTS evidence only; contradictory/qualifying rows are never promoted. */
     val sourceExperienceIds: List<String>,
+    /** Exact role/basis/certainty/lineage revision of all AVAILABLE source evidence. */
+    val evidenceFingerprint: String,
     val updatedAt: Long,
 )
 
 data class ConsolidationSnapshot(
     val corpusFingerprint: String,
     val sources: List<ConsolidationSourceMemory>,
+    val processedSourceSets: List<List<String>> = emptyList(),
 )
 
 data class ConsolidationEntityLink(

@@ -36,8 +36,7 @@ class OpenLoopLifecycleService(
                 OpenLoopLifecycleSnapshot(
                     attention = actionable.assessment,
                     grounding = actionable.snapshot,
-                    currentLoops = lifecycleDao.unresolvedOpenLoops(NONTERMINAL_STATES, MAX_OPEN_LOOPS)
-                        .map { it.toLifecycleItem() },
+                    currentLoops = relevantCurrentLoops(actionable.snapshot),
                 )
             }
         } catch (abort: ImmediateAttentionAbort) {
@@ -71,8 +70,7 @@ class OpenLoopLifecycleService(
         return try {
             database.withTransaction {
                 grounding.revalidateActionableForwardInCurrentTransaction(snapshot.attention, snapshot.grounding)
-                val currentLoops = lifecycleDao.unresolvedOpenLoops(NONTERMINAL_STATES, MAX_OPEN_LOOPS)
-                    .map { it.toLifecycleItem() }
+                val currentLoops = relevantCurrentLoops(snapshot.grounding)
                 val currentFingerprint = fingerprint(snapshot.copy(currentLoops = currentLoops).canonicalInput())
                 if (currentFingerprint != inputFingerprint) {
                     return@withTransaction OpenLoopLifecycleResult.Failure("OPEN_LOOP_STALE_INPUT", true)
@@ -234,15 +232,84 @@ class OpenLoopLifecycleService(
         description = description,
         state = state,
         dueAt = dueAt,
+        sensitivity = sensitivity,
         updatedAt = updatedAt,
     )
+
+    /**
+     * Bounded lexical/entity lookup reaches beyond the former newest-64 window. Sensitive loop
+     * details enter model context only when the current source is at least as sensitive and the
+     * loop is directly relevant.
+     */
+    private fun relevantCurrentLoops(
+        source: com.shai.riven.data.attention.ImmediateAttentionSnapshot,
+    ): List<OpenLoopLifecycleItem> {
+        val loops = mutableListOf<OpenLoopEntity>()
+        var cursor = ""
+        while (loops.size < MAX_OPEN_LOOP_LOOKUP) {
+            val page = lifecycleDao.unresolvedOpenLoopPage(
+                NONTERMINAL_STATES,
+                cursor,
+                minOf(OPEN_LOOP_LOOKUP_PAGE_SIZE, MAX_OPEN_LOOP_LOOKUP - loops.size),
+            )
+            if (page.isEmpty()) break
+            loops += page
+            cursor = page.last().id
+            if (page.size < OPEN_LOOP_LOOKUP_PAGE_SIZE) break
+        }
+        if (loops.isEmpty()) return emptyList()
+        val entityIds = source.groundedEntityLinks.mapTo(hashSetOf()) { it.entityId }
+        val links = openLoopDao.conversationalContextEntityLinks(
+            loops.map(OpenLoopEntity::id),
+            MAX_OPEN_LOOP_STRUCTURAL_ROWS + 1,
+        )
+        check(links.size <= MAX_OPEN_LOOP_STRUCTURAL_ROWS) { "Open-loop structural capacity exceeded" }
+        val entitiesByLoop = links.groupBy { it.openLoopId }
+            .mapValues { (_, values) -> values.mapTo(hashSetOf()) { it.entityId } }
+        val queryText = buildString {
+            append(source.sourceContent.orEmpty().take(MAX_OPEN_LOOP_QUERY_CHARS))
+            source.followingActiveContext.forEach { message ->
+                append(' ').append(message.content.take(MAX_OPEN_LOOP_QUERY_CHARS - length.coerceAtMost(MAX_OPEN_LOOP_QUERY_CHARS)))
+                if (length >= MAX_OPEN_LOOP_QUERY_CHARS) return@forEach
+            }
+        }.take(MAX_OPEN_LOOP_QUERY_CHARS)
+        val queryTokens = lexicalTokens(queryText)
+        val relevant = loops.mapNotNull { loop ->
+            val directlyNamed = queryText.contains(loop.id, ignoreCase = true)
+            val loopTokens = lexicalTokens(loop.title + " " + loop.description.orEmpty())
+            val tokenOverlap = queryTokens.intersect(loopTokens).size
+            val entityOverlap = entityIds.intersect(entitiesByLoop[loop.id].orEmpty()).size
+            val isRelevant = directlyNamed || tokenOverlap > 0 || entityOverlap > 0
+            if (!isRelevant) return@mapNotNull null
+            if (loop.sensitivity.ordinal > source.sensitivity.ordinal) return@mapNotNull null
+            RankedLoop(loop, (if (directlyNamed) 1_000 else 0) + tokenOverlap * 10 + entityOverlap * 3)
+        }.sortedWith(compareByDescending<RankedLoop> { it.score }
+            .thenByDescending { it.loop.updatedAt }
+            .thenBy { it.loop.id })
+        val selectedIds = relevant.mapTo(linkedSetOf()) { it.loop.id }
+        val safeRecent = loops.asSequence()
+            .filter { it.sensitivity == com.shai.riven.data.persistence.model.SensitivityLevel.STANDARD }
+            .filterNot { it.id in selectedIds }
+            .sortedWith(compareByDescending<OpenLoopEntity> { it.updatedAt }.thenBy { it.id })
+            .take(MAX_OPEN_LOOPS)
+            .toList()
+        return (relevant.map { it.loop } + safeRecent)
+            .distinctBy(OpenLoopEntity::id)
+            .take(MAX_OPEN_LOOPS)
+            .map { it.toLifecycleItem() }
+    }
+
+    private fun lexicalTokens(value: String): Set<String> = TOKEN_PATTERN.findAll(value)
+        .take(MAX_OPEN_LOOP_QUERY_TERMS)
+        .map { it.value.lowercase() }
+        .toSet()
 
     private fun OpenLoopLifecycleSnapshot.canonicalInput(): String = buildString {
         append(attention.experienceId).append('|').append(attention.revision).append('|')
         append(grounding.timelineRevision).append('|').append(grounding.sourceContent).append('|')
         append(grounding.followingActiveContext.joinToString("\u001f") { it.messageId + ":" + it.content }).append('|')
         append(currentLoops.sortedBy { it.openLoopId }.joinToString("\u001e") {
-            "${it.openLoopId}:${it.state}:${it.dueAt}:${it.updatedAt}:${it.title}:${it.description}"
+            "${it.openLoopId}:${it.state}:${it.dueAt}:${it.sensitivity}:${it.updatedAt}:${it.title}:${it.description}"
         })
     }
 
@@ -252,9 +319,17 @@ class OpenLoopLifecycleService(
 
     private companion object {
         const val MAX_OPEN_LOOPS = 64
+        const val MAX_OPEN_LOOP_LOOKUP = 512
+        const val OPEN_LOOP_LOOKUP_PAGE_SIZE = 64
+        const val MAX_OPEN_LOOP_STRUCTURAL_ROWS = 4_096
+        const val MAX_OPEN_LOOP_QUERY_CHARS = 8_192
+        const val MAX_OPEN_LOOP_QUERY_TERMS = 64
         const val MAX_TITLE_CHARS = 256
         const val MAX_DESCRIPTION_CHARS = 2_048
         val TERMINAL_STATES = setOf(OpenLoopState.COMPLETED, OpenLoopState.ABANDONED, OpenLoopState.EXPIRED)
         val NONTERMINAL_STATES = OpenLoopState.entries.filterNot(TERMINAL_STATES::contains)
+        val TOKEN_PATTERN = Regex("[\\p{L}\\p{N}_-]{2,64}")
     }
+
+    private data class RankedLoop(val loop: OpenLoopEntity, val score: Int)
 }

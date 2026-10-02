@@ -339,7 +339,15 @@ class OpenRouterAutomaticMemoryModelTest {
                 ),
                 grounding = snapshot(),
                 currentLoops = listOf(
-                    OpenLoopLifecycleItem("loop-1", "Send draft", null, OpenLoopState.ACTIVE, null, 1),
+                    OpenLoopLifecycleItem(
+                        "loop-1",
+                        "Send draft",
+                        null,
+                        OpenLoopState.ACTIVE,
+                        null,
+                        SensitivityLevel.STANDARD,
+                        1,
+                    ),
                 ),
             ),
         )
@@ -378,11 +386,11 @@ class OpenRouterAutomaticMemoryModelTest {
             sources = listOf(
                 ConsolidationSourceMemory(
                     "m1", MemoryKind.SEMANTIC, MemoryScope.SHAI, "First", MemoryCertainty.CERTAIN,
-                    SensitivityLevel.STANDARD, listOf("e1"), 1,
+                    SensitivityLevel.STANDARD, listOf("e1"), "evidence-1", 1,
                 ),
                 ConsolidationSourceMemory(
                     "m2", MemoryKind.SEMANTIC, MemoryScope.SHAI, "Second", MemoryCertainty.PROBABLE,
-                    SensitivityLevel.STANDARD, listOf("e2"), 2,
+                    SensitivityLevel.STANDARD, listOf("e2"), "evidence-2", 2,
                 ),
             ),
         )

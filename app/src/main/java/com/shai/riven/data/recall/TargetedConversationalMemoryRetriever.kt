@@ -456,6 +456,8 @@ private class ConversationalDocumentBuilder private constructor(
     companion object {
         fun create(row: ConversationalRecallMemoryRow, limits: ConversationalRecallLimits): ConversationalDocumentBuilder? {
             if (row.truthState == MemoryTruthState.CORRECTED_FALSE ||
+                row.truthState == MemoryTruthState.UNSUPPORTED ||
+                row.lifecycleState == MemoryLifecycleState.REASSESSMENT_PENDING ||
                 row.retentionState == MemoryRetentionState.FORGOTTEN
             ) return null
             if (row.meaningLength > limits.maxMeaningChars || row.meaning.length > limits.maxMeaningChars) {
@@ -634,7 +636,11 @@ private class ConversationalRecallIndex(
         ): Boolean {
             val row = document.metadata.row
             val cues = query.cues
-            if (row.truthState == MemoryTruthState.CORRECTED_FALSE || row.retentionState == MemoryRetentionState.FORGOTTEN) {
+            if (row.truthState == MemoryTruthState.CORRECTED_FALSE ||
+                row.truthState == MemoryTruthState.UNSUPPORTED ||
+                row.lifecycleState == MemoryLifecycleState.REASSESSMENT_PENDING ||
+                row.retentionState == MemoryRetentionState.FORGOTTEN
+            ) {
                 return false
             }
             if ((row.truthState == MemoryTruthState.DISPUTED || row.certainty == MemoryCertainty.DISPUTED) &&

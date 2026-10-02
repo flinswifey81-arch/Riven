@@ -346,6 +346,22 @@ class MemoryTransactionService(
             auditAction = MemoryAuditAction.DORMANT,
         )
 
+    internal fun moveDormantInCurrentTransaction(
+        input: MemoryStateTransitionInput,
+        mutation: ValidationRecallMutationToken,
+    ): MemoryWriteResult = executeCanonicalInCurrentTransaction(
+        MemoryWriteOperation.MOVE_DORMANT,
+        mutation,
+    ) {
+        changeRetentionOrThrow(
+            input = input,
+            operation = MemoryWriteOperation.MOVE_DORMANT,
+            requiredState = MemoryRetentionState.ACTIVE,
+            targetState = MemoryRetentionState.DORMANT,
+            auditAction = MemoryAuditAction.DORMANT,
+        )
+    }
+
     suspend fun reactivate(input: MemoryStateTransitionInput): MemoryWriteResult =
         changeRetention(
             input = input,
@@ -393,8 +409,12 @@ class MemoryTransactionService(
                 toRetentionState = forgotten.retentionState,
                 occurredAt = input.occurredAt,
             )
-            invalidateDerived(setOf(memory.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-            MemoryWriteResult.Success(MemoryWriteOperation.FORGET, setOf(memory.id))
+            val dependents = invalidateDerived(
+                setOf(memory.id),
+                input.occurredAt,
+                RepairJobType.INVALIDATE_DERIVED,
+            )
+            MemoryWriteResult.Success(MemoryWriteOperation.FORGET, setOf(memory.id) + dependents)
         }
 
     private suspend fun changeRetention(
@@ -404,6 +424,16 @@ class MemoryTransactionService(
         targetState: MemoryRetentionState,
         auditAction: MemoryAuditAction,
     ): MemoryWriteResult = execute(operation) {
+        changeRetentionOrThrow(input, operation, requiredState, targetState, auditAction)
+    }
+
+    private fun changeRetentionOrThrow(
+        input: MemoryStateTransitionInput,
+        operation: MemoryWriteOperation,
+        requiredState: MemoryRetentionState,
+        targetState: MemoryRetentionState,
+        auditAction: MemoryAuditAction,
+    ): MemoryWriteResult.Success {
         val memory = requireMemory(input.memoryId)
         requireTriggeringExperience(input.triggeringExperienceId)
         if (memory.retentionState != requiredState) {
@@ -442,7 +472,7 @@ class MemoryTransactionService(
             toRetentionState = changed.retentionState,
             occurredAt = input.occurredAt,
         )
-        MemoryWriteResult.Success(operation, setOf(memory.id))
+        return MemoryWriteResult.Success(operation, setOf(memory.id))
     }
 
     private fun admitCandidateOrThrow(input: AdmitCandidateMemoryInput): MemoryWriteResult.Success {
@@ -599,8 +629,11 @@ class MemoryTransactionService(
             toLifecycleState = historical.lifecycleState,
             occurredAt = input.occurredAt,
         )
-        invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-        return MemoryWriteResult.Success(MemoryWriteOperation.SUPERSEDE, setOf(old.id, replacement.memoryId))
+        val dependents = invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
+        return MemoryWriteResult.Success(
+            MemoryWriteOperation.SUPERSEDE,
+            setOf(old.id, replacement.memoryId) + dependents,
+        )
     }
 
     private fun refineOrThrow(input: RefineMemoryInput): MemoryWriteResult.Success {
@@ -638,8 +671,11 @@ class MemoryTransactionService(
             toLifecycleState = broaderAfterRefinement.lifecycleState,
             occurredAt = input.occurredAt,
         )
-        invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-        return MemoryWriteResult.Success(MemoryWriteOperation.REFINE, setOf(old.id, refinement.memoryId))
+        val dependents = invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
+        return MemoryWriteResult.Success(
+            MemoryWriteOperation.REFINE,
+            setOf(old.id, refinement.memoryId) + dependents,
+        )
     }
 
     private fun disputeOrThrow(input: DisputeMemoryInput): MemoryWriteResult.Success {
@@ -697,8 +733,8 @@ class MemoryTransactionService(
             )
         }
         val affectedIds = memories.mapTo(linkedSetOf()) { it.id }
-        invalidateDerived(affectedIds, input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
-        return MemoryWriteResult.Success(MemoryWriteOperation.DISPUTE, affectedIds)
+        val dependents = invalidateDerived(affectedIds, input.occurredAt, RepairJobType.INVALIDATE_DERIVED)
+        return MemoryWriteResult.Success(MemoryWriteOperation.DISPUTE, affectedIds + dependents)
     }
 
     private fun insertValidatedMemory(
@@ -829,10 +865,14 @@ class MemoryTransactionService(
             toTruthState = corrected.truthState,
             occurredAt = input.occurredAt,
         )
-        invalidateDerived(setOf(old.id), input.occurredAt, RepairJobType.PROPAGATE_CORRECTION)
+        val dependents = invalidateDerived(
+            setOf(old.id),
+            input.occurredAt,
+            RepairJobType.PROPAGATE_CORRECTION,
+        )
         return MemoryWriteResult.Success(
             MemoryWriteOperation.CORRECT,
-            setOf(old.id, replacement.memoryId),
+            setOf(old.id, replacement.memoryId) + dependents,
         )
     }
 
@@ -873,8 +913,64 @@ class MemoryTransactionService(
         memoryIds: Set<String>,
         occurredAt: Long,
         repairJobType: RepairJobType,
-    ) {
-        val canonicalMemoryIds = memoryIds.toList()
+    ): Set<String> {
+        val canonicalMemoryIds = memoryIds.sorted()
+        invalidateArtifactLineage(canonicalMemoryIds, occurredAt)
+        canonicalMemoryIds.forEach { memoryId ->
+            queueRepair(repairJobType, REPAIR_TARGET_MEMORY, memoryId, occurredAt)
+        }
+
+        val pendingDependents = linkedSetOf<String>()
+        var frontier = canonicalMemoryIds
+        var depth = 0
+        while (frontier.isNotEmpty() && depth < MAX_PROVENANCE_PROPAGATION_DEPTH) {
+            val remaining = MAX_PROVENANCE_DEPENDENTS - pendingDependents.size
+            check(remaining > 0) { "Provenance dependency capacity exceeded" }
+            val candidates = memoryDao.consolidatedDependentsOf(frontier, remaining + 1)
+                .filterNot { it.id in memoryIds || it.id in pendingDependents }
+            check(candidates.size <= remaining) { "Provenance dependency capacity exceeded" }
+            val next = candidates
+            if (next.isEmpty()) break
+            next.forEach { dependent ->
+                val pending = dependent.copy(
+                    lifecycleState = MemoryLifecycleState.REASSESSMENT_PENDING,
+                    updatedAt = occurredAt,
+                )
+                memoryDao.updateMemory(pending)
+                lifecycleDao.deleteAccessibility(dependent.id)
+                insertAudit(
+                    memoryId = dependent.id,
+                    action = MemoryAuditAction.STATE_CHANGED,
+                    triggeringExperienceId = null,
+                    fromLifecycleState = dependent.lifecycleState,
+                    toLifecycleState = pending.lifecycleState,
+                    occurredAt = occurredAt,
+                )
+                pendingDependents += dependent.id
+                queueRepair(
+                    RepairJobType.REASSESS_PROVENANCE,
+                    REPAIR_TARGET_MEMORY,
+                    dependent.id,
+                    occurredAt,
+                )
+            }
+            frontier = next.map { it.id }
+            depth += 1
+        }
+        if (frontier.isNotEmpty() && depth == MAX_PROVENANCE_PROPAGATION_DEPTH) {
+            val beyondLimit = memoryDao.consolidatedDependentsOf(frontier, 1)
+                .any { it.id !in memoryIds && it.id !in pendingDependents }
+            check(!beyondLimit) { "Provenance dependency depth exceeded" }
+        }
+        if (pendingDependents.isNotEmpty()) {
+            invalidateArtifactLineage(pendingDependents.toList(), occurredAt)
+        }
+        return pendingDependents
+    }
+
+    private fun invalidateArtifactLineage(memoryIds: List<String>, occurredAt: Long) {
+        if (memoryIds.isEmpty()) return
+        val canonicalMemoryIds = memoryIds.distinct().sorted()
         val experienceIds = memoryDao.experienceIdsForMemories(canonicalMemoryIds)
         val messageIds = if (experienceIds.isEmpty()) {
             emptyList()
@@ -882,6 +978,12 @@ class MemoryTransactionService(
             memoryDao.messageIdsForExperiences(experienceIds)
         }
         val openLoopIds = memoryDao.openLoopIdsForMemories(canonicalMemoryIds)
+        val artifactIds = buildList {
+            canonicalMemoryIds.forEach { addAll(lifecycleDao.artifactIdsForMemory(it)) }
+            experienceIds.forEach { addAll(lifecycleDao.artifactIdsForExperience(it)) }
+            messageIds.forEach { addAll(lifecycleDao.artifactIdsForMessage(it)) }
+            openLoopIds.forEach { addAll(lifecycleDao.artifactIdsForOpenLoop(it)) }
+        }.distinct().sorted()
         maintenanceDao.markMemoryDerivedArtifacts(
             memoryIds = canonicalMemoryIds,
             state = DerivedArtifactState.STALE,
@@ -912,20 +1014,34 @@ class MemoryTransactionService(
             )
             lifecycleDao.deleteDerivedPayloadsForOpenLoops(openLoopIds)
         }
-        memoryIds.forEach { memoryId ->
-            maintenanceDao.insertRepairJob(
-                RepairJobEntity(
-                    id = idGenerator.nextId(),
-                    jobType = repairJobType,
-                    state = RepairJobState.PENDING,
-                    targetType = REPAIR_TARGET_MEMORY,
-                    targetId = memoryId,
-                    attemptCount = 0,
-                    createdAt = occurredAt,
-                    updatedAt = occurredAt,
-                ),
+        artifactIds.forEach { artifactId ->
+            queueRepair(
+                RepairJobType.REBUILD_DERIVED,
+                REPAIR_TARGET_DERIVED_ARTIFACT,
+                artifactId,
+                occurredAt,
             )
         }
+    }
+
+    private fun queueRepair(
+        type: RepairJobType,
+        targetType: String,
+        targetId: String,
+        occurredAt: Long,
+    ) {
+        maintenanceDao.insertRepairJob(
+            RepairJobEntity(
+                id = idGenerator.nextId(),
+                jobType = type,
+                state = RepairJobState.PENDING,
+                targetType = targetType,
+                targetId = targetId,
+                attemptCount = 0,
+                createdAt = occurredAt,
+                updatedAt = occurredAt,
+            ),
+        )
     }
 
     private fun requireMemory(memoryId: String): MemoryEntity =
@@ -944,8 +1060,10 @@ class MemoryTransactionService(
     private fun requireMutableUnderstanding(memory: MemoryEntity, operation: MemoryWriteOperation) {
         if (
             memory.truthState == MemoryTruthState.CORRECTED_FALSE ||
+            memory.truthState == MemoryTruthState.UNSUPPORTED ||
             memory.retentionState == MemoryRetentionState.FORGOTTEN ||
-            memory.lifecycleState == MemoryLifecycleState.SUPERSEDED
+            memory.lifecycleState == MemoryLifecycleState.SUPERSEDED ||
+            memory.lifecycleState == MemoryLifecycleState.REASSESSMENT_PENDING
         ) {
             abort(
                 MemoryWriteError.InvalidTarget(
@@ -1071,6 +1189,9 @@ class MemoryTransactionService(
 
     private companion object {
         const val REPAIR_TARGET_MEMORY = "MEMORY"
+        const val REPAIR_TARGET_DERIVED_ARTIFACT = "DERIVED_ARTIFACT"
+        const val MAX_PROVENANCE_PROPAGATION_DEPTH = 8
+        const val MAX_PROVENANCE_DEPENDENTS = 128
         val ALLOWED_CANDIDATE_CREATION_STATES = setOf(
             CandidateMemoryState.PENDING_CONTEXT,
             CandidateMemoryState.TENTATIVE,

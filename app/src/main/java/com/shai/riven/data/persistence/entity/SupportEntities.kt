@@ -240,8 +240,9 @@ data class OpenLoopPassCheckpointEntity(
 @Entity(
     tableName = "consolidation_checkpoints",
     indices = [
-        Index(value = ["corpus_fingerprint"], unique = true),
-        Index(value = ["source_set_hash"], unique = true),
+        Index(value = ["corpus_fingerprint"]),
+        Index(value = ["source_set_hash"]),
+        Index(value = ["corpus_fingerprint", "source_set_hash"], unique = true),
     ],
 )
 data class ConsolidationCheckpointEntity(
@@ -252,12 +253,28 @@ data class ConsolidationCheckpointEntity(
     val corpusFingerprint: String,
     @ColumnInfo(name = "source_set_hash")
     val sourceSetHash: String?,
+    @ColumnInfo(name = "source_memory_ids")
+    val sourceMemoryIds: String?,
     @ColumnInfo(name = "result_memory_id")
     val resultMemoryId: String?,
     @ColumnInfo(name = "profile_id")
     val profileId: String,
     @ColumnInfo(name = "created_at")
     val createdAt: Long,
+)
+
+/** Durable keyset cursor for one bounded, restart-resumable aging pass. */
+@Entity(tableName = "memory_aging_sweep_checkpoints")
+data class MemoryAgingSweepCheckpointEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "checkpoint_id")
+    val id: String,
+    @ColumnInfo(name = "sweep_started_at")
+    val sweepStartedAt: Long,
+    @ColumnInfo(name = "after_memory_id")
+    val afterMemoryId: String,
+    @ColumnInfo(name = "updated_at")
+    val updatedAt: Long,
 )
 
 /** Deterministic, rebuildable accessibility metadata for one canonical Memory. */

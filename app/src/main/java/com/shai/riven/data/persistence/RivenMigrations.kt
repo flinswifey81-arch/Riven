@@ -489,6 +489,7 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
                 `checkpoint_id` TEXT NOT NULL,
                 `corpus_fingerprint` TEXT NOT NULL,
                 `source_set_hash` TEXT,
+                `source_memory_ids` TEXT,
                 `result_memory_id` TEXT,
                 `profile_id` TEXT NOT NULL,
                 `created_at` INTEGER NOT NULL,
@@ -497,12 +498,28 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
             """.trimIndent(),
         )
         db.execSQL(
-            "CREATE UNIQUE INDEX IF NOT EXISTS `index_consolidation_checkpoints_corpus_fingerprint` " +
+            "CREATE INDEX IF NOT EXISTS `index_consolidation_checkpoints_corpus_fingerprint` " +
                 "ON `consolidation_checkpoints` (`corpus_fingerprint`)",
         )
         db.execSQL(
-            "CREATE UNIQUE INDEX IF NOT EXISTS `index_consolidation_checkpoints_source_set_hash` " +
+            "CREATE INDEX IF NOT EXISTS `index_consolidation_checkpoints_source_set_hash` " +
                 "ON `consolidation_checkpoints` (`source_set_hash`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                "`index_consolidation_checkpoints_corpus_fingerprint_source_set_hash` " +
+                "ON `consolidation_checkpoints` (`corpus_fingerprint`, `source_set_hash`)",
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `memory_aging_sweep_checkpoints` (
+                `checkpoint_id` TEXT NOT NULL,
+                `sweep_started_at` INTEGER NOT NULL,
+                `after_memory_id` TEXT NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`checkpoint_id`)
+            )
+            """.trimIndent(),
         )
         db.execSQL(
             """

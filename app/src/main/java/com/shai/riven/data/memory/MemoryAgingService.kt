@@ -3,6 +3,7 @@ package com.shai.riven.data.memory
 import androidx.room.withTransaction
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
+import com.shai.riven.data.persistence.entity.MemoryAgingSweepCheckpointEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
@@ -19,12 +20,15 @@ data class MemoryAgingSweepResult(
     val hasMore: Boolean,
 )
 
+/** Bounded, keyset-paged aging whose durable cursor survives worker/process restarts. */
 class MemoryAgingService(
     private val database: RivenDatabase,
     private val clock: () -> Long = System::currentTimeMillis,
     private val batchLimit: Int = DEFAULT_BATCH_LIMIT,
+    private val beforeEvaluate: suspend (String) -> Unit = {},
 ) {
     private val lifecycleDao = database.memoryLifecycleDao()
+    private val memoryDao = database.memoryDao()
     private val memoryTransactions = MemoryTransactionService(database)
     private val recallFence = database.validationRecallCorpusFence()
 
@@ -33,68 +37,102 @@ class MemoryAgingService(
     }
 
     suspend fun sweep(): MemoryAgingSweepResult {
-        val now = clock()
-        var evaluated = 0
+        val checkpoint = database.withTransaction {
+            val now = clock()
+            lifecycleDao.insertAgingSweepCheckpoint(
+                MemoryAgingSweepCheckpointEntity(
+                    id = CHECKPOINT_ID,
+                    sweepStartedAt = now,
+                    afterMemoryId = "",
+                    updatedAt = now,
+                ),
+            )
+            checkNotNull(lifecycleDao.agingSweepCheckpoint(CHECKPOINT_ID))
+        }
+        val ids = database.withTransaction {
+            lifecycleDao.agingMemoryIds(checkpoint.afterMemoryId, batchLimit + 1)
+        }
+        val selected = ids.take(batchLimit)
         var dormant = 0
-        while (evaluated < batchLimit) {
-            val remaining = batchLimit - evaluated
-            val page = database.withTransaction {
-                lifecycleDao.agingMemories(now, minOf(PAGE_SIZE, remaining))
+        selected.forEach { memoryId ->
+            beforeEvaluate(memoryId)
+            if (ageOne(memoryId, checkpoint.sweepStartedAt).becameDormant) dormant += 1
+        }
+
+        val hasMore = ids.size > batchLimit
+        val checkpointChanged = database.withTransaction {
+            if (hasMore) {
+                lifecycleDao.advanceAgingSweepCheckpoint(
+                    checkpointId = CHECKPOINT_ID,
+                    sweepStartedAt = checkpoint.sweepStartedAt,
+                    expectedAfterMemoryId = checkpoint.afterMemoryId,
+                    nextAfterMemoryId = selected.last(),
+                    updatedAt = clock(),
+                )
+            } else {
+                lifecycleDao.finishAgingSweepCheckpoint(
+                    checkpointId = CHECKPOINT_ID,
+                    sweepStartedAt = checkpoint.sweepStartedAt,
+                    expectedAfterMemoryId = checkpoint.afterMemoryId,
+                )
             }
-            if (page.isEmpty()) break
-            for (memory in page) {
-                val decision = decide(memory, now)
-                if (decision.band == MemoryAccessibilityBand.DORMANT &&
-                    memory.retentionState == MemoryRetentionState.ACTIVE
-                ) {
-                    when (memoryTransactions.moveDormant(MemoryStateTransitionInput(memory.id, now))) {
-                        is MemoryWriteResult.Success -> dormant += 1
-                        is MemoryWriteResult.Failure -> Unit
-                    }
-                }
-                val previousBand = lifecycleDao.accessibility(memory.id)?.band
+        }
+        return MemoryAgingSweepResult(
+            evaluatedCount = selected.size,
+            dormantCount = dormant,
+            // A concurrent runner that won the cursor CAS owns the continuation.
+            hasMore = hasMore || checkpointChanged != 1,
+        )
+    }
+
+    private suspend fun ageOne(memoryId: String, sweepStartedAt: Long): AgingMutation = try {
+        recallFence.withCanonicalMutation(
+            change = { result ->
+                if (result.recallChanged) ValidationRecallCorpusChange.memoryIds(listOf(memoryId))
+                else ValidationRecallCorpusChange.memoryIds(emptyList())
+            },
+        ) { mutation ->
+            database.withTransaction {
+                val current = memoryDao.memory(memoryId) ?: return@withTransaction AgingMutation()
+                if (current.truthState != MemoryTruthState.SUPPORTED ||
+                    current.retentionState == MemoryRetentionState.FORGOTTEN ||
+                    current.lifecycleState != MemoryLifecycleState.VALIDATED ||
+                    lifecycleDao.availableEvidence(listOf(memoryId), 1).isEmpty()
+                ) return@withTransaction AgingMutation()
+
+                val decision = decide(current, sweepStartedAt)
+                val previousBand = lifecycleDao.accessibility(memoryId)?.band
                     ?: MemoryAccessibilityBand.ORDINARY
-                val writeAccessibility: suspend () -> Unit = {
-                    database.withTransaction {
-                        val current = database.memoryDao().memory(memory.id) ?: return@withTransaction
-                        if (current.truthState != MemoryTruthState.SUPPORTED ||
-                            current.retentionState == MemoryRetentionState.FORGOTTEN ||
-                            current.lifecycleState != MemoryLifecycleState.VALIDATED
-                        ) return@withTransaction
-                        lifecycleDao.upsertAccessibility(
-                            MemoryAccessibilityEntity(
-                                memoryId = current.id,
-                                band = if (current.retentionState == MemoryRetentionState.DORMANT) {
-                                    MemoryAccessibilityBand.DORMANT
-                                } else {
-                                    decision.band
-                                },
-                                reasonCode = decision.reasonCode,
-                                evaluatedAt = now,
-                                sourceUpdatedAt = current.updatedAt,
-                            ),
-                        )
-                    }
-                }
-                if (decision.band == MemoryAccessibilityBand.LIMITED &&
-                    previousBand != MemoryAccessibilityBand.LIMITED
+                if (decision.band == MemoryAccessibilityBand.DORMANT &&
+                    current.retentionState == MemoryRetentionState.ACTIVE
                 ) {
-                    recallFence.withCanonicalMutation(
-                        change = { ValidationRecallCorpusChange.memoryIds(listOf(memory.id)) },
-                    ) { writeAccessibility() }
+                    val moved = memoryTransactions.moveDormantInCurrentTransaction(
+                        MemoryStateTransitionInput(memoryId, occurredAt = sweepStartedAt),
+                        mutation,
+                    )
+                    check(moved is MemoryWriteResult.Success)
+                    AgingMutation(becameDormant = true, recallChanged = true)
                 } else {
-                    writeAccessibility()
+                    val effectiveBand = if (current.retentionState == MemoryRetentionState.DORMANT) {
+                        MemoryAccessibilityBand.DORMANT
+                    } else {
+                        decision.band
+                    }
+                    lifecycleDao.upsertAccessibility(
+                        MemoryAccessibilityEntity(
+                            memoryId = current.id,
+                            band = effectiveBand,
+                            reasonCode = decision.reasonCode,
+                            evaluatedAt = sweepStartedAt,
+                            sourceUpdatedAt = current.updatedAt,
+                        ),
+                    )
+                    AgingMutation(recallChanged = previousBand != effectiveBand)
                 }
-                evaluated += 1
             }
-            if (page.size < minOf(PAGE_SIZE, remaining)) break
         }
-        val hasMore = try {
-            database.withTransaction { lifecycleDao.agingMemories(now, 1).isNotEmpty() }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        }
-        return MemoryAgingSweepResult(evaluated, dormant, hasMore)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     }
 
     internal fun decide(memory: MemoryEntity, now: Long): AgingDecision {
@@ -126,9 +164,14 @@ class MemoryAgingService(
         val reasonCode: String,
     )
 
+    private data class AgingMutation(
+        val becameDormant: Boolean = false,
+        val recallChanged: Boolean = false,
+    )
+
     companion object {
         const val DEFAULT_BATCH_LIMIT = 100
-        private const val PAGE_SIZE = 25
+        internal const val CHECKPOINT_ID = "memory-aging-v1"
         const val LIMITED_AFTER_MS = 60L * 24L * 60L * 60L * 1_000L
         const val DORMANCY_AFTER_MS = 180L * 24L * 60L * 60L * 1_000L
     }

@@ -45,6 +45,7 @@ import com.shai.riven.data.persistence.entity.KnownEntityEntity
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
+import com.shai.riven.data.persistence.entity.MemoryAgingSweepCheckpointEntity
 import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
@@ -107,6 +108,7 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         ConversationRunEntity::class,
         AutomaticMemoryJobEntity::class,
         MemoryAccessibilityEntity::class,
+        MemoryAgingSweepCheckpointEntity::class,
         OpenLoopPassCheckpointEntity::class,
         ConsolidationCheckpointEntity::class,
         DerivedArtifactPayloadEntity::class,

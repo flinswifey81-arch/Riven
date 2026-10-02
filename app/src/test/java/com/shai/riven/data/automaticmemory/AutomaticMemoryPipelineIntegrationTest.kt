@@ -7,6 +7,7 @@ import com.shai.riven.data.attention.ImmediateAttentionSnapshot
 import com.shai.riven.data.attention.PositiveAttentionSignal
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
+import com.shai.riven.data.background.AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS
 import com.shai.riven.data.candidate.CandidateExtractionProposal
 import com.shai.riven.data.candidate.CandidateExtractionResult
 import com.shai.riven.data.candidate.CandidateExtractionService
@@ -297,6 +298,34 @@ class AutomaticMemoryPipelineIntegrationTest {
 
         assertTrue(results.all { it is AutomaticMemoryJobRunResult.Succeeded })
         assertEquals(listOf("Shai loves sardines."), database.memoryDao().recentMemories(10).map { it.meaning })
+    }
+
+    @Test
+    fun inactivityWakeIsRearmedFromActualDeferredJobCompletion() = runBlocking {
+        model.deferSardinesUntilKeepIt = true
+        val turn = appendSuccessfulTurn("I love sardines.", "Do you want that remembered?")
+        val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        assertEquals(0, scheduler.shortWindowSweepCount)
+
+        queued.jobIds.forEach { assertTrue(runner.run(it) is AutomaticMemoryJobRunResult.Succeeded) }
+
+        val deferredJob = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId))
+        assertEquals(AutomaticMemoryJobState.SUCCEEDED, deferredJob.state)
+        assertEquals(1, scheduler.shortWindowSweepCount)
+        val justBefore = queue.requeueDueShortWindow(
+            deferredJob.updatedAt + AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS - 1,
+            10,
+        )
+        assertTrue(justBefore.schedulingFailedJobIds.isEmpty())
+        assertEquals(AutomaticMemoryJobState.SUCCEEDED, database.automaticMemoryDao().job(deferredJob.id)?.state)
+
+        queue.requeueDueShortWindow(
+            deferredJob.updatedAt + AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+            10,
+        )
+        assertEquals(AutomaticMemoryJobState.PENDING, database.automaticMemoryDao().job(deferredJob.id)?.state)
+        assertEquals(AutomaticMemoryJobStage.REFRESH_ATTENTION, database.automaticMemoryDao().job(deferredJob.id)?.nextStage)
     }
 
     @Test
@@ -1087,6 +1116,10 @@ class AutomaticMemoryPipelineIntegrationTest {
             database = database,
             modelFactory = AutomaticMemoryModelFactory { AutomaticMemoryModelFactoryResult.Ready(model) },
             clock = ::now,
+            scheduleShortWindowSweep = {
+                scheduler.enqueueAutomaticMemoryShortWindowSweep()
+                Unit
+            },
         )
     }
 
@@ -1101,6 +1134,7 @@ class AutomaticMemoryPipelineIntegrationTest {
 
     private class RecordingScheduler : RivenBackgroundWorkScheduler {
         val automaticMemoryJobIds = mutableListOf<String>()
+        var shortWindowSweepCount = 0
 
         override fun enqueueAttachmentCleanup(attachmentId: String) = enqueued("attachment")
         override fun enqueueAttachmentMaintenanceSweep() = enqueued("attachment-sweep")
@@ -1111,6 +1145,10 @@ class AutomaticMemoryPipelineIntegrationTest {
             return enqueued(automaticMemoryJobId)
         }
         override fun enqueueAutomaticMemorySweep() = enqueued("memory-sweep")
+        override fun enqueueAutomaticMemoryShortWindowSweep(): RivenBackgroundScheduleResult {
+            shortWindowSweepCount += 1
+            return enqueued("short-window")
+        }
         override fun ensurePeriodicMaintenance() = enqueued("periodic")
 
         private fun enqueued(name: String) = RivenBackgroundScheduleResult.Enqueued(listOf(name))

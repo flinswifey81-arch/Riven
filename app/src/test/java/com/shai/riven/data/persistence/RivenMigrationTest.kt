@@ -898,6 +898,7 @@ class RivenMigrationTest {
         assertEquals(0L, migrated.rowCount("automatic_memory_jobs"))
         assertEquals(0L, migrated.rowCount("suppression_source_coverages"))
         assertEquals(0L, migrated.rowCount("memory_accessibility"))
+        assertEquals(0L, migrated.rowCount("memory_aging_sweep_checkpoints"))
         assertEquals(0L, migrated.rowCount("open_loop_pass_checkpoints"))
         assertEquals(0L, migrated.rowCount("consolidation_checkpoints"))
         assertEquals(0L, migrated.rowCount("derived_artifact_payloads"))
@@ -911,6 +912,7 @@ class RivenMigrationTest {
         val migrated = migrationHelper.runMigrationsAndValidate(11, listOf(MIGRATION_10_11))
 
         assertEquals(0L, migrated.rowCount("memory_accessibility"))
+        assertEquals(0L, migrated.rowCount("memory_aging_sweep_checkpoints"))
         assertEquals(0L, migrated.rowCount("open_loop_pass_checkpoints"))
         assertEquals(0L, migrated.rowCount("consolidation_checkpoints"))
         assertEquals(0L, migrated.rowCount("derived_artifact_payloads"))
@@ -1040,7 +1042,7 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun databaseVersionElevenHasExactlyFortyThreeApplicationTables() {
+    fun databaseVersionElevenHasExactlyFortyFourApplicationTables() {
         val created = migrationHelper.createDatabase(11)
         val count = created.singleLong(
             """
@@ -1050,7 +1052,7 @@ class RivenMigrationTest {
               AND name NOT LIKE 'sqlite_%'
             """.trimIndent(),
         )
-        assertEquals(43L, count)
+        assertEquals(44L, count)
         created.close()
     }
 

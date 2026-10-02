@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 11,
-    "identityHash": "42c22b855f3fd2f73ebac1c0dc5a5f4b",
+    "identityHash": "14a161706b91d1f944d0dfb05e68c708",
     "entities": [
       {
         "tableName": "conversations",
@@ -3579,6 +3579,42 @@
         ]
       },
       {
+        "tableName": "memory_aging_sweep_checkpoints",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`checkpoint_id` TEXT NOT NULL, `sweep_started_at` INTEGER NOT NULL, `after_memory_id` TEXT NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`checkpoint_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "checkpoint_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sweepStartedAt",
+            "columnName": "sweep_started_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "afterMemoryId",
+            "columnName": "after_memory_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "checkpoint_id"
+          ]
+        }
+      },
+      {
         "tableName": "open_loop_pass_checkpoints",
         "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`experience_id` TEXT NOT NULL, `attention_revision` INTEGER NOT NULL, `timeline_revision` INTEGER, `input_fingerprint` TEXT NOT NULL, `result_fingerprint` TEXT NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`experience_id`), FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE )",
         "fields": [
@@ -3651,7 +3687,7 @@
       },
       {
         "tableName": "consolidation_checkpoints",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`checkpoint_id` TEXT NOT NULL, `corpus_fingerprint` TEXT NOT NULL, `source_set_hash` TEXT, `result_memory_id` TEXT, `profile_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`checkpoint_id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`checkpoint_id` TEXT NOT NULL, `corpus_fingerprint` TEXT NOT NULL, `source_set_hash` TEXT, `source_memory_ids` TEXT, `result_memory_id` TEXT, `profile_id` TEXT NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`checkpoint_id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -3668,6 +3704,11 @@
           {
             "fieldPath": "sourceSetHash",
             "columnName": "source_set_hash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceMemoryIds",
+            "columnName": "source_memory_ids",
             "affinity": "TEXT"
           },
           {
@@ -3697,21 +3738,31 @@
         "indices": [
           {
             "name": "index_consolidation_checkpoints_corpus_fingerprint",
-            "unique": true,
+            "unique": false,
             "columnNames": [
               "corpus_fingerprint"
             ],
             "orders": [],
-            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_consolidation_checkpoints_corpus_fingerprint` ON `${TABLE_NAME}` (`corpus_fingerprint`)"
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_consolidation_checkpoints_corpus_fingerprint` ON `${TABLE_NAME}` (`corpus_fingerprint`)"
           },
           {
             "name": "index_consolidation_checkpoints_source_set_hash",
-            "unique": true,
+            "unique": false,
             "columnNames": [
               "source_set_hash"
             ],
             "orders": [],
-            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_consolidation_checkpoints_source_set_hash` ON `${TABLE_NAME}` (`source_set_hash`)"
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_consolidation_checkpoints_source_set_hash` ON `${TABLE_NAME}` (`source_set_hash`)"
+          },
+          {
+            "name": "index_consolidation_checkpoints_corpus_fingerprint_source_set_hash",
+            "unique": true,
+            "columnNames": [
+              "corpus_fingerprint",
+              "source_set_hash"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_consolidation_checkpoints_corpus_fingerprint_source_set_hash` ON `${TABLE_NAME}` (`corpus_fingerprint`, `source_set_hash`)"
           }
         ]
       },
@@ -3767,7 +3818,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '42c22b855f3fd2f73ebac1c0dc5a5f4b')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '14a161706b91d1f944d0dfb05e68c708')"
     ]
   }
 }

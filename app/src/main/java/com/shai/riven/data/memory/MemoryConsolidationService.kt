@@ -26,6 +26,7 @@ class MemoryConsolidationService(
 ) {
     private val lifecycleDao = database.memoryLifecycleDao()
     private val memoryDao = database.memoryDao()
+    private val maintenanceDao = database.maintenanceDao()
     private val memoryTransactions = MemoryTransactionService(database)
     private val recallFence = database.validationRecallCorpusFence()
 
@@ -41,12 +42,15 @@ class MemoryConsolidationService(
         } catch (failure: Exception) {
             return MemoryConsolidationResult.Failure("CONSOLIDATION_READ_${failure::class.java.simpleName}", true)
         }
-        lifecycleDao.consolidationCheckpointForCorpus(snapshot.corpusFingerprint)?.let { checkpoint ->
+        lifecycleDao.consolidationCompletionForCorpus(snapshot.corpusFingerprint)?.let { checkpoint ->
             return MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
         }
-        if (snapshot.sources.size < MIN_SOURCE_MEMORIES) {
-            return persistNoConsolidation(snapshot)
+        val sourceUniverse = snapshot.sources.map(ConsolidationSourceMemory::memoryId).sorted()
+        processedCheckpoint(snapshot.corpusFingerprint, sourceUniverse)?.let { checkpoint ->
+            return MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
         }
+        if (snapshot.sources.size < MIN_SOURCE_MEMORIES) return persistNoConsolidation(snapshot)
+
         val proposal = try {
             decider.proposeConsolidation(snapshot)
         } catch (cancelled: CancellationException) {
@@ -56,9 +60,15 @@ class MemoryConsolidationService(
         } catch (failure: Exception) {
             return MemoryConsolidationResult.Failure("CONSOLIDATION_MODEL_${failure::class.java.simpleName}", true)
         }
+        if (proposal is ConsolidationProposal.Create) {
+            processedCheckpoint(snapshot.corpusFingerprint, proposal.sourceMemoryIds.sorted())?.let { checkpoint ->
+                return MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
+            }
+        }
         validate(snapshot, proposal)?.let { code ->
             return MemoryConsolidationResult.Failure(code, false)
         }
+
         return try {
             recallFence.withCanonicalMutation(
                 change = { result ->
@@ -75,74 +85,28 @@ class MemoryConsolidationService(
                             true,
                         )
                     }
-                    lifecycleDao.consolidationCheckpointForCorpus(snapshot.corpusFingerprint)?.let { checkpoint ->
+                    lifecycleDao.consolidationCompletionForCorpus(snapshot.corpusFingerprint)?.let { checkpoint ->
                         return@withTransaction MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
+                    }
+                    if (proposal is ConsolidationProposal.Create) {
+                        processedCheckpoint(
+                            current.corpusFingerprint,
+                            proposal.sourceMemoryIds.sorted(),
+                        )?.let { checkpoint ->
+                            return@withTransaction MemoryConsolidationResult.AlreadyProcessed(
+                                checkpoint.resultMemoryId,
+                            )
+                        }
+                    }
+                    validate(current, proposal)?.let { code ->
+                        return@withTransaction MemoryConsolidationResult.Failure(code, false)
                     }
                     when (proposal) {
                         ConsolidationProposal.NoConsolidation -> {
-                            insertCheckpoint(snapshot.corpusFingerprint, null, null)
+                            insertCheckpoint(snapshot.corpusFingerprint, null, null, null)
                             MemoryConsolidationResult.NoConsolidation
                         }
-                        is ConsolidationProposal.Create -> {
-                            val sourceIds = proposal.sourceMemoryIds.distinct().sorted()
-                            val sourceSetHash = fingerprint(sourceIds.joinToString("\u001f"))
-                            lifecycleDao.consolidationCheckpointForSourceSet(sourceSetHash)?.let { checkpoint ->
-                                insertCheckpoint(snapshot.corpusFingerprint, null, checkpoint.resultMemoryId)
-                                return@withTransaction MemoryConsolidationResult.AlreadyProcessed(
-                                    checkpoint.resultMemoryId,
-                                )
-                            }
-                            val sourceById = current.sources.associateBy { it.memoryId }
-                            val sourceMemories = sourceIds.map { checkNotNull(memoryDao.memory(it)) }
-                            val sourceEvidence = sourceIds.flatMap { sourceId ->
-                                lifecycleDao.availableEvidence(listOf(sourceId), MAX_EVIDENCE_PER_SOURCE)
-                            }
-                                .sortedWith(compareBy(MemoryEvidenceEntity::memoryId, MemoryEvidenceEntity::experienceId))
-                            val uniqueEvidence = sourceEvidence.distinctBy(MemoryEvidenceEntity::experienceId)
-                            check(uniqueEvidence.size >= MIN_INDEPENDENT_EXPERIENCES)
-                            val memoryId = idGenerator.nextId().also { require(it.isNotBlank()) }
-                            val occurredAt = clock()
-                            val write = memoryTransactions.createValidatedInCurrentTransaction(
-                                input = ValidatedMemoryInput(
-                                    memoryId = memoryId,
-                                    kind = proposal.kind,
-                                    scope = proposal.scope,
-                                    meaning = proposal.meaning.trim(),
-                                    epistemicBasis = EpistemicBasis.CONSOLIDATION,
-                                    certainty = proposal.certainty,
-                                    learnedAt = occurredAt,
-                                    sensitivity = proposal.sensitivity,
-                                    evidence = uniqueEvidence.mapIndexed { index, evidence ->
-                                        MemoryEvidenceInput(
-                                            experienceId = evidence.experienceId,
-                                            role = EvidenceRole.SUPPORTS,
-                                            epistemicBasis = evidence.epistemicBasis,
-                                            sourceCertainty = evidence.sourceCertainty,
-                                            lineageKey = "consolidation:${sourceSetHash.take(32)}:$index",
-                                        )
-                                    },
-                                    temporalState = proposal.temporalState,
-                                    lastConfirmedAt = uniqueEvidence.maxOfOrNull { evidence ->
-                                        sourceById.getValue(evidence.memoryId).updatedAt
-                                    },
-                                    significance = proposal.significance,
-                                    entityLinks = proposal.entityLinks.map {
-                                        MemoryEntityLinkInput(it.entityId, it.role)
-                                    },
-                                    relationships = sourceMemories.map { source ->
-                                        MemoryRelationshipInput(
-                                            targetMemoryId = source.id,
-                                            relationshipType = MemoryRelationshipType.DERIVED_FROM,
-                                        )
-                                    },
-                                ),
-                                occurredAt = occurredAt,
-                                mutation = mutation,
-                            )
-                            check(write is MemoryWriteResult.Success)
-                            insertCheckpoint(snapshot.corpusFingerprint, sourceSetHash, memoryId)
-                            MemoryConsolidationResult.Created(memoryId)
-                        }
+                        is ConsolidationProposal.Create -> createConsolidation(current, proposal, mutation)
                     }
                 }
             }
@@ -153,18 +117,89 @@ class MemoryConsolidationService(
         }
     }
 
-    private suspend fun persistNoConsolidation(
+    private fun createConsolidation(
         snapshot: ConsolidationSnapshot,
-    ): MemoryConsolidationResult = try {
+        proposal: ConsolidationProposal.Create,
+        mutation: com.shai.riven.data.validation.ValidationRecallMutationToken,
+    ): MemoryConsolidationResult {
+        val sourceIds = proposal.sourceMemoryIds.distinct().sorted()
+        val sourceById = snapshot.sources.associateBy(ConsolidationSourceMemory::memoryId)
+        val selected = sourceIds.map(sourceById::getValue)
+        val sourceSetHash = fingerprint(sourceSetCanonical(selected))
+        lifecycleDao.consolidationCheckpointForSourceSet(sourceSetHash)?.let { checkpoint ->
+            if (lifecycleDao.consolidationCheckpointsForCorpus(snapshot.corpusFingerprint)
+                    .none { it.sourceSetHash == sourceSetHash }
+            ) {
+                insertCheckpoint(
+                    corpus = snapshot.corpusFingerprint,
+                    sourceSet = sourceSetHash,
+                    sourceMemoryIds = sourceIds,
+                    memoryId = checkpoint.resultMemoryId,
+                )
+            }
+            return MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
+        }
+
+        val sourceMemories = sourceIds.map { checkNotNull(memoryDao.memory(it)) }
+        val supportingEvidence = sourceIds.flatMap { sourceId ->
+            currentEvidence(sourceId)
+                .filter { it.role == EvidenceRole.SUPPORTS }
+        }.sortedWith(compareBy(MemoryEvidenceEntity::memoryId, MemoryEvidenceEntity::experienceId))
+        val uniqueEvidence = supportingEvidence.distinctBy(MemoryEvidenceEntity::experienceId)
+        check(uniqueEvidence.size >= MIN_INDEPENDENT_EXPERIENCES)
+
+        val memoryId = idGenerator.nextId().also { require(it.isNotBlank()) }
+        val occurredAt = clock()
+        val write = memoryTransactions.createValidatedInCurrentTransaction(
+            input = ValidatedMemoryInput(
+                memoryId = memoryId,
+                kind = proposal.kind,
+                scope = proposal.scope,
+                meaning = proposal.meaning.trim(),
+                epistemicBasis = EpistemicBasis.CONSOLIDATION,
+                certainty = proposal.certainty,
+                learnedAt = occurredAt,
+                sensitivity = proposal.sensitivity,
+                evidence = uniqueEvidence.mapIndexed { index, evidence ->
+                    MemoryEvidenceInput(
+                        experienceId = evidence.experienceId,
+                        role = evidence.role,
+                        epistemicBasis = evidence.epistemicBasis,
+                        sourceCertainty = evidence.sourceCertainty,
+                        lineageKey = "consolidation:${sourceSetHash.take(32)}:$index",
+                    )
+                },
+                temporalState = proposal.temporalState,
+                lastConfirmedAt = uniqueEvidence.maxOfOrNull { evidence ->
+                    sourceById.getValue(evidence.memoryId).updatedAt
+                },
+                significance = proposal.significance,
+                entityLinks = proposal.entityLinks.map { MemoryEntityLinkInput(it.entityId, it.role) },
+                relationships = sourceMemories.map { source ->
+                    MemoryRelationshipInput(
+                        targetMemoryId = source.id,
+                        relationshipType = MemoryRelationshipType.DERIVED_FROM,
+                    )
+                },
+            ),
+            occurredAt = occurredAt,
+            mutation = mutation,
+        )
+        check(write is MemoryWriteResult.Success)
+        insertCheckpoint(snapshot.corpusFingerprint, sourceSetHash, sourceIds, memoryId)
+        return MemoryConsolidationResult.Created(memoryId)
+    }
+
+    private suspend fun persistNoConsolidation(snapshot: ConsolidationSnapshot): MemoryConsolidationResult = try {
         database.withTransaction {
-            lifecycleDao.consolidationCheckpointForCorpus(snapshot.corpusFingerprint)?.let { checkpoint ->
+            lifecycleDao.consolidationCompletionForCorpus(snapshot.corpusFingerprint)?.let { checkpoint ->
                 return@withTransaction MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
             }
             val current = readSnapshotInCurrentTransaction()
             if (current.corpusFingerprint != snapshot.corpusFingerprint) {
                 return@withTransaction MemoryConsolidationResult.Failure("CONSOLIDATION_STALE_CORPUS", true)
             }
-            insertCheckpoint(snapshot.corpusFingerprint, null, null)
+            insertCheckpoint(snapshot.corpusFingerprint, null, null, null)
             MemoryConsolidationResult.NoConsolidation
         }
     } catch (cancelled: CancellationException) {
@@ -178,12 +213,15 @@ class MemoryConsolidationService(
     }
 
     private fun readSnapshotInCurrentTransaction(): ConsolidationSnapshot {
-        val memories = lifecycleDao.eligibleSourceMemories(MAX_SOURCE_MEMORIES)
-        val evidence = memories.flatMap { memory ->
-            lifecycleDao.availableEvidence(listOf(memory.id), MAX_EVIDENCE_PER_SOURCE)
-        }
-        val evidenceByMemory = evidence.groupBy(MemoryEvidenceEntity::memoryId)
-        val sources = memories.map { memory ->
+        val sources = lifecycleDao.eligibleSourceMemories(MAX_SOURCE_MEMORIES).mapNotNull { memory ->
+            val evidence = currentEvidence(memory.id)
+            val supportingIds = evidence.asSequence()
+                .filter { it.role == EvidenceRole.SUPPORTS }
+                .map(MemoryEvidenceEntity::experienceId)
+                .distinct()
+                .sorted()
+                .toList()
+            if (supportingIds.isEmpty()) return@mapNotNull null
             ConsolidationSourceMemory(
                 memoryId = memory.id,
                 kind = memory.kind,
@@ -191,30 +229,39 @@ class MemoryConsolidationService(
                 meaning = memory.meaning.take(MAX_SOURCE_MEANING_CHARS),
                 certainty = memory.certainty,
                 sensitivity = memory.sensitivity,
-                sourceExperienceIds = evidenceByMemory[memory.id].orEmpty()
-                    .map(MemoryEvidenceEntity::experienceId)
-                    .distinct()
-                    .sorted(),
+                sourceExperienceIds = supportingIds,
+                evidenceFingerprint = fingerprint(
+                    evidence.sortedWith(compareBy(MemoryEvidenceEntity::experienceId, MemoryEvidenceEntity::role))
+                        .joinToString("\u001e") { row ->
+                            listOf(
+                                row.experienceId,
+                                row.role,
+                                row.epistemicBasis,
+                                row.sourceCertainty,
+                                row.lineageKey,
+                                row.createdAt,
+                            ).joinToString("|")
+                        },
+                ),
                 updatedAt = memory.updatedAt,
             )
         }
-        return ConsolidationSnapshot(
-            corpusFingerprint = fingerprint(
-                profileId + "\u001d" + sources.joinToString("\u001e") { source ->
-                    listOf(
-                        source.memoryId,
-                        source.kind,
-                        source.scope,
-                        source.meaning,
-                        source.certainty,
-                        source.sensitivity,
-                        source.updatedAt,
-                        source.sourceExperienceIds.joinToString(","),
-                    ).joinToString("|")
-                },
-            ),
-            sources = sources,
-        )
+        val corpus = fingerprint(sources.joinToString("\u001d", transform = ::sourceCanonical))
+        val processed = lifecycleDao.consolidationCheckpointsForCorpus(corpus)
+            .mapNotNull { it.sourceMemoryIds?.let(::decodeSourceIds) }
+        return ConsolidationSnapshot(corpus, sources, processed)
+    }
+
+    private fun currentEvidence(memoryId: String): List<MemoryEvidenceEntity> {
+        val evidence = lifecycleDao.availableEvidence(listOf(memoryId), MAX_EVIDENCE_PER_SOURCE + 1)
+        if (evidence.size > MAX_EVIDENCE_PER_SOURCE) return emptyList()
+        return evidence.filterNot { row ->
+            isEvidenceSuppressedInCurrentTransaction(
+                maintenanceDao,
+                row.experienceId,
+                row.lineageKey,
+            )
+        }
     }
 
     private fun validate(snapshot: ConsolidationSnapshot, proposal: ConsolidationProposal): String? {
@@ -223,6 +270,9 @@ class MemoryConsolidationService(
         val ids = proposal.sourceMemoryIds
         if (ids.size !in MIN_SOURCE_MEMORIES..MAX_PROPOSAL_SOURCES || ids.distinct().size != ids.size) {
             return "CONSOLIDATION_INVALID_SOURCE_SET"
+        }
+        if (snapshot.processedSourceSets.any { it.sorted() == ids.sorted() }) {
+            return "CONSOLIDATION_SOURCE_SET_ALREADY_PROCESSED"
         }
         val sourceById = snapshot.sources.associateBy(ConsolidationSourceMemory::memoryId)
         val sources = ids.map { sourceById[it] ?: return "CONSOLIDATION_UNKNOWN_SOURCE" }
@@ -244,17 +294,66 @@ class MemoryConsolidationService(
         return null
     }
 
-    private fun insertCheckpoint(corpus: String, sourceSet: String?, memoryId: String?) {
+    private fun insertCheckpoint(
+        corpus: String,
+        sourceSet: String?,
+        sourceMemoryIds: List<String>?,
+        memoryId: String?,
+    ) {
         lifecycleDao.insertConsolidationCheckpoint(
             ConsolidationCheckpointEntity(
                 id = idGenerator.nextId(),
                 corpusFingerprint = corpus,
                 sourceSetHash = sourceSet,
+                sourceMemoryIds = sourceMemoryIds?.let(::encodeSourceIds),
                 resultMemoryId = memoryId,
                 profileId = profileId,
                 createdAt = clock(),
             ),
         )
+    }
+
+    private fun processedCheckpoint(
+        corpus: String,
+        sourceIds: List<String>,
+    ): ConsolidationCheckpointEntity? = lifecycleDao.consolidationCheckpointsForCorpus(corpus)
+        .firstOrNull { checkpoint ->
+            checkpoint.sourceMemoryIds?.let(::decodeSourceIds)?.sorted() == sourceIds
+        }
+
+    private fun sourceSetCanonical(sources: List<ConsolidationSourceMemory>): String =
+        sources.sortedBy(ConsolidationSourceMemory::memoryId).joinToString("\u001d", transform = ::sourceCanonical)
+
+    private fun sourceCanonical(source: ConsolidationSourceMemory): String = listOf(
+        source.memoryId,
+        source.kind,
+        source.scope,
+        source.meaning,
+        source.certainty,
+        source.sensitivity,
+        source.updatedAt,
+        source.sourceExperienceIds.joinToString(","),
+        source.evidenceFingerprint,
+    ).joinToString("|")
+
+    private fun encodeSourceIds(ids: List<String>): String = buildString {
+        ids.sorted().forEach { id -> append(id.length).append(':').append(id) }
+    }
+
+    private fun decodeSourceIds(value: String): List<String>? {
+        val ids = mutableListOf<String>()
+        var offset = 0
+        while (offset < value.length) {
+            val separator = value.indexOf(':', offset)
+            if (separator < 0) return null
+            val length = value.substring(offset, separator).toIntOrNull() ?: return null
+            val start = separator + 1
+            val end = start + length
+            if (length < 1 || end > value.length) return null
+            ids += value.substring(start, end)
+            offset = end
+        }
+        return ids
     }
 
     private fun fingerprint(value: String): String = MessageDigest.getInstance("SHA-256")
@@ -267,7 +366,7 @@ class MemoryConsolidationService(
         const val MAX_PROPOSAL_SOURCES = 5
         const val MAX_SOURCE_MEMORIES = 48
         const val MAX_SOURCE_MEANING_CHARS = 768
-        const val MAX_EVIDENCE_PER_SOURCE = 16
+        const val MAX_EVIDENCE_PER_SOURCE = 64
         const val MAX_CONSOLIDATED_MEANING_CHARS = 4_096
     }
 }

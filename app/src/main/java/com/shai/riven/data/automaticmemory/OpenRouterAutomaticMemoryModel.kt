@@ -261,6 +261,7 @@ class OpenRouterAutomaticMemoryModel(
                     .put("description", loop.description)
                     .put("state", loop.state.name)
                     .put("dueAt", loop.dueAt)
+                    .put("sensitivity", loop.sensitivity.name)
                     .put("updatedAt", loop.updatedAt)
             }))
         return parseOpenLoopProposal(requestJson(OPEN_LOOP_SYSTEM_PROMPT, payload, "open_loop"))
@@ -282,6 +283,7 @@ class OpenRouterAutomaticMemoryModel(
                     .put("sourceExperienceIds", JSONArray(source.sourceExperienceIds))
                     .put("updatedAt", source.updatedAt)
             }))
+            .put("processedSourceSets", JSONArray(snapshot.processedSourceSets.map(::JSONArray)))
             .put("lockedRivenPersonalityCanon", lockedPersonalityCanon)
         return parseConsolidationProposal(
             requestJson(CONSOLIDATION_SYSTEM_PROMPT, payload, "consolidation"),
@@ -795,7 +797,9 @@ class OpenRouterAutomaticMemoryModel(
             invent an episode, remove an exception, raise confidence above the weakest source, or
             lower sensitivity. The locked Riven personality canon is immutable; broad Riven
             identity or SELF_DEVELOPMENT requires at least three Memories and three independent
-            Experiences and may not conflict with canon. Prefer NONE over overreach.
+            Experiences and may not conflict with canon. Never repeat any exact source-id set in
+            processedSourceSets; choose another independent pattern or return NONE. Prefer NONE
+            over overreach.
 
             Schema: {"action":"NONE"} or
             {"action":"CREATE","sourceMemoryIds":["two to five exact supplied ids"],

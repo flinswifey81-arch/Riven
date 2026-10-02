@@ -660,8 +660,10 @@ class CandidateValidationService(
 
     private fun ValidationMemorySnapshot.isMutableUnderstanding(): Boolean =
         truthState != MemoryTruthState.CORRECTED_FALSE &&
+            truthState != MemoryTruthState.UNSUPPORTED &&
             retentionState != MemoryRetentionState.FORGOTTEN &&
-            lifecycleState != MemoryLifecycleState.SUPERSEDED
+            lifecycleState != MemoryLifecycleState.SUPERSEDED &&
+            lifecycleState != MemoryLifecycleState.REASSESSMENT_PENDING
 
     private fun CandidateEvidenceRole.toMemoryEvidenceRole(): EvidenceRole = when (this) {
         CandidateEvidenceRole.SEED,

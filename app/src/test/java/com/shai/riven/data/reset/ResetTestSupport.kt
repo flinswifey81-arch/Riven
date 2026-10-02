@@ -201,7 +201,7 @@ internal fun seedRepresentativeState(database: RivenDatabase) {
         OpenLoopPassCheckpointEntity("experience", 1, null, "input", "result", 1),
     )
     database.memoryLifecycleDao().insertConsolidationCheckpoint(
-        ConsolidationCheckpointEntity("checkpoint", "corpus", null, null, "profile", 1),
+        ConsolidationCheckpointEntity("checkpoint", "corpus", null, null, null, "profile", 1),
     )
     database.maintenanceDao().insertDerivedArtifact(
         DerivedArtifactEntity(
