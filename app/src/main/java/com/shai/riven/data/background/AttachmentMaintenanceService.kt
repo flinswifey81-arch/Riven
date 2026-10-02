@@ -53,10 +53,12 @@ class AttachmentMaintenanceService(
     private val attachmentService: AttachmentService,
     private val clock: RivenBackgroundClock = SystemRivenBackgroundClock,
     private val staleAfterMs: Long = ATTACHMENT_STAGING_STALE_AFTER_MS,
+    private val availableOrphanStaleAfterMs: Long = ATTACHMENT_AVAILABLE_ORPHAN_STALE_AFTER_MS,
     private val itemLimit: Int = DEFAULT_ATTACHMENT_MAINTENANCE_LIMIT,
 ) : AttachmentMaintenanceOperations {
     init {
         require(staleAfterMs > 0) { "Staging age threshold must be positive" }
+        require(availableOrphanStaleAfterMs > 0) { "Available orphan age threshold must be positive" }
         require(itemLimit > 0) { "Attachment maintenance limit must be positive" }
     }
 
@@ -88,21 +90,31 @@ class AttachmentMaintenanceService(
                     cleanupStaleStaging(attachment, now)
                 }
             }
-            AttachmentState.AVAILABLE -> TargetedAttachmentCleanupResult.NoOp(
-                attachment.id,
-                AttachmentCleanupNoOpReason.AVAILABLE,
-            )
+            AttachmentState.AVAILABLE -> {
+                val now = clock.now()
+                if (attachment.updatedAt > now - availableOrphanStaleAfterMs) {
+                    TargetedAttachmentCleanupResult.NoOp(
+                        attachment.id,
+                        AttachmentCleanupNoOpReason.AVAILABLE,
+                    )
+                } else {
+                    cleanupAvailableOrphan(attachment, now)
+                }
+            }
         }
     }
 
     override suspend fun runMaintenance(): AttachmentMaintenanceResult {
         val now = clock.now()
         val staleBefore = now - staleAfterMs
+        val orphanBefore = now - availableOrphanStaleAfterMs
         val candidates = try {
             attachmentDao.maintenanceCandidates(
                 deletePendingState = AttachmentState.DELETE_PENDING,
                 stagingState = AttachmentState.STAGING,
                 staleBefore = staleBefore,
+                availableState = AttachmentState.AVAILABLE,
+                orphanBefore = orphanBefore,
                 limit = itemLimit + 1,
             )
         } catch (cancelled: CancellationException) {
@@ -146,6 +158,14 @@ class AttachmentMaintenanceService(
     ): TargetedAttachmentCleanupResult = classify(
         attachment.id,
         attachmentService.cleanupStagingAttachment(attachment.id, occurredAt = now),
+    )
+
+    private suspend fun cleanupAvailableOrphan(
+        attachment: AttachmentEntity,
+        now: Long,
+    ): TargetedAttachmentCleanupResult = classify(
+        attachment.id,
+        attachmentService.discardUnreferencedAvailable(attachment.id, occurredAt = now),
     )
 
     private fun classify(

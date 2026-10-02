@@ -222,8 +222,18 @@ class OpenRouterConversationAdapterTest {
             contentSha256 = "a".repeat(64),
         )
 
+        val base = request()
         OpenRouterConversationAdapter(http).stream(
-            request().copy(imagesByFragmentId = mapOf("active-fragment" to listOf(image))),
+            base.copy(
+                context = base.context.map { fragment ->
+                    if (fragment.fragmentId == "active-fragment") {
+                        fragment.copy(content = "role=USER\nExact caption")
+                    } else {
+                        fragment
+                    }
+                },
+                imagesByFragmentId = mapOf("active-fragment" to listOf(image)),
+            ),
         ) {}
 
         val body = checkNotNull(http.request?.body)
@@ -232,6 +242,7 @@ class OpenRouterConversationAdapterTest {
         assertTrue(messages.getJSONObject(1).opt("content") is String)
         val parts = messages.getJSONObject(2).getJSONArray("content")
         assertEquals("text", parts.getJSONObject(0).getString("type"))
+        assertEquals("Exact caption", parts.getJSONObject(0).getString("text"))
         assertEquals("image_url", parts.getJSONObject(1).getString("type"))
         assertEquals(
             "data:image/png;base64,AQIDBA==",

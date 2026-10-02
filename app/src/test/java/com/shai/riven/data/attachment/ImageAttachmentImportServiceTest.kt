@@ -24,6 +24,7 @@ class ImageAttachmentImportServiceTest {
     private lateinit var database: RivenDatabase
     private lateinit var attachments: AttachmentService
     private lateinit var importer: ImageAttachmentImportService
+    private lateinit var thumbnails: FileAttachmentThumbnailStore
     private lateinit var root: java.io.File
 
     @Before
@@ -34,7 +35,13 @@ class ImageAttachmentImportServiceTest {
             .build()
         root = Files.createTempDirectory("riven-image-import").toFile()
         attachments = AttachmentService(database, FileAttachmentBlobStore(root))
-        importer = ImageAttachmentImportService(attachments, TEST_IMAGE_DECODER)
+        thumbnails = FileAttachmentThumbnailStore(java.io.File(root, "thumbs"))
+        importer = ImageAttachmentImportService(
+            attachments,
+            TEST_IMAGE_DECODER,
+            thumbnails,
+            ImageThumbnailGenerator { byteArrayOf(4, 5, 6) },
+        )
     }
 
     @After
@@ -65,6 +72,7 @@ class ImageAttachmentImportServiceTest {
         val reopened = attachments.readAvailableBlob(stored.metadata.attachmentId)
             as AttachmentBlobReadResult.Success
         assertArrayEquals(original, reopened.bytes)
+        assertArrayEquals(byteArrayOf(4, 5, 6), thumbnails.read(stored.metadata.attachmentId))
     }
 
     @Test

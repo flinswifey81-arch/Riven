@@ -146,8 +146,13 @@ class OpenRouterConversationAdapter(
             safeContent
         } else {
             JSONArray().apply {
-                if (safeContent.isNotBlank()) {
-                    put(JSONObject().put("type", "text").put("text", safeContent))
+                val caption = if (conversationRole == MessageRole.USER && !authoritative) {
+                    safeContent.removePrefix("role=${MessageRole.USER.name}\n")
+                } else {
+                    safeContent
+                }
+                if (caption.isNotBlank()) {
+                    put(JSONObject().put("type", "text").put("text", caption))
                 }
                 images.forEach { image ->
                     val encoded = Base64.encodeToString(image.bytes, Base64.NO_WRAP)

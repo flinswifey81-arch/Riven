@@ -8,6 +8,7 @@ import com.shai.riven.data.automaticmemory.AutomaticMemorySweepService
 import com.shai.riven.data.automaticmemory.OpenRouterAutomaticMemoryModelFactory
 import com.shai.riven.data.attachment.AttachmentService
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
 import com.shai.riven.data.credential.ProviderCredentialStore
 import com.shai.riven.data.persistence.RivenDatabaseLease
 import com.shai.riven.data.memory.MemoryAgingService
@@ -38,6 +39,9 @@ class RivenBackgroundWorkRuntime private constructor(
                 val attachmentService = AttachmentService(
                     database = database,
                     blobStore = FileAttachmentBlobStore.fromContext(context),
+                    afterBlobDeletionBeforeRowDeletion = { attachmentId ->
+                        FileAttachmentThumbnailStore.fromContext(context).delete(attachmentId)
+                    },
                 )
                 val attachmentMaintenance = AttachmentMaintenanceService(
                     attachmentDao = database.attachmentDao(),

@@ -128,6 +128,7 @@ internal fun stableTargetHash(targetId: String): String =
         .joinToString("") { byte -> "%02x".format(byte) }
 
 const val ATTACHMENT_STAGING_STALE_AFTER_MS = 60L * 60L * 1_000L
+const val ATTACHMENT_AVAILABLE_ORPHAN_STALE_AFTER_MS = 24L * 60L * 60L * 1_000L
 const val DEFAULT_ATTACHMENT_MAINTENANCE_LIMIT = 50
 const val DEFAULT_REPAIR_SWEEP_LIMIT = 50
 const val MAX_REPAIR_ATTEMPTS = 5

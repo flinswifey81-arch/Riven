@@ -18,6 +18,7 @@ class AttachmentService(
     private val idGenerator: AttachmentIdGenerator = AttachmentIdGenerator { UUID.randomUUID().toString() },
     private val afterFinalizationMutation: () -> Unit = {},
     private val afterStagingCleanupClaimMutation: () -> Unit = {},
+    private val afterBlobDeletionBeforeRowDeletion: (String) -> Unit = {},
 ) {
     private val dao = database.attachmentDao()
 
@@ -327,6 +328,7 @@ class AttachmentService(
         }
         try {
             blobStore.delete(attachment.storageKey)
+            afterBlobDeletionBeforeRowDeletion(attachmentId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

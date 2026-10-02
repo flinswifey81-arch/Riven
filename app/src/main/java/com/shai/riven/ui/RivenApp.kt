@@ -431,7 +431,7 @@ private fun ChatScreen(
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             scope.launch {
-                apply(runtimeIo { runtime.addDraftImage(uri) })
+                apply(runtimeIo { runtime.addDraftImage(uri, draft) })
             }
         }
     }
@@ -638,7 +638,9 @@ private fun ChatScreen(
                     pending = sending || cancelling,
                     onRemove = {
                         if (!sending && !cancelling) {
-                            scope.launch { apply(runtimeIo { runtime.removeDraftImage(image.attachmentId) }) }
+                            scope.launch {
+                                apply(runtimeIo { runtime.removeDraftImage(image.attachmentId, draft) })
+                            }
                         }
                     },
                 )

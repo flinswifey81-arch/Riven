@@ -66,6 +66,7 @@ class ProviderNeutralConversationEngine(
     beforeFinalRoomTransaction: suspend () -> Unit = {},
     ownerSessionToken: String = ConversationEngineOwnerRegistry.newToken(),
 ) : AutoCloseable {
+    private val timelineService = ConversationTimelineService(database)
     private val ownerSessionToken = ownerSessionToken
     private val persistence = ConversationRunPersistence(
         database = database,
@@ -196,7 +197,8 @@ class ProviderNeutralConversationEngine(
             return ConversationEngineResult.Existing(reserved.toSnapshot())
         }
         try {
-            val attachmentIds = persistence.attachmentIdsForMessage(reserved.userMessageId)
+            val imageIdsByMessage = relevantCanonicalImageIds(reserved)
+            val attachmentIds = imageIdsByMessage.values.flatten()
             if (attachmentIds.isNotEmpty() && imageInputAuthorization == null) {
                 return failRun(
                     reserved,
@@ -204,14 +206,20 @@ class ProviderNeutralConversationEngine(
                     ConversationRunState.FAILED,
                 )
             }
-            val images = attachmentIds.map { attachmentId ->
-                imageContentResolver.resolve(attachmentId)
-                    ?: return failRun(
-                        reserved,
-                        ConversationEngineErrorCode.IMAGE_ATTACHMENT_INVALID,
-                        ConversationRunState.FAILED,
-                    )
+            val imagesByMessage = linkedMapOf<String, List<ProviderImageContent>>()
+            for ((messageId, ids) in imageIdsByMessage) {
+                val resolved = mutableListOf<ProviderImageContent>()
+                for (attachmentId in ids) {
+                    resolved += imageContentResolver.resolve(attachmentId)
+                        ?: return failRun(
+                            reserved,
+                            ConversationEngineErrorCode.IMAGE_ATTACHMENT_INVALID,
+                            ConversationRunState.FAILED,
+                        )
+                }
+                imagesByMessage[messageId] = resolved
             }
+            val images = imagesByMessage.values.flatten()
             val requiredCapabilities = setOf(
                 ProviderCapability.TEXT_CHAT,
                 ProviderCapability.STREAMING,
@@ -275,7 +283,7 @@ class ProviderNeutralConversationEngine(
                         currentInteraction = RivenCurrentInteraction(
                             messageId = attachedRun.userMessageId,
                             content = userContent,
-                            hasAttachments = images.isNotEmpty(),
+                            hasAttachments = imagesByMessage[attachedRun.userMessageId].orEmpty().isNotEmpty(),
                         ),
                         contextHeadMessageId = attachedRun.contextHeadMessageId,
                     ),
@@ -349,10 +357,11 @@ class ProviderNeutralConversationEngine(
                         conversationRole = fragment.conversationRole,
                     )
                 },
-                imagesByFragmentId = if (images.isEmpty()) {
-                    emptyMap()
-                } else {
-                    mapOf(attachedRun.userMessageId to images)
+                imagesByFragmentId = imagesByMessage.filterKeys { messageId ->
+                    contextSnapshot.fragments.any { fragment ->
+                        fragment.sourceId == ActiveConversationContextSource.SOURCE_ID &&
+                            fragment.fragmentId == messageId
+                    }
                 },
             )
             val awaiting = persistence.markAwaitingProvider(
@@ -533,6 +542,28 @@ class ProviderNeutralConversationEngine(
             current.height == expected.height &&
             current.bytes.size == expected.bytes.size &&
             current.contentSha256 == expected.contentSha256
+    }
+
+    /** Current images plus, for a text follow-up, only the immediately preceding user interaction. */
+    private suspend fun relevantCanonicalImageIds(
+        run: ConversationRunEntity,
+    ): Map<String, List<String>> {
+        val currentIds = persistence.attachmentIdsForMessage(run.userMessageId)
+        if (currentIds.isNotEmpty()) return mapOf(run.userMessageId to currentIds)
+        val tail = timelineService.activeTimelineTailEndingAt(
+            conversationId = run.conversationId,
+            contextHeadMessageId = run.contextHeadMessageId,
+            maximumMessages = ActiveConversationContextSource.MAX_TRANSCRIPT_MESSAGES,
+        ) as? TimelineReadResult.Success ?: return emptyMap()
+        val currentIndex = tail.messages.indexOfLast { it.id == run.userMessageId }
+        if (currentIndex <= 0) return emptyMap()
+        val previousUser = tail.messages.subList(0, currentIndex)
+            .lastOrNull { message ->
+                message.role == com.shai.riven.data.persistence.model.MessageRole.USER &&
+                    message.deliveryState == com.shai.riven.data.persistence.model.MessageDeliveryState.PERSISTED
+            } ?: return emptyMap()
+        val previousIds = persistence.attachmentIdsForMessage(previousUser.id)
+        return if (previousIds.isEmpty()) emptyMap() else mapOf(previousUser.id to previousIds)
     }
 
     private suspend fun settleCancellation(run: ConversationRunEntity) {

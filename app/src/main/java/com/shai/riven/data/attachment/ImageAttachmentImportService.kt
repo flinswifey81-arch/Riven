@@ -80,6 +80,8 @@ sealed interface ImageAttachmentImportError {
 class ImageAttachmentImportService(
     private val attachments: AttachmentService,
     private val metadataDecoder: ImageMetadataDecoder = AndroidImageMetadataDecoder,
+    private val thumbnailStore: AttachmentThumbnailStore? = null,
+    private val thumbnailGenerator: ImageThumbnailGenerator = AndroidImageThumbnailGenerator,
 ) {
     suspend fun import(input: SelectedImageInput): ImageAttachmentImportResult {
         val declaredMime = input.declaredMimeType?.lowercase()?.substringBefore(';')?.trim()
@@ -125,6 +127,14 @@ class ImageAttachmentImportService(
         ) {
             return ImageAttachmentImportResult.Failure(ImageAttachmentImportError.UnsafeDimensions)
         }
+        val thumbnail = if (thumbnailStore != null) {
+            thumbnailGenerator.create(bytes)
+                ?: return ImageAttachmentImportResult.Failure(
+                    ImageAttachmentImportError.CorruptOrUndecodable,
+                )
+        } else {
+            null
+        }
         return when (
             val stored = attachments.createImportedAttachment(
                 ImportedAttachmentInput(
@@ -135,9 +145,28 @@ class ImageAttachmentImportService(
                 ),
             )
         ) {
-            is AttachmentCreateResult.Success -> ImageAttachmentImportResult.Success(
-                ImportedImageAttachment(stored.attachment, width, height),
-            )
+            is AttachmentCreateResult.Success -> {
+                if (thumbnailStore != null && thumbnail != null) {
+                    try {
+                        thumbnailStore.write(stored.attachment.attachmentId, thumbnail)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        attachments.discardUnreferencedAvailable(
+                            stored.attachment.attachmentId,
+                            input.occurredAt,
+                        )
+                        return ImageAttachmentImportResult.Failure(
+                            ImageAttachmentImportError.StoreFailure(
+                                failure::class.java.simpleName,
+                            ),
+                        )
+                    }
+                }
+                ImageAttachmentImportResult.Success(
+                    ImportedImageAttachment(stored.attachment, width, height),
+                )
+            }
             is AttachmentCreateResult.Failure -> ImageAttachmentImportResult.Failure(
                 ImageAttachmentImportError.StoreFailure(stored.error::class.java.simpleName),
             )

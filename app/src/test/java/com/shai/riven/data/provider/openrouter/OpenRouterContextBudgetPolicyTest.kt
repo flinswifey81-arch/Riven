@@ -24,4 +24,13 @@ class OpenRouterContextBudgetPolicyTest {
         assertTrue(known.maxAggregateChars < fallback.maxAggregateChars)
         assertEquals(4_608, known.maxAggregateChars)
     }
+
+    @Test
+    fun coldPolicyUsesPersistedContextLength() {
+        val policy = OpenRouterContextBudgetPolicy { modelId ->
+            if (modelId == "persisted/tiny") 4_096 else null
+        }
+
+        assertEquals(4_608, policy.budgetFor("persisted/tiny").maxAggregateChars)
+    }
 }

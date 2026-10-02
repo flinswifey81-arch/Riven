@@ -112,9 +112,11 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Selected image preview").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_send").assertIsEnabled()
+        composeRule.onNodeWithTag("chat_input").performTextReplacement("Fresh caption before debounce")
         composeRule.onNodeWithTag("chat_remove_image").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.removeImageCalls == 1 }
         composeRule.onAllNodesWithTag("draft_image_preview").assertCountEquals(0)
+        assertTrue(runtime.currentDraft == "Fresh caption before debounce")
     }
 
     @Test
@@ -532,9 +534,10 @@ private class FakeRivenRuntime(
         return success()
     }
 
-    override suspend fun removeDraftImage(attachmentId: String): RivenRuntimeResult {
+    override suspend fun removeDraftImage(attachmentId: String, content: String): RivenRuntimeResult {
         removeImageCalls += 1
         current = current.copy(
+            draft = content,
             draftImages = current.draftImages.filterNot { it.attachmentId == attachmentId },
         )
         return success()

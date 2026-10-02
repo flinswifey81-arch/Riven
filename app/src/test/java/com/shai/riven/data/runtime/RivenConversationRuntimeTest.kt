@@ -6,13 +6,23 @@ import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.attachment.AttachmentByteSource
+import com.shai.riven.data.attachment.AttachmentBlobStore
+import com.shai.riven.data.attachment.AttachmentBlobWriteResult
 import com.shai.riven.data.attachment.AttachmentCreateResult
 import com.shai.riven.data.attachment.AttachmentService
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.attachment.ImportedAttachmentInput
 import com.shai.riven.data.attachment.DecodedImageMetadata
 import com.shai.riven.data.attachment.ImageMetadataDecoder
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
+import com.shai.riven.data.attachment.ImageThumbnailGenerator
+import com.shai.riven.data.attachment.SelectedImageInput
+import java.io.ByteArrayInputStream
 import com.shai.riven.data.conversation.engine.ConversationEngineErrorCode
+import com.shai.riven.data.conversation.AppendTimelineMessageInput
+import com.shai.riven.data.conversation.ConversationTimelineService
+import com.shai.riven.data.conversation.NewTimelineMessageInput
+import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.draft.ConversationDraftService
 import com.shai.riven.data.draft.SaveConversationDraftInput
 import com.shai.riven.data.draft.SaveConversationDraftResult
@@ -27,11 +37,14 @@ import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.AttachmentKind
+import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.provider.openrouter.OpenRouterImageInputCapability
+import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpClient
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpRequest
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpResponse
 import java.util.concurrent.atomic.AtomicLong
+import java.io.InputStream
 import java.nio.file.Files
 import java.util.Base64
 import java.util.concurrent.CountDownLatch
@@ -64,8 +77,9 @@ class RivenConversationRuntimeTest {
     private lateinit var selection: InMemorySelectedProfileStore
     private lateinit var scheduler: RecordingScheduler
     private lateinit var attachmentRoot: java.io.File
-    private lateinit var attachmentBlobStore: FileAttachmentBlobStore
+    private lateinit var attachmentBlobStore: CountingAttachmentBlobStore
     private lateinit var imageCapabilities: InMemoryImageInputCapabilityStore
+    private lateinit var thumbnailStore: FileAttachmentThumbnailStore
     private val clock = AtomicLong(1_000)
     private val runtimes = mutableListOf<RivenConversationRuntime>()
 
@@ -79,8 +93,9 @@ class RivenConversationRuntimeTest {
         selection = InMemorySelectedProfileStore()
         scheduler = RecordingScheduler()
         attachmentRoot = Files.createTempDirectory("riven-runtime-images").toFile()
-        attachmentBlobStore = FileAttachmentBlobStore(attachmentRoot)
+        attachmentBlobStore = CountingAttachmentBlobStore(FileAttachmentBlobStore(attachmentRoot))
         imageCapabilities = InMemoryImageInputCapabilityStore()
+        thumbnailStore = FileAttachmentThumbnailStore(java.io.File(attachmentRoot, "thumbs"))
     }
 
     @After
@@ -357,11 +372,38 @@ class RivenConversationRuntimeTest {
     }
 
     @Test
-    fun imageDraftRelaunchConfirmationRegenerateAndContinueUseOnlyCanonicalImage() = runBlocking {
+    fun imageAddAndRemovePersistLatestCaptionWithoutWaitingForDebounce() = runBlocking {
+        val runtime = runtime(QueueHttpClient())
+        runtime.initialize()
+        runtime.saveDraft("older persisted caption")
+
+        val added = runtime.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = pngBytes().size.toLong(),
+                openStream = { ByteArrayInputStream(pngBytes()) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = "fresh caption before debounce",
+        ) as RivenRuntimeResult.Success
+
+        assertEquals("fresh caption before debounce", added.snapshot.draft)
+        val attachmentId = added.snapshot.draftImages.single().attachmentId
+        val removed = runtime.removeDraftImage(
+            attachmentId,
+            content = "newest caption before remove debounce",
+        ) as RivenRuntimeResult.Success
+        assertEquals("newest caption before remove debounce", removed.snapshot.draft)
+        assertTrue(removed.snapshot.draftImages.isEmpty())
+    }
+
+    @Test
+    fun imageDraftRelaunchFollowupRegenerateAndContinueUseOnlyBoundedCanonicalImage() = runBlocking {
         val http = QueueHttpClient(
             success("I can see it."),
             success("I can still see it."),
             success("Continuing without resending it."),
+            success("Now the old image is out of scope."),
         )
         val first = runtime(http)
         first.initialize()
@@ -393,11 +435,14 @@ class RivenConversationRuntimeTest {
         assertTrue(sentSnapshot.draftImages.isEmpty())
         assertEquals(1, sentSnapshot.messages.single { it.role == MessageRole.USER }.images.size)
         assertEquals(1, imagePartCount(checkNotNull(http.requests[0].body)))
+        assertEquals(listOf("A small caption"), imageTextParts(checkNotNull(http.requests[0].body)))
 
         assertTrue(reopened.regenerate() is RivenRuntimeResult.Success)
         assertEquals(1, imagePartCount(checkNotNull(http.requests[1].body)))
         assertTrue(reopened.continueConversation() is RivenRuntimeResult.Success)
-        assertEquals(0, imagePartCount(checkNotNull(http.requests[2].body)))
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[2].body)))
+        assertTrue(reopened.send("Now unrelated") is RivenRuntimeResult.Success)
+        assertEquals(0, imagePartCount(checkNotNull(http.requests[3].body)))
     }
 
     @Test
@@ -422,6 +467,119 @@ class RivenConversationRuntimeTest {
         assertTrue(http.requests.isEmpty())
     }
 
+    @Test
+    fun catalogRefreshDowngradeOverridesPreviouslySupportedOrConfirmedImageState() = runBlocking {
+        val http = QueueHttpClient(
+            listOf(
+                """{"data":[{"id":"changing/model","name":"Changing","context_length":8192,"architecture":{"input_modalities":["text"]}}]}""",
+            ),
+        )
+        val runtime = runtime(http)
+        runtime.initialize()
+        val profile = runtime.saveProfile(null, "Changing", "changing/model", "fake-key")
+            as RivenProfileSaveResult.Success
+        imageCapabilities.write(
+            profile.profile.profileId,
+            profile.profile.modelId,
+            OpenRouterImageInputCapability.USER_CONFIRMED_UNKNOWN,
+        )
+        attachImageDraft("Do not send")
+
+        assertTrue(runtime.fetchModels() is OpenRouterModelCatalogResult.Success)
+        val result = runtime.send("Do not send")
+
+        assertTrue(result is RivenRuntimeResult.Failure)
+        assertFalse((result as RivenRuntimeResult.Failure).requiresImageCapabilityConfirmation)
+        assertEquals(1, checkNotNull(result.snapshot).draftImages.size)
+        assertEquals(1, http.requests.size)
+        assertEquals("GET", http.requests.single().method)
+    }
+
+    @Test
+    fun coldRelaunchUsesPersistedSmallCatalogContextInsteadOfUnknownFallback() = runBlocking {
+        val catalogHttp = QueueHttpClient(
+            listOf(
+                """{"data":[{"id":"tiny/model","name":"Tiny","context_length":4096,"architecture":{"input_modalities":["text"]}}]}""",
+            ),
+        )
+        val first = runtime(catalogHttp)
+        first.initialize()
+        val profile = first.saveProfile(null, "Tiny", "tiny/model", "fake-key")
+            as RivenProfileSaveResult.Success
+        assertTrue(first.fetchModels() is OpenRouterModelCatalogResult.Success)
+        assertTrue(
+            first.saveProfile(
+                profile.profile.profileId,
+                "Tiny",
+                "tiny/model",
+                "",
+            ) is RivenProfileSaveResult.Success,
+        )
+        first.close()
+        runtimes.remove(first)
+
+        val providerHttp = QueueHttpClient(success("must not run"))
+        val reopened = runtime(providerHttp)
+        reopened.initialize()
+        val result = reopened.send("x".repeat(6_000))
+
+        assertTrue(result is RivenRuntimeResult.Failure)
+        assertEquals(
+            ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED,
+            (result as RivenRuntimeResult.Failure).engineCode,
+        )
+        assertTrue(providerHttp.requests.isEmpty())
+    }
+
+    @Test
+    fun longImageHistoryUsesBoundedThumbnailsWithoutOpeningProviderOriginals() = runBlocking {
+        val runtime = runtime(QueueHttpClient())
+        runtime.initialize()
+        val timeline = ConversationTimelineService(database)
+        val attachments = AttachmentService(database, attachmentBlobStore)
+        var revision = 0L
+        val fullThumbnail = ByteArray(com.shai.riven.data.attachment.MAX_ATTACHMENT_THUMBNAIL_BYTES) { 7 }
+        repeat(20) { index ->
+            val created = attachments.createImportedAttachment(
+                ImportedAttachmentInput(
+                    kind = AttachmentKind.IMAGE,
+                    mimeType = "image/png",
+                    occurredAt = clock.incrementAndGet(),
+                    bytes = AttachmentByteSource.fromBytes(byteArrayOf(1, 2, index.toByte())),
+                ),
+            ) as AttachmentCreateResult.Success
+            thumbnailStore.write(created.attachment.attachmentId, fullThumbnail)
+            val appended = timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    conversationId = RivenConversationRuntime.CONVERSATION_ID,
+                    message = NewTimelineMessageInput(
+                        messageId = "history-image-$index",
+                        role = MessageRole.USER,
+                        deliveryState = MessageDeliveryState.PERSISTED,
+                        content = "image $index",
+                        createdAt = clock.incrementAndGet(),
+                        updatedAt = clock.incrementAndGet(),
+                        attachmentIds = listOf(created.attachment.attachmentId),
+                    ),
+                    expectedTimelineRevision = revision,
+                    occurredAt = clock.incrementAndGet(),
+                ),
+            ) as TimelineWriteResult.MessageAppended
+            revision = appended.timelineRevision
+        }
+        attachmentBlobStore.openCount = 0
+
+        val first = (runtime.snapshot() as RivenRuntimeResult.Success).snapshot
+        val second = (runtime.snapshot() as RivenRuntimeResult.Success).snapshot
+
+        val previews = first.messages.flatMap(RivenChatMessage::images).map { it.previewBytes }
+        assertEquals(20, previews.size)
+        assertTrue(previews.sumOf(ByteArray::size) <= MAX_RUNTIME_THUMBNAIL_CACHE_BYTES)
+        assertTrue(previews.any(ByteArray::isEmpty))
+        assertEquals(0, attachmentBlobStore.openCount)
+        assertTrue(second.messages.flatMap(RivenChatMessage::images).isNotEmpty())
+    }
+
     private fun runtime(http: OpenRouterHttpClient) = RivenConversationRuntime(
         database = database,
         credentialStore = credentials,
@@ -430,7 +588,9 @@ class RivenConversationRuntimeTest {
         personalitySource = LockedRivenPersonalityContextSource(context),
         httpClient = http,
         attachmentBlobStore = attachmentBlobStore,
+        attachmentThumbnailStore = thumbnailStore,
         imageMetadataDecoder = TEST_IMAGE_DECODER,
+        imageThumbnailGenerator = ImageThumbnailGenerator { bytes -> bytes.take(64).toByteArray() },
         imageCapabilityStore = imageCapabilities,
         ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
         clock = { clock.incrementAndGet() },
@@ -455,6 +615,7 @@ class RivenConversationRuntimeTest {
             ),
         )
         assertTrue(saved is SaveConversationDraftResult.Saved)
+        thumbnailStore.write(attachment.attachment.attachmentId, pngBytes())
         return attachment.attachment.attachmentId
     }
 
@@ -470,6 +631,19 @@ class RivenConversationRuntimeTest {
             }
         }
         return count
+    }
+
+    private fun imageTextParts(body: String): List<String> {
+        val messages = JSONObject(body).getJSONArray("messages")
+        return buildList {
+            for (messageIndex in 0 until messages.length()) {
+                val content = messages.getJSONObject(messageIndex).optJSONArray("content") ?: continue
+                for (partIndex in 0 until content.length()) {
+                    val part = content.getJSONObject(partIndex)
+                    if (part.optString("type") == "text") add(part.getString("text"))
+                }
+            }
+        }
     }
 
     private companion object {
@@ -509,6 +683,26 @@ class RivenConversationRuntimeTest {
             for (line in lines) if (!onLine(line)) break
             return OpenRouterHttpResponse(200, emptyMap())
         }
+    }
+
+    private class CountingAttachmentBlobStore(
+        private val delegate: AttachmentBlobStore,
+    ) : AttachmentBlobStore {
+        var openCount: Int = 0
+
+        override fun write(
+            storageKey: String,
+            source: AttachmentByteSource,
+        ): AttachmentBlobWriteResult = delegate.write(storageKey, source)
+
+        override fun exists(storageKey: String): Boolean = delegate.exists(storageKey)
+
+        override fun open(storageKey: String): InputStream {
+            openCount += 1
+            return delegate.open(storageKey)
+        }
+
+        override fun delete(storageKey: String) = delegate.delete(storageKey)
     }
 
     private class HoldingHttpClient : OpenRouterHttpClient {

@@ -7,6 +7,8 @@ import com.shai.riven.data.attachment.AttachmentBlobStore
 import com.shai.riven.data.attachment.AttachmentBlobWriteResult
 import com.shai.riven.data.attachment.AttachmentByteSource
 import com.shai.riven.data.attachment.AttachmentService
+import com.shai.riven.data.attachment.AttachmentCreateResult
+import com.shai.riven.data.attachment.ImportedAttachmentInput
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
@@ -97,6 +99,27 @@ class AttachmentMaintenanceServiceTest {
         assertTrue(result.removedAttachmentIds.isEmpty())
         assertEquals(AttachmentState.AVAILABLE, database.attachmentDao().attachment("available")?.state)
         assertTrue(blobStore.exists("attachments/available.blob"))
+    }
+
+    @Test
+    fun finalizedImportInterruptedBeforeDraftLinkIsRecoveredAfterOrphanLease() = runBlocking {
+        val created = AttachmentService(database, blobStore).createImportedAttachment(
+            ImportedAttachmentInput(
+                kind = AttachmentKind.IMAGE,
+                mimeType = "image/png",
+                occurredAt = now - ATTACHMENT_AVAILABLE_ORPHAN_STALE_AFTER_MS,
+                bytes = AttachmentByteSource.fromBytes(byteArrayOf(1, 2, 3)),
+                attachmentId = "interrupted-import",
+            ),
+        )
+        assertTrue(created is AttachmentCreateResult.Success)
+        assertEquals(AttachmentState.AVAILABLE, database.attachmentDao().attachment("interrupted-import")?.state)
+
+        val result = service().runMaintenance() as AttachmentMaintenanceResult.Completed
+
+        assertEquals(listOf("interrupted-import"), result.removedAttachmentIds)
+        assertNull(database.attachmentDao().attachment("interrupted-import"))
+        assertFalse(blobStore.exists("attachments/interrupted-import.blob"))
     }
 
     @Test

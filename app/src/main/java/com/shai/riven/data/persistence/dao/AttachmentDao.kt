@@ -36,6 +36,22 @@ interface AttachmentDao {
         FROM attachments
         WHERE state = :deletePendingState
            OR (state = :stagingState AND updated_at <= :staleBefore)
+           OR (
+                state = :availableState
+                AND updated_at <= :orphanBefore
+                AND NOT EXISTS (
+                    SELECT 1 FROM message_attachments
+                    WHERE message_attachments.attachment_id = attachments.attachment_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM draft_attachments
+                    WHERE draft_attachments.attachment_id = attachments.attachment_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM derived_artifact_attachment_dependencies
+                    WHERE derived_artifact_attachment_dependencies.attachment_id = attachments.attachment_id
+                )
+           )
         ORDER BY
             CASE WHEN state = :deletePendingState THEN 0 ELSE 1 END,
             updated_at,
@@ -47,6 +63,8 @@ interface AttachmentDao {
         deletePendingState: AttachmentState,
         stagingState: AttachmentState,
         staleBefore: Long,
+        availableState: AttachmentState,
+        orphanBefore: Long,
         limit: Int,
     ): List<AttachmentEntity>
 
