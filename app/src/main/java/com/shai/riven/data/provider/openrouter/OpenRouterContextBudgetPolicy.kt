@@ -9,8 +9,6 @@ import java.util.concurrent.ConcurrentHashMap
  * current user turn are never truncated by the downstream collector.
  */
 class OpenRouterContextBudgetPolicy {
-    private val contextTokensByModel = ConcurrentHashMap<String, Int>()
-
     fun record(models: Collection<OpenRouterModel>) {
         models.forEach { model ->
             model.contextLength?.takeIf { it > 0 }?.let { contextTokensByModel[model.id] = it }
@@ -31,6 +29,8 @@ class OpenRouterContextBudgetPolicy {
     }
 
     companion object {
+        private val contextTokensByModel = ConcurrentHashMap<String, Int>()
+
         const val UNKNOWN_MODEL_CONTEXT_TOKENS = 16_384
         const val RESERVED_COMPLETION_TOKENS = OpenRouterConversationAdapter.DEFAULT_MAX_COMPLETION_TOKENS
         const val RESERVED_PROTOCOL_TOKENS = 512

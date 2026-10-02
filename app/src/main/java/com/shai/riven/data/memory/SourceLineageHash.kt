@@ -14,3 +14,11 @@ internal fun sourceLineageHash(experienceId: String, lineageKey: String): String
         .digest(canonicalLineage.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
 }
+
+/** Stable suppression key for every generated meaning derived from one source Experience. */
+internal fun sourceExperienceSuppressionHash(experienceId: String): String {
+    val canonicalSource = "riven-source-experience-v1:$experienceId"
+    return MessageDigest.getInstance("SHA-256")
+        .digest(canonicalSource.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
+}

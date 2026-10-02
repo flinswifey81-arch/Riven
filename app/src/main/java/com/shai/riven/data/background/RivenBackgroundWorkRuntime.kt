@@ -9,24 +9,27 @@ import com.shai.riven.data.automaticmemory.OpenRouterAutomaticMemoryModelFactory
 import com.shai.riven.data.attachment.AttachmentService
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.credential.ProviderCredentialStore
-import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.persistence.RivenDatabaseLease
+import com.shai.riven.data.persistence.RivenDatabaseProvider
+import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
 import com.shai.riven.data.provider.ProviderProfileService
 import com.shai.riven.data.provider.ProviderRuntimeProfileResolver
 import com.shai.riven.data.provider.openrouter.HttpUrlConnectionOpenRouterHttpClient
 import java.io.Closeable
 
 class RivenBackgroundWorkRuntime private constructor(
-    private val database: RivenDatabase,
+    private val databaseLease: RivenDatabaseLease,
     val executor: RivenBackgroundWorkExecutor,
 ) : Closeable {
     override fun close() {
-        database.close()
+        databaseLease.close()
     }
 
     companion object {
         fun create(applicationContext: Context): RivenBackgroundWorkRuntime {
             val context = applicationContext.applicationContext
-            val database = RivenDatabase.build(context)
+            val databaseLease = RivenDatabaseProvider.acquire(context)
+            val database = databaseLease.database
             try {
                 val scheduler = WorkManagerRivenBackgroundWorkScheduler(
                     WorkManager.getInstance(context),
@@ -59,11 +62,12 @@ class RivenBackgroundWorkRuntime private constructor(
                             ProviderCredentialStore.fromContext(context),
                         ),
                         httpClient = HttpUrlConnectionOpenRouterHttpClient(),
+                        lockedPersonalityCanon = LockedRivenPersonalityContextSource(context)::verifiedCanon,
                     ),
                 )
                 val automaticMemorySweep = AutomaticMemorySweepService(automaticMemoryQueue)
                 return RivenBackgroundWorkRuntime(
-                    database = database,
+                    databaseLease = databaseLease,
                     executor = RivenBackgroundWorkExecutor(
                         attachmentMaintenance = attachmentMaintenance,
                         repairJobRunner = repairRunner,
@@ -73,7 +77,7 @@ class RivenBackgroundWorkRuntime private constructor(
                     ),
                 )
             } catch (failure: Exception) {
-                database.close()
+                databaseLease.close()
                 throw failure
             }
         }

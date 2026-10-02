@@ -218,6 +218,7 @@ enum class InvalidValidationDecisionReason {
     UNGROUNDED_ENTITY,
     DUPLICATE_ENTITY_LINK,
     SENSITIVITY_DOWNGRADE,
+    UNSUPPORTED_SELF_ASSERTION,
 }
 
 enum class MemoryIdGenerationFailureReason {

@@ -79,6 +79,7 @@ class RivenBackgroundWorkExecutor(
                 is AutomaticMemoryJobRunResult.Succeeded,
                 is AutomaticMemoryJobRunResult.Excluded,
                 is AutomaticMemoryJobRunResult.PermanentlyFailed,
+                is AutomaticMemoryJobRunResult.Blocked,
                 is AutomaticMemoryJobRunResult.NoOp,
                 is AutomaticMemoryJobRunResult.LeaseLost,
                 -> RivenBackgroundExecutionOutcome.Completed

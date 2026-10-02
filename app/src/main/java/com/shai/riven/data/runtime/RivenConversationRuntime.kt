@@ -51,6 +51,8 @@ import com.shai.riven.data.memory.intent.ManualMemoryIntentService
 import com.shai.riven.data.memory.intent.ManualRememberMemoryInput
 import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.persistence.RivenDatabaseLease
+import com.shai.riven.data.persistence.RivenDatabaseProvider
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.model.ConversationRunState
@@ -209,7 +211,7 @@ class RivenConversationRuntime(
     httpClient: OpenRouterHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = System::currentTimeMillis,
-    private val ownsDatabase: Boolean = false,
+    private val databaseLease: RivenDatabaseLease? = null,
 ) : RivenRuntimeController {
     private val timeline = ConversationTimelineService(database)
     private val profileService = ProviderProfileService(database)
@@ -529,7 +531,10 @@ class RivenConversationRuntime(
                 }
             }
         }
-        if (result is RivenProfileSaveResult.Success) selectedProfileStore.select(result.profile.profileId)
+        if (result is RivenProfileSaveResult.Success) {
+            selectedProfileStore.select(result.profile.profileId)
+            backgroundScheduler.enqueueAutomaticMemorySweep()
+        }
         result
     }
 
@@ -539,6 +544,7 @@ class RivenConversationRuntime(
             return@withLock RivenRuntimeResult.Failure("That provider profile is unavailable.")
         }
         selectedProfileStore.select(profileId)
+        backgroundScheduler.enqueueAutomaticMemorySweep()
         snapshotResult()
     }
 
@@ -642,7 +648,7 @@ class RivenConversationRuntime(
         activeConversationOperation.get()?.job?.cancel(CancellationException("Riven runtime closed"))
         engine.close()
         recall.close()
-        if (ownsDatabase) database.close()
+        databaseLease?.close()
     }
 
     private suspend fun executeRun(
@@ -913,17 +919,23 @@ class RivenConversationRuntime(
                 com.shai.riven.data.provider.openrouter.HttpUrlConnectionOpenRouterHttpClient(),
         ): RivenConversationRuntime {
             val appContext = context.applicationContext
-            return RivenConversationRuntime(
-                database = RivenDatabase.build(appContext),
-                credentialStore = ProviderCredentialStore.fromContext(appContext),
-                selectedProfileStore = AndroidSelectedProviderProfileStore(appContext),
-                backgroundScheduler = WorkManagerRivenBackgroundWorkScheduler(
-                    WorkManager.getInstance(appContext),
-                ),
-                personalitySource = LockedRivenPersonalityContextSource(appContext),
-                httpClient = httpClient,
-                ownsDatabase = true,
-            )
+            val databaseLease = RivenDatabaseProvider.acquire(appContext)
+            return try {
+                RivenConversationRuntime(
+                    database = databaseLease.database,
+                    credentialStore = ProviderCredentialStore.fromContext(appContext),
+                    selectedProfileStore = AndroidSelectedProviderProfileStore(appContext),
+                    backgroundScheduler = WorkManagerRivenBackgroundWorkScheduler(
+                        WorkManager.getInstance(appContext),
+                    ),
+                    personalitySource = LockedRivenPersonalityContextSource(appContext),
+                    httpClient = httpClient,
+                    databaseLease = databaseLease,
+                )
+            } catch (failure: Exception) {
+                databaseLease.close()
+                throw failure
+            }
         }
     }
 }

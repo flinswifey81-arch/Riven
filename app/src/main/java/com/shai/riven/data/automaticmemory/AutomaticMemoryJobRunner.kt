@@ -40,8 +40,14 @@ interface AutomaticMemoryModel :
 sealed interface AutomaticMemoryModelFactoryResult {
     data class Ready(val model: AutomaticMemoryModel) : AutomaticMemoryModelFactoryResult
     data class RetryableFailure(val errorCode: String) : AutomaticMemoryModelFactoryResult
+    data class Blocked(val errorCode: String) : AutomaticMemoryModelFactoryResult
     data class PermanentFailure(val errorCode: String) : AutomaticMemoryModelFactoryResult
 }
+
+internal class AutomaticMemoryModelFailure(
+    val errorCode: String,
+    val retryable: Boolean,
+) : RuntimeException(errorCode)
 
 fun interface AutomaticMemoryModelFactory {
     suspend fun create(run: ConversationRunEntity): AutomaticMemoryModelFactoryResult
@@ -51,6 +57,7 @@ sealed interface AutomaticMemoryJobRunResult {
     data class Succeeded(val jobId: String) : AutomaticMemoryJobRunResult
     data class Excluded(val jobId: String, val reasonCode: String) : AutomaticMemoryJobRunResult
     data class RetryableFailure(val jobId: String, val errorCode: String) : AutomaticMemoryJobRunResult
+    data class Blocked(val jobId: String, val errorCode: String) : AutomaticMemoryJobRunResult
     data class PermanentlyFailed(val jobId: String, val errorCode: String) : AutomaticMemoryJobRunResult
     data class NoOp(val jobId: String) : AutomaticMemoryJobRunResult
     data class AlreadyRunning(val jobId: String) : AutomaticMemoryJobRunResult
@@ -100,6 +107,8 @@ class AutomaticMemoryJobRunner(
             is AutomaticMemoryModelFactoryResult.Ready -> created.model
             is AutomaticMemoryModelFactoryResult.RetryableFailure ->
                 return fail(claimed, created.errorCode, retryable = true)
+            is AutomaticMemoryModelFactoryResult.Blocked ->
+                return block(claimed, created.errorCode)
             is AutomaticMemoryModelFactoryResult.PermanentFailure ->
                 return fail(claimed, created.errorCode, retryable = false)
         }
@@ -146,6 +155,8 @@ class AutomaticMemoryJobRunner(
             return finishSucceeded(claimed)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: AutomaticMemoryModelFailure) {
+            return fail(claimed, failure.errorCode, retryable = failure.retryable)
         } catch (failure: Exception) {
             return fail(
                 claimed,
@@ -161,20 +172,37 @@ class AutomaticMemoryJobRunner(
         job: AutomaticMemoryJobEntity,
         service: ImmediateAttentionService,
     ): StageFailure? = when (val existing = service.readAssessment(job.sourceExperienceId)) {
-        is ReadAttentionAssessmentResult.Assessment -> null
-        is ReadAttentionAssessmentResult.NoAssessment -> when (
-            val assessed = service.assess(
-                AssessImmediateAttentionInput(
-                    experienceId = job.sourceExperienceId,
-                    expectedRevision = 0L,
-                    assessedAt = clock(),
-                ),
-            )
+        is ReadAttentionAssessmentResult.Assessment -> if (
+            job.lastErrorCode == AutomaticMemoryQueueService.SHORT_WINDOW_CONTEXT_CODE
         ) {
-            is AssessImmediateAttentionResult.Persisted -> null
-            is AssessImmediateAttentionResult.Failure -> assessed.error.toStageFailure()
+            assessAttention(job, service, existing.assessment.revision)
+        } else {
+            null
+        }
+        is ReadAttentionAssessmentResult.NoAssessment -> when (
+            val failure = assessAttention(job, service, expectedRevision = 0L)
+        ) {
+            null -> null
+            else -> failure
         }
         is ReadAttentionAssessmentResult.Failure -> existing.error.toStageFailure()
+    }
+
+    private suspend fun assessAttention(
+        job: AutomaticMemoryJobEntity,
+        service: ImmediateAttentionService,
+        expectedRevision: Long,
+    ): StageFailure? = when (
+        val assessed = service.assess(
+            AssessImmediateAttentionInput(
+                experienceId = job.sourceExperienceId,
+                expectedRevision = expectedRevision,
+                assessedAt = clock(),
+            ),
+        )
+    ) {
+        is AssessImmediateAttentionResult.Persisted -> null
+        is AssessImmediateAttentionResult.Failure -> assessed.error.toStageFailure()
     }
 
     private suspend fun ensureExtraction(
@@ -184,7 +212,12 @@ class AutomaticMemoryJobRunner(
         val existing = service.readCandidatesSeededByExperience(job.sourceExperienceId)
         when (existing) {
             is ReadCandidatesForExperienceResult.Failure -> return existing.error.toStageFailure()
-            is ReadCandidatesForExperienceResult.Candidates -> if (existing.candidates.isNotEmpty()) return null
+            is ReadCandidatesForExperienceResult.Candidates -> if (
+                existing.candidates.isNotEmpty() &&
+                job.lastErrorCode != AutomaticMemoryQueueService.SHORT_WINDOW_CONTEXT_CODE
+            ) {
+                return null
+            }
         }
         return when (
             val result = service.extract(
@@ -248,6 +281,22 @@ class AutomaticMemoryJobRunner(
         when (current.state) {
             AutomaticMemoryJobState.PENDING -> {
                 val now = clock()
+                if (current.attemptCount >= maxAttempts) {
+                    dao.failExhausted(
+                        current.id,
+                        AutomaticMemoryJobState.PENDING,
+                        AutomaticMemoryJobState.FAILED,
+                        current.attemptCount,
+                        now,
+                        ATTEMPT_BUDGET_EXHAUSTED,
+                    )
+                    return@withTransaction ClaimResult.Completed(
+                        AutomaticMemoryJobRunResult.PermanentlyFailed(
+                            current.id,
+                            ATTEMPT_BUDGET_EXHAUSTED,
+                        ),
+                    )
+                }
                 if (dao.claimPending(
                         current.id,
                         AutomaticMemoryJobState.PENDING,
@@ -261,7 +310,7 @@ class AutomaticMemoryJobRunner(
                             state = AutomaticMemoryJobState.RUNNING,
                             attemptCount = current.attemptCount + 1,
                             updatedAt = now,
-                            lastErrorCode = null,
+                            lastErrorCode = current.lastErrorCode,
                         ),
                     )
                 } else {
@@ -272,6 +321,21 @@ class AutomaticMemoryJobRunner(
                 val now = clock()
                 if (current.updatedAt > now - runningLeaseMs) {
                     ClaimResult.Completed(AutomaticMemoryJobRunResult.AlreadyRunning(jobId))
+                } else if (current.attemptCount >= maxAttempts) {
+                    dao.failExhausted(
+                        current.id,
+                        AutomaticMemoryJobState.RUNNING,
+                        AutomaticMemoryJobState.FAILED,
+                        current.attemptCount,
+                        now,
+                        ATTEMPT_BUDGET_EXHAUSTED,
+                    )
+                    ClaimResult.Completed(
+                        AutomaticMemoryJobRunResult.PermanentlyFailed(
+                            current.id,
+                            ATTEMPT_BUDGET_EXHAUSTED,
+                        ),
+                    )
                 } else if (dao.reclaimStaleRunning(
                         current.id,
                         AutomaticMemoryJobState.RUNNING,
@@ -285,7 +349,7 @@ class AutomaticMemoryJobRunner(
                         current.copy(
                             attemptCount = current.attemptCount + 1,
                             updatedAt = now,
-                            lastErrorCode = null,
+                            lastErrorCode = current.lastErrorCode,
                         ),
                     )
                 } else {
@@ -409,6 +473,26 @@ class AutomaticMemoryJobRunner(
         }
     }
 
+    private fun block(
+        job: AutomaticMemoryJobEntity,
+        errorCode: String,
+    ): AutomaticMemoryJobRunResult {
+        val code = errorCode.safeErrorCode()
+        val changed = dao.releaseBlocked(
+            jobId = job.id,
+            runningState = AutomaticMemoryJobState.RUNNING,
+            pendingState = AutomaticMemoryJobState.PENDING,
+            expectedAttemptCount = job.attemptCount,
+            updatedAt = clock(),
+            lastErrorCode = code,
+        )
+        return if (changed == 1) {
+            AutomaticMemoryJobRunResult.Blocked(job.id, code)
+        } else {
+            AutomaticMemoryJobRunResult.LeaseLost(job.id)
+        }
+    }
+
     private fun ImmediateAttentionError.toStageFailure(): StageFailure = when (this) {
         is ImmediateAttentionError.ExperienceUnavailable,
         is ImmediateAttentionError.InactiveConversationSource,
@@ -458,5 +542,9 @@ class AutomaticMemoryJobRunner(
         data class Excluded(val errorCode: String) : StageFailure
         data class Retryable(val errorCode: String) : StageFailure
         data class Permanent(val errorCode: String) : StageFailure
+    }
+
+    private companion object {
+        const val ATTEMPT_BUDGET_EXHAUSTED = "ATTEMPT_BUDGET_EXHAUSTED"
     }
 }

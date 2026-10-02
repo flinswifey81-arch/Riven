@@ -818,8 +818,8 @@ class MemoryTransactionServiceTest {
         val tombstones = database.maintenanceDao().suppressionTombstones()
         assertEquals(2, tombstones.size)
         val expectedHashes = setOf(
-            sha256("experience-1:lineage-experience-1"),
-            sha256("experience-2:lineage-experience-2"),
+            sourceExperienceSuppressionHash("experience-1"),
+            sourceExperienceSuppressionHash("experience-2"),
         )
         assertEquals(expectedHashes, tombstones.mapTo(mutableSetOf()) { it.sourceLineageHash })
         tombstones.forEach { tombstone ->
@@ -858,7 +858,7 @@ class MemoryTransactionServiceTest {
         assertEquals(MemoryRetentionState.FORGOTTEN, database.memoryDao().memory("memory-b")?.retentionState)
         assertEquals(firstTombstone, database.maintenanceDao().suppressionTombstones().single())
         assertEquals(
-            sha256("experience-shared:lineage-experience-shared"),
+            sourceExperienceSuppressionHash("experience-shared"),
             firstTombstone.sourceLineageHash,
         )
         assertEquals(MemoryAuditAction.FORGOTTEN, database.maintenanceDao().memoryAuditHistory("memory-a").single().action)
@@ -871,7 +871,7 @@ class MemoryTransactionServiceTest {
         insertCanonicalMemory("memory-1", "experience-shared")
         val existing = suppressionTombstone(
             id = "active-tombstone",
-            sourceLineageHash = sha256("experience-shared:lineage-experience-shared"),
+            sourceLineageHash = sourceExperienceSuppressionHash("experience-shared"),
             kind = SuppressionKind.FORGET,
             isActive = true,
             createdAt = 10,
@@ -890,7 +890,7 @@ class MemoryTransactionServiceTest {
         insertCanonicalMemory("memory-1", "experience-shared")
         val existing = suppressionTombstone(
             id = "inactive-tombstone",
-            sourceLineageHash = sha256("experience-shared:lineage-experience-shared"),
+            sourceLineageHash = sourceExperienceSuppressionHash("experience-shared"),
             kind = SuppressionKind.FORGET,
             isActive = false,
             createdAt = 10,
@@ -915,7 +915,7 @@ class MemoryTransactionServiceTest {
         insertCanonicalMemory("memory-1", "experience-shared")
         val existingDelete = suppressionTombstone(
             id = "delete-tombstone",
-            sourceLineageHash = sha256("experience-shared:lineage-experience-shared"),
+            sourceLineageHash = sourceExperienceSuppressionHash("experience-shared"),
             kind = SuppressionKind.DELETE,
             isActive = false,
             createdAt = 10,

@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
+import androidx.work.NetworkType
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.SynchronousExecutor
@@ -90,6 +91,7 @@ class WorkManagerRivenBackgroundWorkSchedulerTest {
             setOf(RivenBackgroundWorkTags.BACKGROUND, RivenBackgroundWorkTags.AUTOMATIC_MEMORY),
             request.tags - RivenBackgroundWorker::class.java.name,
         )
+        assertEquals(NetworkType.CONNECTED, request.workSpec.constraints.requiredNetworkType)
     }
 
     @Test

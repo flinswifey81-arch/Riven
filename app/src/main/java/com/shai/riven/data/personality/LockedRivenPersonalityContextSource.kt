@@ -42,7 +42,7 @@ class LockedRivenPersonalityContextSource(
 
     override suspend fun read(request: RivenContextReadRequest): RivenContextSourceResult {
         val canon = try {
-            cachedCanon ?: loadAndVerify().also { cachedCanon = it }
+            verifiedCanon()
         } catch (failure: Exception) {
             return RivenContextSourceResult.Failure(
                 RivenContextSourceError.ReadFailure(
@@ -60,6 +60,11 @@ class LockedRivenPersonalityContextSource(
             ),
         )
     }
+
+    internal fun verifiedCanon(): String =
+        cachedCanon ?: synchronized(this) {
+            cachedCanon ?: loadAndVerify().also { cachedCanon = it }
+        }
 
     private fun loadAndVerify(): String {
         val normalized = canonLoader()

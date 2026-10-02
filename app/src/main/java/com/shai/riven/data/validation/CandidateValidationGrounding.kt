@@ -5,6 +5,7 @@ import com.shai.riven.data.attention.ImmediateAttentionError
 import com.shai.riven.data.attention.ImmediateAttentionGrounding
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
+import com.shai.riven.data.memory.sourceExperienceSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
@@ -139,9 +140,10 @@ internal class CandidateValidationGrounding(
     fun hasActiveSuppressionInCurrentTransaction(
         context: GroundedCandidateValidationContext,
     ): Boolean = context.evidence.any { evidence ->
-        maintenanceDao.suppressionTombstone(
-            sourceLineageHash(evidence.experienceId, evidence.lineageKey),
-        )?.isActive == true
+        maintenanceDao.suppressionTombstone(sourceExperienceSuppressionHash(evidence.experienceId))?.isActive == true ||
+            maintenanceDao.suppressionTombstone(
+                sourceLineageHash(evidence.experienceId, evidence.lineageKey),
+            )?.isActive == true
     }
 
     private fun ImmediateAttentionError.toValidationError(candidateId: String): CandidateValidationError = when (this) {

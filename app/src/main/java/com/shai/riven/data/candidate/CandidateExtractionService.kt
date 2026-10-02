@@ -15,6 +15,7 @@ import com.shai.riven.data.memory.MAX_CANDIDATE_MEANING_CHARS
 import com.shai.riven.data.memory.MemoryTransactionService
 import com.shai.riven.data.memory.MemoryWriteError
 import com.shai.riven.data.memory.MemoryWriteResult
+import com.shai.riven.data.memory.sourceExperienceSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -86,14 +87,17 @@ class CandidateExtractionService(
                 val createdIds = mutableListOf<String>()
                 val existingIds = mutableListOf<String>()
                 var suppressedCount = 0
+                val sourceSuppressed = maintenanceDao.suppressionTombstone(
+                    sourceExperienceSuppressionHash(input.experienceId),
+                )?.isActive == true
                 prepared.forEach { candidate ->
                     val suppressionHash = sourceLineageHash(input.experienceId, candidate.lineageKey)
-                    if (maintenanceDao.suppressionTombstone(suppressionHash)?.isActive == true) {
+                    if (sourceSuppressed || maintenanceDao.suppressionTombstone(suppressionHash)?.isActive == true) {
                         suppressedCount += 1
                         return@forEach
                     }
 
-                    val existingId = resolveExistingCandidate(input.experienceId, candidate)
+                    val existingId = resolveExistingCandidate(input.experienceId, candidate, input.extractedAt)
                     if (existingId != null) {
                         existingIds += existingId
                         return@forEach
@@ -278,6 +282,7 @@ class CandidateExtractionService(
     private fun resolveExistingCandidate(
         experienceId: String,
         prepared: PreparedCandidate,
+        updatedAt: Long,
     ): String? {
         val seeds = memoryDao.candidateSeedEvidenceByLineage(experienceId, prepared.lineageKey)
         if (seeds.isEmpty()) return null
@@ -311,6 +316,19 @@ class CandidateExtractionService(
                     CandidateLineageConflictReason.PROPOSAL_MISMATCH,
                 ),
             )
+        }
+        if (candidate.state.progressRank() < prepared.proposal.proposedState.progressRank()) {
+            when (
+                val transitioned = memoryTransactionService.transitionCandidateInCurrentTransaction(
+                    candidateId = candidate.id,
+                    expectedState = candidate.state,
+                    nextState = prepared.proposal.proposedState,
+                    updatedAt = updatedAt,
+                )
+            ) {
+                is MemoryWriteResult.Success -> Unit
+                is MemoryWriteResult.Failure -> abort(mapMemoryWriteError(transitioned.error, prepared.index))
+            }
         }
         return candidate.id
     }
@@ -459,6 +477,13 @@ class CandidateExtractionService(
         updatedAt = updatedAt,
         lineageKey = lineageKey,
     )
+
+    private fun CandidateMemoryState.progressRank(): Int = when (this) {
+        CandidateMemoryState.PENDING_CONTEXT -> 0
+        CandidateMemoryState.TENTATIVE -> 1
+        CandidateMemoryState.READY_FOR_VALIDATION -> 2
+        else -> Int.MAX_VALUE
+    }
 
     private fun abort(error: CandidateExtractionError): Nothing = throw CandidateExtractionAbort(error)
 

@@ -6,7 +6,6 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
-import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
@@ -18,6 +17,7 @@ import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
+import com.shai.riven.data.memory.sourceExperienceSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.requireTopLevelValidationRecallMutation
@@ -392,7 +392,11 @@ class SafeDeleteService(
         }
         val relatedOpenLoops = dao.openLoopsForMemory(memoryId)
         retainedEvidence.forEach { evidence ->
-            accumulator.tombstones += ensureDeleteTombstone(evidence, accumulator.occurredAt)
+            accumulator.tombstones += ensureDeleteTombstone(
+                sourceExperienceHash = sourceExperienceSuppressionHash(evidence.experienceId),
+                legacyLineageHash = sourceLineageHash(evidence.experienceId, evidence.lineageKey),
+                occurredAt = accumulator.occurredAt,
+            )
         }
 
         val lineageArtifactIds = buildList {
@@ -500,16 +504,17 @@ class SafeDeleteService(
     }
 
     private fun ensureDeleteTombstone(
-        evidence: MemoryEvidenceEntity,
+        sourceExperienceHash: String,
+        legacyLineageHash: String,
         occurredAt: Long,
     ): SuppressionTombstoneReference {
-        val sourceLineageHash = evidence.lineageHash()
-        val existing = dao.suppressionTombstone(sourceLineageHash)
+        val existing = dao.suppressionTombstone(sourceExperienceHash)
+            ?: dao.suppressionTombstone(legacyLineageHash)
         val tombstone = if (existing == null) {
             SuppressionTombstoneEntity(
                 id = idGenerator.nextId(),
                 kind = SuppressionKind.DELETE,
-                sourceLineageHash = sourceLineageHash,
+                sourceLineageHash = sourceExperienceHash,
                 isActive = true,
                 createdAt = occurredAt,
                 expiresAt = null,
@@ -518,6 +523,7 @@ class SafeDeleteService(
         } else {
             existing.copy(
                 kind = SuppressionKind.DELETE,
+                sourceLineageHash = sourceExperienceHash,
                 isActive = true,
                 expiresAt = null,
             ).also { updated ->
@@ -525,10 +531,6 @@ class SafeDeleteService(
             }
         }
         return SuppressionTombstoneReference(tombstone.id, tombstone.sourceLineageHash)
-    }
-
-    private fun MemoryEvidenceEntity.lineageHash(): String {
-        return sourceLineageHash(experienceId, lineageKey)
     }
 
     private fun requireExperience(experienceId: String) =

@@ -97,7 +97,8 @@ class RivenConversationRuntimeTest {
         assertFalse(checkNotNull(request.body).contains("private-key"))
         assertTrue(request.body.contains(LockedRivenPersonalityContextSource.DOCUMENT_ID))
         assertTrue(request.body.contains("LOCKED PERSONALITY CANON"))
-        assertEquals(2, scheduler.totalCalls)
+        assertEquals(3, scheduler.totalCalls)
+        assertEquals(1, scheduler.automaticMemorySweepCalls)
         second.close()
         runtimes.remove(second)
 
@@ -440,13 +441,17 @@ class RivenConversationRuntimeTest {
 
     private class RecordingScheduler : RivenBackgroundWorkScheduler {
         var totalCalls = 0
+        var automaticMemorySweepCalls = 0
 
         override fun enqueueAttachmentCleanup(attachmentId: String) = enqueued()
         override fun enqueueAttachmentMaintenanceSweep() = enqueued()
         override fun enqueueRepairJob(repairJobId: String) = enqueued()
         override fun enqueueRepairSweep() = enqueued()
         override fun enqueueAutomaticMemoryJob(automaticMemoryJobId: String) = enqueued()
-        override fun enqueueAutomaticMemorySweep() = enqueued()
+        override fun enqueueAutomaticMemorySweep(): RivenBackgroundScheduleResult {
+            automaticMemorySweepCalls += 1
+            return enqueued()
+        }
         override fun ensurePeriodicMaintenance() = enqueued()
 
         private fun enqueued(): RivenBackgroundScheduleResult {

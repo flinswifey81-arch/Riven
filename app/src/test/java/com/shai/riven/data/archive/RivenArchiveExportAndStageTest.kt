@@ -11,6 +11,7 @@ import com.shai.riven.data.attachment.AttachmentByteSource
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
+import com.shai.riven.data.persistence.entity.AutomaticMemoryJobEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationDraftEntity
@@ -34,6 +35,8 @@ import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.AttentionSignal
 import com.shai.riven.data.persistence.model.AttentionSignalPolarity
+import com.shai.riven.data.persistence.model.AutomaticMemoryJobStage
+import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ConversationStatus
@@ -855,6 +858,98 @@ class RivenArchiveExportAndStageTest {
                 staged.memoryDao().memory("validated-memory")?.lifecycleState,
             )
             assertEquals(1, staged.memoryDao().memoryEvidenceCount("validated-memory"))
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun restoreRequeuesRunningAutomaticMemoryJobWithoutResettingCheckpoint() {
+        database.conversationDao().insertConversation(
+            ConversationEntity("automatic-conversation", 1, 3, ConversationStatus.ACTIVE),
+        )
+        database.conversationDao().insertMessage(
+            MessageEntity(
+                "automatic-user",
+                "automatic-conversation",
+                0,
+                MessageRole.USER,
+                MessageDeliveryState.PERSISTED,
+                "Remember this.",
+                1,
+                1,
+            ),
+        )
+        database.conversationDao().insertMessage(
+            MessageEntity(
+                "automatic-assistant",
+                "automatic-conversation",
+                1,
+                MessageRole.ASSISTANT,
+                MessageDeliveryState.SUCCEEDED,
+                "Noted.",
+                2,
+                2,
+            ),
+        )
+        database.conversationRunDao().insert(
+            ConversationRunEntity(
+                runId = "automatic-run",
+                conversationId = "automatic-conversation",
+                userMessageId = "automatic-user",
+                assistantMessageId = "automatic-assistant",
+                trigger = ConversationRunTrigger.INITIAL,
+                state = ConversationRunState.SUCCEEDED,
+                activeConversationId = null,
+                idempotencyKey = "automatic-idempotency",
+                inputFingerprint = "automatic-fingerprint",
+                ownerSessionToken = "automatic-owner",
+                profileId = "automatic-profile",
+                selectedHeadMessageId = "automatic-user",
+                contextHeadMessageId = "automatic-user",
+                reservedTimelineRevision = 2,
+                createdAt = 1,
+                updatedAt = 3,
+                finishedAt = 3,
+            ),
+        )
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = "automatic-experience",
+                eventOrder = 1,
+                experienceType = ExperienceType.CONVERSATION_MESSAGE,
+                actor = ExperienceActor.SHAI,
+                sourceContent = "Remember this.",
+                occurredAt = 1,
+                recordedAt = 1,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = ExperienceAvailability.AVAILABLE,
+            ),
+        )
+        database.automaticMemoryDao().insertJob(
+            AutomaticMemoryJobEntity(
+                id = "automatic-job",
+                originatingRunId = "automatic-run",
+                sourceMessageId = "automatic-user",
+                sourceExperienceId = "automatic-experience",
+                sourceTimelineRevision = 2,
+                state = AutomaticMemoryJobState.RUNNING,
+                nextStage = AutomaticMemoryJobStage.VALIDATION,
+                attemptCount = 3,
+                createdAt = 3,
+                updatedAt = 3,
+            ),
+        )
+
+        assertTrue(stage(validArchive(), occurredAt = 200) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            val restored = checkNotNull(staged.automaticMemoryDao().job("automatic-job"))
+            assertEquals(AutomaticMemoryJobState.PENDING, restored.state)
+            assertEquals(AutomaticMemoryJobStage.VALIDATION, restored.nextStage)
+            assertEquals(3, restored.attemptCount)
+            assertEquals(200, restored.updatedAt)
+            assertEquals("RESTORE_REQUEUED", restored.lastErrorCode)
         } finally {
             staged.close()
         }

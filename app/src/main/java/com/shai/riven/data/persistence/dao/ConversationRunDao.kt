@@ -49,9 +49,25 @@ interface ConversationRunDao {
                   SELECT 1 FROM automatic_memory_jobs
                   WHERE automatic_memory_jobs.source_message_id = conversation_runs.user_message_id
               )
+              AND EXISTS (
+                  SELECT 1 FROM experiences
+                  INNER JOIN experience_message_sources
+                      ON experience_message_sources.experience_id = experiences.experience_id
+                  WHERE experience_message_sources.message_id = conversation_runs.user_message_id
+                    AND experiences.experience_type IN ('CONVERSATION_MESSAGE', 'TOOL_RESULT')
+                    AND experiences.availability = 'AVAILABLE'
+              )
               OR NOT EXISTS (
                   SELECT 1 FROM automatic_memory_jobs
                   WHERE automatic_memory_jobs.source_message_id = conversation_runs.assistant_message_id
+              )
+              AND EXISTS (
+                  SELECT 1 FROM experiences
+                  INNER JOIN experience_message_sources
+                      ON experience_message_sources.experience_id = experiences.experience_id
+                  WHERE experience_message_sources.message_id = conversation_runs.assistant_message_id
+                    AND experiences.experience_type IN ('CONVERSATION_MESSAGE', 'TOOL_RESULT')
+                    AND experiences.availability = 'AVAILABLE'
               )
           )
         ORDER BY finished_at, run_id

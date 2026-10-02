@@ -16,8 +16,11 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.EvidenceRole
+import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRetentionState
+import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.TemporalState
@@ -305,6 +308,15 @@ class CandidateValidationService(
         }
         if (!createsMemory && decision.admission != null) {
             return invalidDecision(InvalidValidationDecisionReason.UNEXPECTED_ADMISSION_METADATA)
+        }
+        if (
+            decision.outcome == CandidateValidationOutcome.ACCEPT_NEW &&
+            context.candidate.proposedScope == MemoryScope.RIVEN &&
+            context.candidate.proposedKind == MemoryKind.SELF_DEVELOPMENT &&
+            context.candidate.proposedEpistemicBasis == EpistemicBasis.DIRECT_RIVEN_EXPERIENCE &&
+            context.evidence.map { it.experienceId to it.lineageKey }.distinct().size < 2
+        ) {
+            return invalidDecision(InvalidValidationDecisionReason.UNSUPPORTED_SELF_ASSERTION)
         }
         decision.admission?.let { admission ->
             if (!admission.hasValidTemporalMetadata()) {

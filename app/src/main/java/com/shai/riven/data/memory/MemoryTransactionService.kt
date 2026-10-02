@@ -345,26 +345,11 @@ class MemoryTransactionService(
             )
             memoryDao.updateMemory(forgotten)
             evidence.forEach { source ->
-                val sourceLineageHash = source.lineageHash()
-                val existing = maintenanceDao.suppressionTombstone(sourceLineageHash)
-                when {
-                    existing == null -> maintenanceDao.insertSuppressionTombstone(
-                        SuppressionTombstoneEntity(
-                            id = idGenerator.nextId(),
-                            kind = SuppressionKind.FORGET,
-                            sourceLineageHash = sourceLineageHash,
-                            isActive = true,
-                            createdAt = input.occurredAt,
-                            formatVersion = 1,
-                        ),
-                    )
-                    !existing.isActive -> maintenanceDao.updateSuppressionTombstone(
-                        existing.copy(
-                            isActive = true,
-                            expiresAt = null,
-                        ),
-                    )
-                }
+                ensureForgetTombstone(
+                    sourceExperienceHash = sourceExperienceSuppressionHash(source.experienceId),
+                    legacyLineageHash = sourceLineageHash(source.experienceId, source.lineageKey),
+                    occurredAt = input.occurredAt,
+                )
             }
             insertAudit(
                 memoryId = memory.id,
@@ -953,8 +938,40 @@ class MemoryTransactionService(
         MemoryWriteResult.Failure(MemoryWriteError.StorageFailure(operation, failure::class.java.simpleName))
     }
 
-    private fun MemoryEvidenceEntity.lineageHash(): String {
-        return sourceLineageHash(experienceId, lineageKey)
+    private fun ensureForgetTombstone(
+        sourceExperienceHash: String,
+        legacyLineageHash: String,
+        occurredAt: Long,
+    ) {
+        val existing = maintenanceDao.suppressionTombstone(sourceExperienceHash)
+            ?: maintenanceDao.suppressionTombstone(legacyLineageHash)
+        when {
+            existing == null -> maintenanceDao.insertSuppressionTombstone(
+                SuppressionTombstoneEntity(
+                    id = idGenerator.nextId(),
+                    kind = SuppressionKind.FORGET,
+                    sourceLineageHash = sourceExperienceHash,
+                    isActive = true,
+                    createdAt = occurredAt,
+                    formatVersion = 1,
+                ),
+            )
+            existing.sourceLineageHash != sourceExperienceHash ||
+                !existing.isActive ||
+                existing.kind != SuppressionKind.FORGET ->
+                maintenanceDao.updateSuppressionTombstone(
+                    existing.copy(
+                        kind = if (existing.kind == SuppressionKind.DELETE) {
+                            SuppressionKind.DELETE
+                        } else {
+                            SuppressionKind.FORGET
+                        },
+                        sourceLineageHash = sourceExperienceHash,
+                        isActive = true,
+                        expiresAt = null,
+                    ),
+                )
+        }
     }
 
     private fun CandidateEvidenceRole.toMemoryEvidenceRole(): EvidenceRole = when (this) {

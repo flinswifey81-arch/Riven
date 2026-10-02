@@ -20,6 +20,7 @@ import com.shai.riven.data.conversation.NewTimelineMessageInput
 import com.shai.riven.data.conversation.TimelineReadResult
 import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
+import com.shai.riven.data.memory.sourceExperienceSuppressionHash
 import com.shai.riven.data.memory.intent.ManualDeleteMemoryInput
 import com.shai.riven.data.memory.intent.ManualForgetMemoryInput
 import com.shai.riven.data.memory.intent.ManualMemoryIntentResult
@@ -121,6 +122,114 @@ class AutomaticMemoryPipelineIntegrationTest {
     }
 
     @Test
+    fun missingCredentialBlocksWithoutConsumingAttemptAndRemainsRecoverable() = runBlocking {
+        val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
+        queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+        val blockedRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory {
+                AutomaticMemoryModelFactoryResult.Blocked("PROFILE_MissingCredential")
+            },
+        )
+
+        val result = blockedRunner.run(jobId)
+
+        assertTrue(result is AutomaticMemoryJobRunResult.Blocked)
+        val job = checkNotNull(database.automaticMemoryDao().job(jobId))
+        assertEquals(AutomaticMemoryJobState.PENDING, job.state)
+        assertEquals(0, job.attemptCount)
+        assertEquals("PROFILE_MissingCredential", job.lastErrorCode)
+    }
+
+    @Test
+    fun attemptBudgetFailsBeforeAnotherProviderCall() = runBlocking {
+        val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
+        queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+        var factoryCalls = 0
+        val failingRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory {
+                factoryCalls += 1
+                AutomaticMemoryModelFactoryResult.RetryableFailure("TEMPORARY")
+            },
+            maxAttempts = 2,
+        )
+
+        assertTrue(failingRunner.run(jobId) is AutomaticMemoryJobRunResult.RetryableFailure)
+        val exhausted = failingRunner.run(jobId)
+        val terminalReplay = failingRunner.run(jobId)
+
+        assertTrue(exhausted is AutomaticMemoryJobRunResult.PermanentlyFailed)
+        assertTrue(terminalReplay is AutomaticMemoryJobRunResult.NoOp)
+        assertEquals(2, factoryCalls)
+        assertEquals(AutomaticMemoryJobState.FAILED, database.automaticMemoryDao().job(jobId)?.state)
+    }
+
+    @Test
+    fun singleLineageRivenSelfDevelopmentCannotBeAdmittedByModelAlone() = runBlocking {
+        model.forceSingleLineageSelfDevelopment = true
+        val turn = appendSuccessfulTurn(
+            "What did you learn about yourself?",
+            "I discovered that I love playing chess.",
+        )
+        val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+
+        val results = queued.jobIds.map { runner.run(it) }
+
+        assertTrue(results.any { result ->
+            result is AutomaticMemoryJobRunResult.RetryableFailure &&
+                result.errorCode == "VALIDATION_InvalidValidationDecision"
+        })
+        assertEquals(0, database.memoryDao().memoryCount())
+    }
+
+    @Test
+    fun deferredAttentionResumesWhenLaterTurnSuppliesShortWindowContext() = runBlocking {
+        model.deferSardinesUntilKeepIt = true
+        enqueueAndRun(appendSuccessfulTurn("I love sardines.", "Do you want that remembered?"))
+        assertEquals(0, database.memoryDao().memoryCount())
+
+        val clarifyingTurn = appendSuccessfulTurn(
+            "Keep it as a standing preference.",
+            "Understood.",
+        )
+        val queued = queue.ensureForSucceededRun(clarifyingTurn.runId, clarifyingTurn.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        val results = queued.jobIds.map { runner.run(it) }
+
+        assertTrue(results.all { it is AutomaticMemoryJobRunResult.Succeeded })
+        assertEquals(listOf("Shai loves sardines."), database.memoryDao().recentMemories(10).map { it.meaning })
+    }
+
+    @Test
+    fun reconciliationSkipsOlderExcludedSourcesInsteadOfStarvingAvailableRun() = runBlocking {
+        val turns = (0..25).map { index ->
+            appendSuccessfulTurn("Historical statement $index", "Historical response $index")
+        }
+        turns.take(25).forEach { turn ->
+            listOf(turn.userMessageId, turn.assistantMessageId).forEach { messageId ->
+                assertEquals(
+                    1,
+                    database.memoryDao().updateExperienceAvailability(
+                        experienceFor(messageId),
+                        ExperienceAvailability.EXCLUDED,
+                    ),
+                )
+            }
+        }
+
+        val reconciled = queue.reconcileSucceededRuns(25, now())
+        val available = turns.last()
+
+        assertTrue(reconciled.jobIds.isNotEmpty())
+        assertNotNull(database.automaticMemoryDao().jobForMessage(available.userMessageId))
+        assertNotNull(database.automaticMemoryDao().jobForMessage(available.assistantMessageId))
+    }
+
+    @Test
     fun explicitCorrectionDisplacesOldBeliefWithoutErasingItsHistory() = runBlocking {
         enqueueAndRun(appendSuccessfulTurn("I grew up in Kansas.", "Understood."))
         enqueueAndRun(
@@ -155,8 +264,15 @@ class AutomaticMemoryPipelineIntegrationTest {
 
         val manual = ManualMemoryIntentService(database, scheduler)
         assertTrue(manual.forget(ManualForgetMemoryInput(sardineMemory.id, now())) is ManualMemoryIntentResult.Forgotten)
+        assertTrue(database.maintenanceDao().suppressionTombstone(
+            sourceExperienceSuppressionHash(experienceFor(sardines.userMessageId)),
+        )?.isActive == true)
+        assertEquals(null, database.maintenanceDao().suppressionTombstone(
+            sourceExperienceSuppressionHash(experienceFor(tea.userMessageId)),
+        ))
         assertTrue(manual.delete(ManualDeleteMemoryInput(teaMemory.id, now())) is ManualMemoryIntentResult.Deleted)
 
+        model.paraphraseKnownFacts = true
         val extraction = CandidateExtractionService(database, model)
         val sardineReplay = extraction.extract(
             ExtractCandidateMemoriesInput(experienceFor(sardines.userMessageId), now()),
@@ -385,12 +501,21 @@ class AutomaticMemoryPipelineIntegrationTest {
     private class SpecFakeMemoryModel : AutomaticMemoryModel {
         var totalCalls = 0
         var sawCompletedTurnHindsight = false
+        var paraphraseKnownFacts = false
+        var forceSingleLineageSelfDevelopment = false
+        var deferSardinesUntilKeepIt = false
 
         override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal {
             totalCalls += 1
             val source = snapshot.sourceContent.orEmpty()
             if (source.contains("sardines", ignoreCase = true)) {
                 sawCompletedTurnHindsight = snapshot.followingActiveContext.isNotEmpty()
+                if (
+                    deferSardinesUntilKeepIt &&
+                    snapshot.followingActiveContext.none { it.content.contains("keep it", ignoreCase = true) }
+                ) {
+                    return ImmediateAttentionProposal(AttentionOutcome.DEFER_FOR_CONTEXT)
+                }
             }
             val signal = when {
                 source.startsWith("Correction:") -> PositiveAttentionSignal.CORRECTION_OR_REVISION
@@ -415,7 +540,7 @@ class AutomaticMemoryPipelineIntegrationTest {
             val source = snapshot.sourceContent.orEmpty()
             val proposal = when {
                 source.contains("sardines", ignoreCase = true) -> CandidateMemoryProposal(
-                    "Shai loves sardines.",
+                    if (paraphraseKnownFacts) "Sardines are a food Shai loves." else "Shai loves sardines.",
                     MemoryKind.SEMANTIC,
                     MemoryScope.SHAI,
                     EpistemicBasis.DIRECT_USER_STATEMENT,
@@ -424,7 +549,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                     SensitivityLevel.STANDARD,
                 )
                 source.contains("favorite tea", ignoreCase = true) -> CandidateMemoryProposal(
-                    "Shai's favorite tea is oolong.",
+                    if (paraphraseKnownFacts) "Oolong is Shai's favorite tea." else "Shai's favorite tea is oolong.",
                     MemoryKind.SEMANTIC,
                     MemoryScope.SHAI,
                     EpistemicBasis.DIRECT_USER_STATEMENT,
@@ -452,7 +577,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                 )
                 source.contains("discovered that I love playing chess", ignoreCase = true) -> CandidateMemoryProposal(
                     "Riven discovered that he loves playing chess.",
-                    MemoryKind.SELF_DEVELOPMENT,
+                    if (forceSingleLineageSelfDevelopment) MemoryKind.SELF_DEVELOPMENT else MemoryKind.EPISODIC,
                     MemoryScope.RIVEN,
                     EpistemicBasis.DIRECT_RIVEN_EXPERIENCE,
                     MemoryCertainty.CERTAIN,

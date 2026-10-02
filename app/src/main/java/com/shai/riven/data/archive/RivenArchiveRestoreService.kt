@@ -319,6 +319,12 @@ class RivenArchiveRestoreService(
                     "WHERE state = 'RUNNING'",
                 arrayOf(occurredAt),
             )
+            sqlite.execSQL(
+                "UPDATE automatic_memory_jobs " +
+                    "SET state = 'PENDING', updated_at = ?, last_error_code = 'RESTORE_REQUEUED' " +
+                    "WHERE state = 'RUNNING'",
+                arrayOf(occurredAt),
+            )
             // Provider calls are never replayed from an archive. Any nonterminal attempt is
             // converted to a durable interrupted result without entering the repair-job queue.
             sqlite.execSQL(

@@ -400,6 +400,21 @@ class CandidateExtractionServiceTest {
     }
 
     @Test
+    fun shortWindowReassessmentPromotesMatchingDeferredCandidate() = runBlocking {
+        forwardExperience()
+        val ready = proposal("Context now resolves the claim", state = CandidateMemoryState.READY_FOR_VALIDATION)
+        insertExistingCandidateForLineage(ready, state = CandidateMemoryState.PENDING_CONTEXT)
+        extractor.proposal = extraction(ready)
+
+        val result = extracted(extract(extractedAt = 100))
+
+        assertEquals(listOf("existing"), result.existingCandidateIds)
+        val promoted = checkNotNull(database.memoryDao().candidateMemory("existing"))
+        assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, promoted.state)
+        assertEquals(100, promoted.updatedAt)
+    }
+
+    @Test
     fun multiClaimExperienceHasDistinctLineages() = runBlocking {
         forwardExperience()
         extractor.proposal = extraction(proposal("Claim A"), proposal("Claim B"))

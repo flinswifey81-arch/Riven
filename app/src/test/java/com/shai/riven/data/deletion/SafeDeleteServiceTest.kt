@@ -11,6 +11,7 @@ import com.shai.riven.data.conversation.NewTimelineMessageInput
 import com.shai.riven.data.conversation.TimelineReadResult
 import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.memory.sourceExperienceSuppressionHash
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
@@ -148,7 +149,8 @@ class SafeDeleteServiceTest {
             DerivedArtifactState.INVALIDATED,
             database.maintenanceDao().derivedArtifact("memory-artifact")?.state,
         )
-        val tombstone = database.safeDeleteDao().suppressionTombstone(hash)!!
+        val tombstone = database.safeDeleteDao()
+            .suppressionTombstone(sourceExperienceSuppressionHash("experience"))!!
         assertEquals("existing-tombstone", tombstone.id)
         assertEquals(SuppressionKind.DELETE, tombstone.kind)
         assertTrue(tombstone.isActive)
@@ -207,7 +209,8 @@ class SafeDeleteServiceTest {
         assertEquals(1, database.safeDeleteDao().derivedOpenLoopDependencyCount("artifact-loop"))
         assertEquals(
             SuppressionKind.DELETE,
-            database.safeDeleteDao().suppressionTombstone(lineageHash("experience", "lineage"))?.kind,
+            database.safeDeleteDao()
+                .suppressionTombstone(sourceExperienceSuppressionHash("experience"))?.kind,
         )
     }
 

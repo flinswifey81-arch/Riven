@@ -4,6 +4,7 @@ import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
+import com.shai.riven.data.background.MAX_AUTOMATIC_MEMORY_ATTEMPTS
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AutomaticMemoryJobEntity
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
@@ -73,10 +74,15 @@ class AutomaticMemoryQueueService(
                             excludeDiscardedMessageInCurrentTransaction(discardedMessageId, occurredAt)
                         }
                         .orEmpty()
-                    val jobs = listOf(run.userMessageId, run.assistantMessageId).map { messageId ->
+                    val shortWindowJobs = requeueShortWindowJobsInCurrentTransaction(
+                        conversationId = run.conversationId,
+                        sourceTimelineRevision = sourceTimelineRevision,
+                        occurredAt = occurredAt,
+                    )
+                    val newJobs = listOf(run.userMessageId, run.assistantMessageId).map { messageId ->
                         ensureMessageJobInCurrentTransaction(run, messageId, sourceTimelineRevision, occurredAt)
                     }
-                    QueueWrite(jobs, affectedMemoryIds)
+                    QueueWrite((shortWindowJobs + newJobs).distinctBy { it.id }, affectedMemoryIds)
                 }
             }
             if (run.regenerateOfMessageId == null) {
@@ -209,6 +215,41 @@ class AutomaticMemoryQueueService(
         return affectedMemoryIds
     }
 
+    private fun requeueShortWindowJobsInCurrentTransaction(
+        conversationId: String,
+        sourceTimelineRevision: Long,
+        occurredAt: Long,
+    ): List<AutomaticMemoryJobEntity> = automaticMemoryDao.shortWindowJobsForConversation(
+        conversationId = conversationId,
+        succeededState = AutomaticMemoryJobState.SUCCEEDED,
+        maxAttempts = MAX_AUTOMATIC_MEMORY_ATTEMPTS,
+        contextRevision = sourceTimelineRevision,
+        limit = MAX_SHORT_WINDOW_REQUEUES_PER_TURN,
+    ).mapNotNull { job ->
+        if (automaticMemoryDao.requeueForShortWindow(
+                jobId = job.id,
+                succeededState = AutomaticMemoryJobState.SUCCEEDED,
+                pendingState = AutomaticMemoryJobState.PENDING,
+                attentionStage = AutomaticMemoryJobStage.ATTENTION,
+                expectedAttemptCount = job.attemptCount,
+                expectedContextRevision = job.sourceTimelineRevision,
+                contextRevision = sourceTimelineRevision,
+                updatedAt = occurredAt,
+                reasonCode = SHORT_WINDOW_CONTEXT_CODE,
+            ) == 1
+        ) {
+            job.copy(
+                state = AutomaticMemoryJobState.PENDING,
+                nextStage = AutomaticMemoryJobStage.ATTENTION,
+                sourceTimelineRevision = sourceTimelineRevision,
+                updatedAt = occurredAt,
+                lastErrorCode = SHORT_WINDOW_CONTEXT_CODE,
+            )
+        } else {
+            null
+        }
+    }
+
     private fun schedule(jobs: List<AutomaticMemoryJobEntity>): List<String> = jobs
         .filter { it.state == AutomaticMemoryJobState.PENDING }
         .mapNotNull { job ->
@@ -230,6 +271,8 @@ class AutomaticMemoryQueueService(
 
     companion object {
         const val DISCARDED_BRANCH_CODE = "DISCARDED_REGENERATED_BRANCH"
+        const val SHORT_WINDOW_CONTEXT_CODE = "SHORT_WINDOW_CONTEXT_AVAILABLE"
+        const val MAX_SHORT_WINDOW_REQUEUES_PER_TURN = 8
     }
 
     private data class QueueWrite(

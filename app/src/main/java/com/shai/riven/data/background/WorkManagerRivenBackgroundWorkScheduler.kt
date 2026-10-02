@@ -1,12 +1,14 @@
 package com.shai.riven.data.background
 
 import androidx.work.BackoffPolicy
+import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequest
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.NetworkType
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
@@ -95,6 +97,15 @@ class WorkManagerRivenBackgroundWorkScheduler(
         }
         return OneTimeWorkRequestBuilder<RivenBackgroundWorker>()
             .setInputData(data)
+            .apply {
+                if (kind == RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB) {
+                    setConstraints(
+                        Constraints.Builder()
+                            .setRequiredNetworkType(NetworkType.CONNECTED)
+                            .build(),
+                    )
+                }
+            }
             .setBackoffCriteria(
                 BackoffPolicy.EXPONENTIAL,
                 RIVEN_WORK_BACKOFF_SECONDS,
