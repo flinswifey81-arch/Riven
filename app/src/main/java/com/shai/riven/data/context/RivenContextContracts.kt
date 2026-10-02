@@ -144,6 +144,12 @@ sealed interface RivenContextFreshnessReceipt {
         val modelId: String,
         val capabilities: Set<ProviderCapability>,
     ) : RivenContextFreshnessReceipt
+
+    data class RivenPresence(
+        val actualRoomId: String,
+        val semanticSpriteId: String,
+        val presenceRevision: Long,
+    ) : RivenContextFreshnessReceipt
 }
 
 data class RivenContextFragment(

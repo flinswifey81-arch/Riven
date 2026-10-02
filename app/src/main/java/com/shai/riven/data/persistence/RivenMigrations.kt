@@ -537,3 +537,23 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
         )
     }
 }
+
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `riven_presence_state` (
+                `state_id` TEXT NOT NULL,
+                `actual_room_id` TEXT NOT NULL,
+                `semantic_sprite_id` TEXT NOT NULL,
+                `browsed_room_id` TEXT NOT NULL,
+                `presence_revision` INTEGER NOT NULL,
+                `browser_revision` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`state_id`)
+            )
+            """.trimIndent(),
+        )
+    }
+}

@@ -9,6 +9,7 @@ import com.shai.riven.data.conversation.engine.ProviderContextFragment
 import com.shai.riven.data.conversation.engine.ProviderConversationRequest
 import com.shai.riven.data.conversation.engine.ProviderFailureCode
 import com.shai.riven.data.conversation.engine.ProviderImageContent
+import com.shai.riven.data.conversation.engine.ProviderStateControlRequest
 import com.shai.riven.data.conversation.engine.ProviderStreamEvent
 import com.shai.riven.data.credential.ProviderSecret
 import com.shai.riven.data.persistence.model.MessageRole
@@ -26,6 +27,53 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class OpenRouterConversationAdapterTest {
+    @Test
+    fun parsesOnlyAnExactStreamStartStateControlBeforeNarrative() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        filter.accept("RIVEN_STATE_") { events += it }
+        filter.accept("CONTROL {\"room\":\"study\",\"sprite\":\"seated_thoughtful\"}\nI moved.") { events += it }
+        filter.finish { events += it }
+
+        assertEquals(
+            listOf(
+                ProviderStreamEvent.StateControlRequested(
+                    ProviderStateControlRequest("study", "seated_thoughtful"),
+                ),
+                ProviderStreamEvent.Delta("I moved."),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun proseSubstringNeverBecomesStateControl() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+        val prose = "In prose RIVEN_STATE_CONTROL {\"room\":\"study\",\"sprite\":\"standing_relaxed\"} stays text."
+
+        filter.accept(prose) { events += it }
+        filter.finish { events += it }
+
+        assertEquals(listOf(ProviderStreamEvent.Delta(prose)), events)
+    }
+
+    @Test
+    fun malformedOrExtendedStateControlFailsClosed() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        filter.accept(
+            "RIVEN_STATE_CONTROL {\"room\":\"study\",\"sprite\":\"standing_relaxed\",\"extra\":true}\nNarrative",
+        ) { events += it }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID)),
+            events,
+        )
+    }
+
     @Test
     fun streamsGroundedRequestAndKeepsSecretOutOfBody() = runBlocking {
         val http = RecordingHttpClient(

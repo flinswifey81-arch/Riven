@@ -55,6 +55,9 @@ class ProviderNeutralConversationEngine(
     private val instructionsService: ShaiSystemInstructionsService,
     private val ephemeralStateStore: EphemeralAppStateStore,
     private val adapterRegistry: ProviderAdapterRegistry,
+    private val stateControlHandler: ProviderStateControlHandler = ProviderStateControlHandler { _, _, _ ->
+        ProviderStateControlResult.Rejected("State control is not configured.")
+    },
     private val imageContentResolver: ProviderImageContentResolver = ProviderImageContentResolver { null },
     private val contextBudgetResolver: (ProviderProfileSnapshot) -> RivenContextCollectionBudget = {
         DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET
@@ -294,7 +297,7 @@ class ProviderNeutralConversationEngine(
                     budget = contextBudgetResolver(runtime.profile).withImageReservation(images),
                 ),
             )
-            val contextSnapshot = when (assembled) {
+            var contextSnapshot = when (assembled) {
                 is RivenContextCollectionResult.Success -> assembled.snapshot
                 is RivenContextCollectionResult.Failure -> {
                     val errorCode = if (assembled.requiredFailures.any { failure ->
@@ -402,6 +405,36 @@ class ProviderNeutralConversationEngine(
                             throw CancellationException("Conversation run cancellation requested")
                         }
                         val firstDelta = stream.accept(event)
+                        if (event is ProviderStreamEvent.StateControlRequested) {
+                            val receipt = contextSnapshot.freshnessReceipts
+                                .filterIsInstance<RivenContextFreshnessReceipt.RivenPresence>()
+                                .singleOrNull()
+                                ?: throw ConversationStreamProtocolException(
+                                    ConversationEngineErrorCode.STATE_CONTROL_REJECTED,
+                                )
+                            when (
+                                val controlled = stateControlHandler.apply(
+                                    event.request,
+                                    receipt.presenceRevision,
+                                    clock(),
+                                )
+                            ) {
+                                is ProviderStateControlResult.Rejected ->
+                                    throw ConversationStreamProtocolException(
+                                        ConversationEngineErrorCode.STATE_CONTROL_REJECTED,
+                                    )
+                                is ProviderStateControlResult.Applied -> {
+                                    contextSnapshot = contextSnapshot.copy(
+                                        freshnessReceipts = contextSnapshot.freshnessReceipts - receipt +
+                                            RivenContextFreshnessReceipt.RivenPresence(
+                                                actualRoomId = controlled.actualRoomId,
+                                                semanticSpriteId = controlled.semanticSpriteId,
+                                                presenceRevision = controlled.presenceRevision,
+                                            ),
+                                    )
+                                }
+                            }
+                        }
                         if (firstDelta) {
                             when (
                                 val streaming = persistence.markStreaming(
@@ -432,7 +465,11 @@ class ProviderNeutralConversationEngine(
             if (terminal is ProviderStreamEvent.Failure) {
                 return failRun(
                     awaitingRun,
-                    ConversationEngineErrorCode.PROVIDER_FAILURE,
+                    if (terminal.code == ProviderFailureCode.STATE_CONTROL_INVALID) {
+                        ConversationEngineErrorCode.STATE_CONTROL_INVALID
+                    } else {
+                        ConversationEngineErrorCode.PROVIDER_FAILURE
+                    },
                     ConversationRunState.FAILED,
                     terminal.providerRequestId,
                 )
@@ -610,6 +647,7 @@ private class StreamAccumulator(
     private var eventCount = 0
     private var terminal: ProviderStreamEvent? = null
     private var sawDelta = false
+    private var sawStateControl = false
 
     fun accept(event: ProviderStreamEvent): Boolean {
         eventCount += 1
@@ -620,6 +658,15 @@ private class StreamAccumulator(
             throw ConversationStreamProtocolException(ConversationEngineErrorCode.PROVIDER_PROTOCOL)
         }
         return when (event) {
+            is ProviderStreamEvent.StateControlRequested -> {
+                if (sawDelta || sawStateControl) {
+                    throw ConversationStreamProtocolException(
+                        ConversationEngineErrorCode.PROVIDER_PROTOCOL,
+                    )
+                }
+                sawStateControl = true
+                false
+            }
             is ProviderStreamEvent.Delta -> {
                 if (event.content.isEmpty() || event.content.length > limits.maxDeltaChars ||
                     content.length.toLong() + event.content.length > limits.maxOutputChars

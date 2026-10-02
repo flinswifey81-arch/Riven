@@ -33,6 +33,7 @@ import com.shai.riven.data.context.EphemeralAppStateContextSource
 import com.shai.riven.data.context.EphemeralAppStateStore
 import com.shai.riven.data.context.OpenLoopContextSource
 import com.shai.riven.data.context.RivenContextSourceRegistry
+import com.shai.riven.data.context.RivenPresenceContextSource
 import com.shai.riven.data.conversation.ConversationTimelineService
 import com.shai.riven.data.conversation.CreateTimelineConversationInput
 import com.shai.riven.data.conversation.AppendTimelineMessageInput
@@ -44,6 +45,8 @@ import com.shai.riven.data.conversation.engine.ConversationEngineResult
 import com.shai.riven.data.conversation.engine.CanonicalConversationImageSelector
 import com.shai.riven.data.conversation.engine.ProviderAdapterRegistry
 import com.shai.riven.data.conversation.engine.ProviderNeutralConversationEngine
+import com.shai.riven.data.conversation.engine.ProviderStateControlHandler
+import com.shai.riven.data.conversation.engine.ProviderStateControlResult
 import com.shai.riven.data.conversation.engine.StartConversationRunInput
 import com.shai.riven.data.conversation.engine.ImageInputAuthorization
 import com.shai.riven.data.credential.HasProviderCredentialResult
@@ -71,6 +74,11 @@ import com.shai.riven.data.memory.intent.ManualMemoryIntentResult
 import com.shai.riven.data.memory.intent.ManualMemoryIntentService
 import com.shai.riven.data.memory.intent.ManualRememberMemoryInput
 import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
+import com.shai.riven.data.presence.RivenPresenceReadResult
+import com.shai.riven.data.presence.RivenPresenceService
+import com.shai.riven.data.presence.RivenPresenceSnapshot
+import com.shai.riven.data.presence.RivenPresenceWriteResult
+import com.shai.riven.data.presence.RivenRoom
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.RivenDatabaseLease
 import com.shai.riven.data.persistence.RivenDatabaseProvider
@@ -172,6 +180,13 @@ data class RivenRuntimeSnapshot(
         failed = 0,
         latestErrorCode = null,
     ),
+    val roomState: RivenPresenceSnapshot = RivenPresenceSnapshot(
+        actualRoom = RivenRoom.LIVING_ROOM,
+        semanticSprite = com.shai.riven.data.presence.RivenSemanticSprite.STANDING_RELAXED,
+        browsedRoom = RivenRoom.LIVING_ROOM,
+        presenceRevision = 0L,
+        browserRevision = 0L,
+    ),
 )
 
 interface RivenRuntimeController : AutoCloseable {
@@ -210,6 +225,7 @@ interface RivenRuntimeController : AutoCloseable {
     suspend fun correct(memoryId: String, replacement: String): RivenRuntimeResult
     suspend fun forget(memoryId: String): RivenRuntimeResult
     suspend fun deleteMemory(memoryId: String): RivenRuntimeResult
+    suspend fun browseRoom(room: RivenRoom): RivenRuntimeResult = snapshot()
 }
 
 sealed interface RivenRuntimeResult {
@@ -279,6 +295,7 @@ class RivenConversationRuntime(
     private val instructionsService = ShaiSystemInstructionsService(database)
     private val ephemeralStore = EphemeralAppStateStore()
     private val recall = TargetedConversationalMemoryRetriever(database)
+    private val presence = RivenPresenceService(database)
     private val draftService = ConversationDraftService(
         database = database,
         attachmentCleanupScheduler = backgroundScheduler::enqueueAttachmentCleanup,
@@ -321,6 +338,7 @@ class RivenConversationRuntime(
             RivenContextSourceRegistry(
                 listOf(
                     ConversationInvariantContextSource(),
+                    RivenPresenceContextSource(presence),
                     personalitySource,
                     ShaiSystemInstructionsContextSource(instructionsService),
                     EphemeralAppStateContextSource(ephemeralStore),
@@ -336,6 +354,20 @@ class RivenConversationRuntime(
         instructionsService = instructionsService,
         ephemeralStateStore = ephemeralStore,
         adapterRegistry = ProviderAdapterRegistry(listOf(adapter)),
+        stateControlHandler = ProviderStateControlHandler { request, expectedRevision, occurredAt ->
+            when (
+                val result = presence.applyModelControl(
+                    roomId = request.roomId,
+                    spriteId = request.spriteId,
+                    expectedPresenceRevision = expectedRevision,
+                    occurredAt = occurredAt,
+                )
+            ) {
+                is RivenPresenceWriteResult.Rejected -> ProviderStateControlResult.Rejected(result.reason)
+                is RivenPresenceWriteResult.Unchanged -> result.snapshot.toProviderStateControlResult()
+                is RivenPresenceWriteResult.Updated -> result.snapshot.toProviderStateControlResult()
+            }
+        },
         imageContentResolver = imageResolver ?: com.shai.riven.data.conversation.engine.ProviderImageContentResolver { null },
         contextBudgetResolver = { profile -> contextBudgetPolicy.budgetFor(profile.modelId) },
         clock = clock,
@@ -345,6 +377,9 @@ class RivenConversationRuntime(
     private val activeConversationOperation = AtomicReference<ActiveConversationOperation?>()
 
     override suspend fun initialize(): RivenRuntimeResult = actionMutex.withLock {
+        if (presence.initialize(clock()) is RivenPresenceReadResult.Failure) {
+            return@withLock RivenRuntimeResult.Failure("Riven's room state could not be initialized.")
+        }
         engine.recoverInterruptedRuns()
         ensureConversation()
         withContext(ioDispatcher) {
@@ -358,6 +393,18 @@ class RivenConversationRuntime(
     }
 
     override suspend fun snapshot(): RivenRuntimeResult = actionMutex.withLock { snapshotResult() }
+
+    override suspend fun browseRoom(room: RivenRoom): RivenRuntimeResult = actionMutex.withLock {
+        when (presence.browse(room, clock())) {
+            is RivenPresenceWriteResult.Rejected -> RivenRuntimeResult.Failure(
+                message = "That room could not be opened.",
+                snapshot = snapshotOrNull(),
+            )
+            is RivenPresenceWriteResult.Unchanged,
+            is RivenPresenceWriteResult.Updated,
+            -> snapshotResult()
+        }
+    }
 
     override suspend fun saveDraft(content: String): RivenRuntimeResult = actionMutex.withLock {
         ensureConversation()
@@ -1163,6 +1210,7 @@ class RivenConversationRuntime(
             database.memoryDao().recentMemories(MAX_VISIBLE_MEMORIES).map { it.toRuntimeItem() }
         }
         val automaticMemoryStatus = withContext(ioDispatcher) { automaticMemoryQueue.status() }
+        val roomState = (presence.snapshot() as? RivenPresenceReadResult.Success)?.snapshot ?: return null
         val imageSnapshot = withContext(ioDispatcher) {
             val draftImages = runtimeImages(draftValue.attachmentIds)
             val byMessage = linkedMapOf<String, List<RivenImageAttachment>>()
@@ -1185,6 +1233,7 @@ class RivenConversationRuntime(
             instructions = instructions,
             memories = memories,
             automaticMemoryStatus = automaticMemoryStatus,
+            roomState = roomState,
         )
     }
 
@@ -1459,6 +1508,12 @@ private fun selectedImageInput(
         occurredAt = occurredAt,
     )
 }
+
+private fun RivenPresenceSnapshot.toProviderStateControlResult() = ProviderStateControlResult.Applied(
+    actualRoomId = actualRoom.stableId,
+    semanticSpriteId = semanticSprite.stableId,
+    presenceRevision = presenceRevision,
+)
 
 private fun ImageAttachmentImportError.userMessage(): String = when (this) {
     ImageAttachmentImportError.UnsupportedMimeType ->

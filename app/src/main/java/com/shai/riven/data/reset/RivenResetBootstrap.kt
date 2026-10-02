@@ -192,7 +192,7 @@ class RivenResetBootstrap(
 }
 
 internal object RivenEmptyDatabaseVerifier {
-    private const val EXPECTED_APPLICATION_TABLE_COUNT = 44
+private const val EXPECTED_APPLICATION_TABLE_COUNT = 45
     private val EXPECTED_REMINDER_TABLES = setOf(
         "local_reminders",
         "reminder_events",

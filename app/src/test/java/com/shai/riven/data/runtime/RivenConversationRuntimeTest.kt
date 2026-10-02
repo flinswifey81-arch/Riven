@@ -58,6 +58,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -768,6 +769,55 @@ class RivenConversationRuntimeTest {
         assertTrue(unavailable.snapshot.draftImages.single().previewBytes.isEmpty())
     }
 
+    @Test
+    fun validatedRoomControlCommitsBeforeNarrativeAndRestoresWithoutMovingBrowser() = runBlocking {
+        val controlledReply = "RIVEN_STATE_CONTROL {\"room\":\"study\",\"sprite\":\"standing_teasing\"}\nNow I'm in the study."
+        val http = QueueHttpClient(successJson(controlledReply))
+        val first = runtime(http)
+        first.initialize()
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "private-key") is RivenProfileSaveResult.Success)
+        var stateObservedAtNarrative: com.shai.riven.data.persistence.entity.RivenPresenceEntity? = null
+
+        val sent = first.send("Go to the study") {
+            stateObservedAtNarrative = database.rivenPresenceDao().state(
+                com.shai.riven.data.presence.RivenPresenceService.PRIMARY_STATE_ID,
+            )
+        }
+
+        assertTrue("Expected success, got $sent", sent is RivenRuntimeResult.Success)
+        assertEquals("study", checkNotNull(stateObservedAtNarrative).actualRoomId)
+        val snapshot = (sent as RivenRuntimeResult.Success).snapshot
+        assertEquals("Now I'm in the study.", snapshot.messages.last().content)
+        assertEquals(com.shai.riven.data.presence.RivenRoom.STUDY, snapshot.roomState.actualRoom)
+        assertEquals(com.shai.riven.data.presence.RivenRoom.LIVING_ROOM, snapshot.roomState.browsedRoom)
+        assertFalse(snapshot.roomState.isRivenVisibleInBrowsedRoom)
+        assertTrue(checkNotNull(http.requests.single().body).contains("actual_room=living_room"))
+
+        first.close()
+        runtimes.remove(first)
+        val restored = (runtime(QueueHttpClient()).initialize() as RivenRuntimeResult.Success).snapshot.roomState
+        assertEquals(com.shai.riven.data.presence.RivenRoom.STUDY, restored.actualRoom)
+        assertEquals(com.shai.riven.data.presence.RivenSemanticSprite.STANDING_TEASING, restored.semanticSprite)
+        assertEquals(com.shai.riven.data.presence.RivenRoom.LIVING_ROOM, restored.browsedRoom)
+    }
+
+    @Test
+    fun unsupportedModelRoomFailsBeforeNarrativeIsExposed() = runBlocking {
+        val reply = "RIVEN_STATE_CONTROL {\"room\":\"attic\",\"sprite\":\"standing_relaxed\"}\nI moved."
+        val first = runtime(QueueHttpClient(successJson(reply)))
+        first.initialize()
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "private-key") is RivenProfileSaveResult.Success)
+        val deltas = mutableListOf<String>()
+
+        val sent = first.send("Go upstairs") { deltas += it }
+
+        assertTrue(sent is RivenRuntimeResult.Failure)
+        assertEquals(ConversationEngineErrorCode.STATE_CONTROL_REJECTED, (sent as RivenRuntimeResult.Failure).engineCode)
+        assertTrue(deltas.isEmpty())
+        assertEquals(com.shai.riven.data.presence.RivenRoom.LIVING_ROOM, checkNotNull(sent.snapshot).roomState.actualRoom)
+        assertFalse(sent.snapshot.messages.any { it.role == MessageRole.ASSISTANT })
+    }
+
     private fun runtime(
         http: OpenRouterHttpClient,
         thumbnailGenerator: ImageThumbnailGenerator = ImageThumbnailGenerator { bytes ->
@@ -860,6 +910,21 @@ class RivenConversationRuntimeTest {
         "data: [DONE]",
         "",
     )
+
+    private fun successJson(content: String): List<String> {
+        val payload = JSONObject()
+            .put("id", "request-ok")
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "delta",
+                        JSONObject().put("content", content),
+                    ),
+                ),
+            )
+        return listOf("data: $payload", "", "data: [DONE]", "")
+    }
 
     private fun providerFailure() = listOf(
         "data: {\"id\":\"request-failed\",\"error\":{\"code\":429}}",

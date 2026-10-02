@@ -25,6 +25,7 @@ import com.shai.riven.data.instructions.ShaiSystemInstructionsSnapshot
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.presence.RivenRoom
 import com.shai.riven.data.provider.ProviderCapability
 import com.shai.riven.data.provider.ProviderProfileSnapshot
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogError
@@ -101,6 +102,23 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("credential_status").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_arcade").performClick()
         composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+    }
+
+    @Test
+    fun brassKeyFloorPlanBrowsesWithoutMovingRivenOrShowingALocationMarker() {
+        val runtime = FakeRivenRuntime(configuredSnapshot())
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+
+        composeRule.onNodeWithTag("room_key").performClick()
+        composeRule.onNodeWithTag("room_floor_plan").assertIsDisplayed()
+        composeRule.onNodeWithTag("room_study").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.browsedRoom == RivenRoom.STUDY }
+
+        composeRule.onNodeWithTag("room_backdrop_study").assertIsDisplayed()
+        assertTrue(runtime.actualRoom == RivenRoom.LIVING_ROOM)
+        composeRule.onAllNodesWithTag("riven_location_marker").assertCountEquals(0)
     }
 
     @Test
@@ -534,9 +552,25 @@ private class FakeRivenRuntime(
         private set
     var loadPreviewCalls = 0
         private set
+    val browsedRoom: RivenRoom
+        get() = current.roomState.browsedRoom
+    val actualRoom: RivenRoom
+        get() = current.roomState.actualRoom
 
     override suspend fun initialize() = success()
     override suspend fun snapshot() = success()
+
+    override suspend fun browseRoom(room: RivenRoom): RivenRuntimeResult {
+        if (current.roomState.browsedRoom != room) {
+            current = current.copy(
+                roomState = current.roomState.copy(
+                    browsedRoom = room,
+                    browserRevision = current.roomState.browserRevision + 1,
+                ),
+            )
+        }
+        return success()
+    }
 
     override suspend fun saveDraft(content: String): RivenRuntimeResult {
         if (delayNextDraftSave) {

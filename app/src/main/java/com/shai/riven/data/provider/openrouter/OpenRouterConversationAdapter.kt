@@ -7,7 +7,9 @@ import com.shai.riven.data.conversation.engine.ProviderContextFragment
 import com.shai.riven.data.conversation.engine.ProviderConversationRequest
 import com.shai.riven.data.conversation.engine.ProviderFailureCode
 import com.shai.riven.data.conversation.engine.ProviderStreamEvent
+import com.shai.riven.data.conversation.engine.ProviderStateControlRequest
 import com.shai.riven.data.conversation.engine.ProviderSystemContextMode
+import com.shai.riven.data.context.RivenPresenceContextSource
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.provider.ProviderCapability
 import java.net.URI
@@ -46,30 +48,49 @@ class OpenRouterConversationAdapter(
             return
         }
         val decoder = OpenRouterSseDecoder(maxSseEventChars)
+        val outputFilter = OpenRouterStateControlFilter()
         var providerRequestId: String? = null
         var terminal = false
+        var consumerFailure: Exception? = null
+        suspend fun emitToConsumer(event: ProviderStreamEvent) {
+            try {
+                emit(event)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                consumerFailure = failure
+                throw failure
+            }
+        }
+        suspend fun emitFiltered(event: ProviderStreamEvent) {
+            if (event is ProviderStreamEvent.Failure) terminal = true
+            emitToConsumer(event)
+        }
         suspend fun handle(event: OpenRouterSseEvent) {
             if (terminal) return
             when (event) {
                 OpenRouterSseEvent.Done -> {
-                    terminal = true
-                    emit(ProviderStreamEvent.Completed(providerRequestId))
+                    outputFilter.finish(::emitFiltered)
+                    if (!terminal) {
+                        terminal = true
+                        emitToConsumer(ProviderStreamEvent.Completed(providerRequestId))
+                    }
                 }
                 is OpenRouterSseEvent.Payload -> {
                     val parsed = parsePayload(event.data)
                     parsed.providerRequestId?.let { providerRequestId = it }
                     when (parsed) {
-                        is OpenRouterPayload.Delta -> emit(ProviderStreamEvent.Delta(parsed.content))
+                        is OpenRouterPayload.Delta -> outputFilter.accept(parsed.content, ::emitFiltered)
                         is OpenRouterPayload.Error -> {
                             terminal = true
-                            emit(ProviderStreamEvent.Failure(parsed.code, providerRequestId))
+                            emitToConsumer(ProviderStreamEvent.Failure(parsed.code, providerRequestId))
                         }
                         is OpenRouterPayload.Metadata -> Unit
                     }
                 }
                 OpenRouterSseEvent.Malformed -> {
                     terminal = true
-                    emit(ProviderStreamEvent.Failure(ProviderFailureCode.OTHER, providerRequestId))
+                    emitToConsumer(ProviderStreamEvent.Failure(ProviderFailureCode.OTHER, providerRequestId))
                 }
             }
         }
@@ -96,7 +117,8 @@ class OpenRouterConversationAdapter(
         } catch (_: OpenRouterTransportTimeoutException) {
             if (!terminal) emit(ProviderStreamEvent.Failure(ProviderFailureCode.TIMEOUT, providerRequestId))
             return
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            consumerFailure?.let { throw it }
             if (!terminal) emit(ProviderStreamEvent.Failure(ProviderFailureCode.UNAVAILABLE, providerRequestId))
             return
         }
@@ -262,6 +284,89 @@ private sealed interface OpenRouterPayload {
     data class Metadata(
         override val providerRequestId: String?,
     ) : OpenRouterPayload
+}
+
+internal class OpenRouterStateControlFilter(
+    private val maximumControlLineChars: Int = MAX_CONTROL_LINE_CHARS,
+) {
+    private val buffered = StringBuilder()
+    private var passThrough = false
+    private var controlAccepted = false
+
+    init {
+        require(maximumControlLineChars > RivenPresenceContextSource.CONTROL_PREFIX.length)
+    }
+
+    suspend fun accept(content: String, emit: suspend (ProviderStreamEvent) -> Unit) {
+        if (content.isEmpty()) return
+        if (passThrough || controlAccepted) {
+            emit(ProviderStreamEvent.Delta(content))
+            return
+        }
+        buffered.append(content)
+        val value = buffered.toString()
+        val prefix = RivenPresenceContextSource.CONTROL_PREFIX
+        if (value.length <= prefix.length && prefix.startsWith(value)) return
+        if (!value.startsWith(prefix)) {
+            passThrough = true
+            buffered.clear()
+            emit(ProviderStreamEvent.Delta(value))
+            return
+        }
+        if (value.length > maximumControlLineChars && '\n' !in value) {
+            buffered.clear()
+            emit(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID))
+            return
+        }
+        val newline = value.indexOf('\n')
+        if (newline < 0) return
+        val line = value.substring(prefix.length, newline).trimEnd('\r')
+        val request = parseControl(line)
+        if (request == null) {
+            buffered.clear()
+            emit(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID))
+            return
+        }
+        controlAccepted = true
+        buffered.clear()
+        emit(ProviderStreamEvent.StateControlRequested(request))
+        val remainder = value.substring(newline + 1)
+        if (remainder.isNotEmpty()) emit(ProviderStreamEvent.Delta(remainder))
+    }
+
+    suspend fun finish(emit: suspend (ProviderStreamEvent) -> Unit) {
+        if (buffered.isEmpty()) return
+        val value = buffered.toString()
+        buffered.clear()
+        if (value.startsWith(RivenPresenceContextSource.CONTROL_PREFIX)) {
+            emit(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID))
+        } else {
+            emit(ProviderStreamEvent.Delta(value))
+        }
+    }
+
+    private fun parseControl(value: String): ProviderStateControlRequest? {
+        return try {
+            val json = JSONObject(value)
+            val keys = buildSet {
+                val iterator = json.keys()
+                while (iterator.hasNext()) add(iterator.next())
+            }
+            if (keys != setOf(ROOM_KEY, SPRITE_KEY)) return null
+            val room = json.opt(ROOM_KEY) as? String ?: return null
+            val sprite = json.opt(SPRITE_KEY) as? String ?: return null
+            if (room.isBlank() || sprite.isBlank()) return null
+            ProviderStateControlRequest(room, sprite)
+        } catch (_: JSONException) {
+            null
+        }
+    }
+
+    companion object {
+        const val MAX_CONTROL_LINE_CHARS = 512
+        private const val ROOM_KEY = "room"
+        private const val SPRITE_KEY = "sprite"
+    }
 }
 
 internal sealed interface OpenRouterSseEvent {

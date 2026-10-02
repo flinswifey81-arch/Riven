@@ -69,11 +69,39 @@ enum class ProviderFailureCode {
     INVALID_REQUEST,
     CONTENT_REJECTED,
     TIMEOUT,
+    STATE_CONTROL_INVALID,
     OTHER,
+}
+
+data class ProviderStateControlRequest(
+    val roomId: String,
+    val spriteId: String,
+)
+
+sealed interface ProviderStateControlResult {
+    data class Applied(
+        val actualRoomId: String,
+        val semanticSpriteId: String,
+        val presenceRevision: Long,
+    ) : ProviderStateControlResult
+
+    data class Rejected(val reason: String) : ProviderStateControlResult
+}
+
+fun interface ProviderStateControlHandler {
+    suspend fun apply(
+        request: ProviderStateControlRequest,
+        expectedPresenceRevision: Long,
+        occurredAt: Long,
+    ): ProviderStateControlResult
 }
 
 sealed interface ProviderStreamEvent {
     data class Delta(val content: String) : ProviderStreamEvent
+
+    data class StateControlRequested(
+        val request: ProviderStateControlRequest,
+    ) : ProviderStreamEvent
 
     data class Completed(
         val providerRequestId: String? = null,

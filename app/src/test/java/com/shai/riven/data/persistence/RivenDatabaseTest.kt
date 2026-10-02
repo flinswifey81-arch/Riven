@@ -127,6 +127,7 @@ class RivenDatabaseTest {
             "open_loop_pass_checkpoints",
             "consolidation_checkpoints",
             "derived_artifact_payloads",
+            "riven_presence_state",
         )
 
         val actualTables = database.openHelper.writableDatabase
@@ -151,12 +152,12 @@ class RivenDatabaseTest {
     }
 
     @Test
-    fun currentSchemaIdentityMatchesCheckedInVersionElevenSchema() {
+    fun currentSchemaIdentityMatchesCheckedInVersionTwelveSchema() {
         database.openHelper.writableDatabase
             .query("SELECT identity_hash FROM room_master_table WHERE id = 42")
             .use { cursor ->
                 assertTrue(cursor.moveToFirst())
-                assertEquals("14a161706b91d1f944d0dfb05e68c708", cursor.getString(0))
+                assertEquals("5ddabc749a7fee6d9a184695652c4849", cursor.getString(0))
                 assertFalse(cursor.moveToNext())
             }
     }

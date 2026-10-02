@@ -71,6 +71,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.presence.RivenPresenceSnapshot
+import com.shai.riven.data.presence.RivenRoom
 import com.shai.riven.data.reminder.ReminderController
 import com.shai.riven.data.reminder.platform.ReminderRuntime
 import com.shai.riven.data.provider.ProviderProfileSnapshot
@@ -395,6 +397,7 @@ private fun ChatScreen(
     var conversationJob by remember { mutableStateOf<Job?>(null) }
     var activeSubmissionId by remember { mutableStateOf<Long?>(null) }
     var awaitingUnknownImageConfirmation by remember { mutableStateOf(false) }
+    var floorPlanOpen by rememberSaveable { mutableStateOf(false) }
     val latestConversationJob by rememberUpdatedState(conversationJob)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -510,6 +513,7 @@ private fun ChatScreen(
         ),
     ) {
         val compact = maxHeight < 640.dp || maxWidth < 360.dp
+        RoomBackdrop(snapshot?.roomState)
         Column(
             modifier = Modifier.fillMaxSize().imePadding().testTag(if (compact) "chat_compact" else "chat_normal"),
         ) {
@@ -522,12 +526,30 @@ private fun ChatScreen(
                     Text("RIVEN", color = MutedGold, style = MaterialTheme.typography.labelMedium)
                     Text("Conversation", color = WarmIvory, style = MaterialTheme.typography.headlineSmall)
                 }
-                Text(
-                    snapshot?.profiles?.singleOrNull { it.profileId == snapshot?.selectedProfileId }?.displayName
-                        ?: "Not configured",
-                    color = if (snapshot?.selectedProfileHasCredential == true) MistBlue else RubyHeart,
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.testTag("chat_profile_status"),
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        snapshot?.profiles?.singleOrNull { it.profileId == snapshot?.selectedProfileId }?.displayName
+                            ?: "Not configured",
+                        color = if (snapshot?.selectedProfileHasCredential == true) MistBlue else RubyHeart,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.testTag("chat_profile_status"),
+                    )
+                    OutlinedButton(
+                        onClick = { floorPlanOpen = !floorPlanOpen },
+                        modifier = Modifier.padding(start = 8.dp).testTag("room_key"),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        BrassKeyIcon()
+                        Text("Rooms", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
+            }
+            if (floorPlanOpen) {
+                FloorPlan(
+                    browsedRoom = snapshot?.roomState?.browsedRoom ?: RivenRoom.LIVING_ROOM,
+                    onBrowse = { room ->
+                        scope.launch { apply(runtimeIo { runtime.browseRoom(room) }, preserveComposerDraft = true) }
+                    },
                 )
             }
             if (snapshot?.selectedProfileId == null || snapshot?.selectedProfileHasCredential != true) {
@@ -799,6 +821,102 @@ private fun MessageBubble(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RoomBackdrop(state: RivenPresenceSnapshot?) {
+    val room = state?.browsedRoom ?: RivenRoom.LIVING_ROOM
+    Box(
+        modifier = Modifier.fillMaxSize().testTag("room_backdrop_${room.stableId}"),
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val gold = MutedGold.copy(alpha = 0.20f)
+            val green = ShaiHunterGreen.copy(alpha = 0.22f)
+            drawRect(green, topLeft = Offset(0f, size.height * 0.64f), size = Size(size.width, size.height * 0.36f))
+            drawLine(gold, Offset(size.width * 0.08f, size.height * 0.64f), Offset(size.width * 0.92f, size.height * 0.64f), 2.dp.toPx())
+            drawRoundRect(
+                color = gold,
+                topLeft = Offset(size.width * 0.12f, size.height * 0.18f),
+                size = Size(size.width * 0.76f, size.height * 0.32f),
+                cornerRadius = CornerRadius(8.dp.toPx()),
+                style = Stroke(1.2.dp.toPx()),
+            )
+            drawCircle(gold, 2.dp.toPx(), Offset(size.width * 0.18f, size.height * 0.12f))
+            drawCircle(gold, 1.5.dp.toPx(), Offset(size.width * 0.78f, size.height * 0.09f))
+            drawCircle(gold, 1.dp.toPx(), Offset(size.width * 0.88f, size.height * 0.28f))
+        }
+        Text(
+            room.displayName.uppercase(),
+            color = MutedGold.copy(alpha = 0.62f),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 78.dp)
+                .testTag("browsed_room_label"),
+        )
+        // Full-body art is intentionally absent until an approved asset id is supplied. The
+        // browsing room may therefore be empty, including when Riven's actual room differs.
+    }
+}
+
+@Composable
+private fun BrassKeyIcon() {
+    Canvas(
+        modifier = Modifier.size(18.dp).semantics { contentDescription = "Open room floor plan" },
+    ) {
+        val stroke = 1.6.dp.toPx()
+        drawCircle(MutedGold, radius = 4.dp.toPx(), center = Offset(5.dp.toPx(), 7.dp.toPx()), style = Stroke(stroke))
+        drawLine(MutedGold, Offset(8.dp.toPx(), 10.dp.toPx()), Offset(16.dp.toPx(), 16.dp.toPx()), stroke)
+        drawLine(MutedGold, Offset(12.dp.toPx(), 13.dp.toPx()), Offset(14.dp.toPx(), 11.dp.toPx()), stroke)
+    }
+}
+
+@Composable
+private fun FloorPlan(
+    browsedRoom: RivenRoom,
+    onBrowse: (RivenRoom) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+            .testTag("room_floor_plan"),
+        colors = CardDefaults.cardColors(containerColor = TableNavyRaised.copy(alpha = 0.96f)),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("PENTHOUSE FLOOR PLAN", color = MutedGold, style = MaterialTheme.typography.labelMedium)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                RoomPlanButton(RivenRoom.STUDY, browsedRoom, onBrowse, Modifier.weight(1f))
+                RoomPlanButton(RivenRoom.LIVING_ROOM, browsedRoom, onBrowse, Modifier.weight(1.35f))
+                RoomPlanButton(RivenRoom.TERRACE, browsedRoom, onBrowse, Modifier.weight(1f))
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Spacer(Modifier.weight(0.35f))
+                RoomPlanButton(RivenRoom.KITCHEN, browsedRoom, onBrowse, Modifier.weight(1f))
+                RoomPlanButton(RivenRoom.BEDROOM, browsedRoom, onBrowse, Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun RoomPlanButton(
+    room: RivenRoom,
+    browsedRoom: RivenRoom,
+    onBrowse: (RivenRoom) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val selected = room == browsedRoom
+    OutlinedButton(
+        onClick = { onBrowse(room) },
+        modifier = modifier.testTag("room_${room.stableId}"),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) MutedGold.copy(alpha = 0.24f) else Color.Transparent,
+            contentColor = if (selected) WarmIvory else MistBlue,
+        ),
+        contentPadding = PaddingValues(horizontal = 5.dp, vertical = 7.dp),
+    ) {
+        Text(room.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

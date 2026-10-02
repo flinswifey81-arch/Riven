@@ -605,6 +605,18 @@ internal class ConversationRunPersistence(
                     }
                 }
 
+                is RivenContextFreshnessReceipt.RivenPresence -> {
+                    val state = database.rivenPresenceDao().state(
+                        com.shai.riven.data.presence.RivenPresenceService.PRIMARY_STATE_ID,
+                    ) ?: return false
+                    if (state.presenceRevision != receipt.presenceRevision ||
+                        state.actualRoomId != receipt.actualRoomId ||
+                        state.semanticSpriteId != receipt.semanticSpriteId
+                    ) {
+                        return false
+                    }
+                }
+
                 is RivenContextFreshnessReceipt.ConversationalRecall,
                 is RivenContextFreshnessReceipt.EphemeralAppState,
                 -> Unit

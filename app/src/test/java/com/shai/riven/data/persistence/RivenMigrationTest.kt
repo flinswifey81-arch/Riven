@@ -867,7 +867,7 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun migrationOneToElevenRunsFullNonDestructiveChainWithoutInventingLifecycleRows() {
+    fun migrationOneToTwelveRunsFullNonDestructiveChainWithoutInventingLifecycleRows() {
         migrationHelper.createDatabase(1).apply {
             execSQL("INSERT INTO conversations VALUES ('conversation-v1-v9', 1, 1, 'ACTIVE', 'Preserved')")
             execSQL(
@@ -879,7 +879,7 @@ class RivenMigrationTest {
         }
 
         val migrated = migrationHelper.runMigrationsAndValidate(
-            version = 11,
+            version = 12,
             migrations = listOf(
                 MIGRATION_1_2,
                 MIGRATION_2_3,
@@ -891,6 +891,7 @@ class RivenMigrationTest {
                 MIGRATION_8_9,
                 MIGRATION_9_10,
                 MIGRATION_10_11,
+                MIGRATION_11_12,
             ),
         )
 
@@ -902,6 +903,7 @@ class RivenMigrationTest {
         assertEquals(0L, migrated.rowCount("open_loop_pass_checkpoints"))
         assertEquals(0L, migrated.rowCount("consolidation_checkpoints"))
         assertEquals(0L, migrated.rowCount("derived_artifact_payloads"))
+        assertEquals(0L, migrated.rowCount("riven_presence_state"))
         migrated.close()
     }
 
@@ -922,6 +924,16 @@ class RivenMigrationTest {
         assertEquals(1L, migrated.singleLong(
             "SELECT COUNT(*) FROM pragma_foreign_key_list('derived_artifact_payloads')",
         ))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationElevenToTwelveAddsEmptyPersistedPresenceState() {
+        migrationHelper.createDatabase(11).close()
+
+        val migrated = migrationHelper.runMigrationsAndValidate(12, listOf(MIGRATION_11_12))
+
+        assertEquals(0L, migrated.rowCount("riven_presence_state"))
         migrated.close()
     }
 
@@ -1042,8 +1054,8 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun databaseVersionElevenHasExactlyFortyFourApplicationTables() {
-        val created = migrationHelper.createDatabase(11)
+    fun databaseVersionTwelveHasExactlyFortyFiveApplicationTables() {
+        val created = migrationHelper.createDatabase(12)
         val count = created.singleLong(
             """
             SELECT COUNT(*) FROM sqlite_master
@@ -1052,7 +1064,7 @@ class RivenMigrationTest {
               AND name NOT LIKE 'sqlite_%'
             """.trimIndent(),
         )
-        assertEquals(44L, count)
+        assertEquals(45L, count)
         created.close()
     }
 

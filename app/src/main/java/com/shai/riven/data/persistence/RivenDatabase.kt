@@ -18,6 +18,7 @@ import com.shai.riven.data.persistence.dao.MemoryLifecycleDao
 import com.shai.riven.data.persistence.dao.OpenLoopDao
 import com.shai.riven.data.persistence.dao.ProviderProfileDao
 import com.shai.riven.data.persistence.dao.SafeDeleteDao
+import com.shai.riven.data.persistence.dao.RivenPresenceDao
 import com.shai.riven.data.persistence.dao.ShaiSystemInstructionsDao
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.AutomaticMemoryJobEntity
@@ -63,6 +64,7 @@ import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.entity.ConsolidationCheckpointEntity
 import com.shai.riven.data.persistence.entity.ShaiSystemInstructionsEntity
+import com.shai.riven.data.persistence.entity.RivenPresenceEntity
 import com.shai.riven.data.persistence.model.SignificanceLevelConverters
 
 @TypeConverters(SignificanceLevelConverters::class)
@@ -112,8 +114,9 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         OpenLoopPassCheckpointEntity::class,
         ConsolidationCheckpointEntity::class,
         DerivedArtifactPayloadEntity::class,
+        RivenPresenceEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -144,6 +147,8 @@ abstract class RivenDatabase : RoomDatabase() {
     abstract fun attachmentDao(): AttachmentDao
 
     abstract fun providerProfileDao(): ProviderProfileDao
+
+    abstract fun rivenPresenceDao(): RivenPresenceDao
 
     companion object {
         const val DATABASE_NAME = "riven.db"
@@ -183,6 +188,7 @@ abstract class RivenDatabase : RoomDatabase() {
             MIGRATION_8_9,
             MIGRATION_9_10,
             MIGRATION_10_11,
+            MIGRATION_11_12,
         )
     }
 }
