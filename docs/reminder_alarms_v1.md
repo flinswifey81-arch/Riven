@@ -2,7 +2,7 @@
 
 ## Scope
 
-Reminder and alarm v1 uses a separate `riven-reminders.db` Room database. This avoids taking the main `RivenDatabase` version number while the memory branch is preparing its own schema v9. The reminder schema is exported independently at version 1.
+Reminder and alarm v1 uses a separate `riven-reminders.db` Room database. This avoids taking the main `RivenDatabase` version number while the memory branch is preparing its own schema v9. The reminder schema is exported independently at version 2, with a non-destructive v1-to-v2 migration for the durable ring deadline.
 
 The store is canonical for local reminder title, note, requested wall time, timezone policy, effective scheduled time, feature controls, quiet hours, delivery state, schedule revision, delivery token, failure details, and the reminder event audit stream.
 
@@ -10,16 +10,18 @@ The store is canonical for local reminder title, note, requested wall time, time
 
 - Notification reminders use `AlarmManager.setAndAllowWhileIdle`. Audible alarms use `setExactAndAllowWhileIdle` only when Android reports exact-alarm access.
 - Notification permission, global notification enablement, and exact-alarm access are separate visible states. A rejected schedule is stored as `FAILED` with the real reason; it is never described as scheduled.
-- Each reschedule updates a stable `PendingIntent` identity and advances the durable schedule revision. A broadcast must atomically claim the matching revision and a new delivery token before it can notify or ring.
+- Each reschedule updates a stable `PendingIntent` identity and advances the durable schedule revision. A broadcast must atomically claim the matching revision and a new delivery token before it can notify or ring. Notification claims remain durably `DELIVERING` until `notify()` returns and the claim is acknowledged; process recovery safely reposts the same deterministic notification with `onlyAlertOnce` before retrying that acknowledgement.
 - Boot, package replacement, clock changes, timezone changes, app startup, and exact-alarm access changes enqueue one unique reminder recovery worker. Recovery cancels and rebuilds active schedules idempotently.
 - Notification deletion is a deliberate dismissal. Dismissed, completed, and cancelled reminders are terminal and are not recovered or reissued.
 - The foreground ringing service uses alarm audio attributes without DND bypass, releases `MediaPlayer`, audio focus, coroutine work, and its bounded wake lock on stop or destruction, and stops audio after ten minutes if no action is taken.
 
 ## Restore and reset boundary
 
-Portable archive format v2 includes a self-contained `riven-reminders.db` snapshot with an independent schema version and SHA-256. Restore validates both databases, normalizes `RINGING` and `DELIVERED` rows to terminal `DISMISSED` state, and clears nonterminal delivery tokens. Before the atomic database swap it cancels existing app alarm/notification/audio delivery state. After restore or a successful rollback, normal application startup enqueues reminder recovery; active rows are rescheduled through the current notification and exact-alarm permission checks.
+Portable archive format v2 includes a self-contained `riven-reminders.db` snapshot with an independent schema version and SHA-256. Restore validates both databases, normalizes `DELIVERING`, `RINGING`, and `DELIVERED` rows to terminal `DISMISSED` state, and clears nonterminal delivery tokens and ring deadlines. Before the atomic database swap it cancels existing app alarm/notification/audio delivery state. After restore or a successful rollback, normal application startup enqueues reminder recovery; active rows are rescheduled through the current notification and exact-alarm permission checks.
 
 Legacy archive format v1 remains supported and never replaces the installation's reminder database. Restore journal v1 is likewise read compatibly and upgraded without opting it into reminder replacement.
+
+The main and reminder databases intentionally have no cross-database IDs, foreign keys, transactions, or state invariants: reminder titles, schedule policy, delivery tokens, quiet hours, and audit events are self-contained in `riven-reminders.db`. Export therefore uses bounded fuzzy semantics rather than pretending SQLite can provide a cross-file transaction. It takes one transactional `VACUUM INTO` snapshot of `riven.db`, then one of `riven-reminders.db`; each snapshot is internally coherent and hashed, while writes occurring between those two snapshots may appear in only the later reminder snapshot. The bounded window is the duration of those two snapshot operations. Restore validates and installs the pair as one journaled package, while legacy v1 restores preserve the current reminder database.
 
 Factory Reset explicitly cancels every app-owned `AlarmManager` entry, cancels notifications, stops alarm playback, deletes the reminder database and sidecars, and creates a fresh empty reminder database. This prevents ghost alarms after reset.
 

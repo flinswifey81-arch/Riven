@@ -3,6 +3,7 @@ package com.shai.riven.data.reset
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import com.shai.riven.data.archive.CURRENT_RIVEN_DATABASE_VERSION
+import com.shai.riven.data.archive.CURRENT_REMINDER_DATABASE_VERSION
 import com.shai.riven.data.archive.safeCauseType
 import com.shai.riven.data.credential.AndroidKeystoreProviderCredentialKeyResetter
 import com.shai.riven.data.credential.ProviderCredentialKeyResetter
@@ -191,6 +192,12 @@ class RivenResetBootstrap(
 
 internal object RivenEmptyDatabaseVerifier {
     private const val EXPECTED_APPLICATION_TABLE_COUNT = 39
+    private val EXPECTED_REMINDER_TABLES = setOf(
+        "local_reminders",
+        "reminder_events",
+        "reminder_feature_controls",
+        "reminder_quiet_hours",
+    )
 
     fun verify(context: Context, databaseFile: File): Boolean = runCatching {
         require(databaseFile.isFile)
@@ -230,6 +237,55 @@ internal object RivenEmptyDatabaseVerifier {
                 require(count == 0L)
             }
         }
+        verifyEmptyReminderDatabase(context.getDatabasePath(ReminderDatabase.DATABASE_NAME))
         true
     }.getOrDefault(false)
+
+    private fun verifyEmptyReminderDatabase(databaseFile: File) {
+        require(databaseFile.isFile)
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        ).use { sqlite ->
+            val version = sqlite.rawQuery("PRAGMA user_version", null).use { cursor ->
+                check(cursor.moveToFirst())
+                cursor.getInt(0)
+            }
+            require(version == CURRENT_REMINDER_DATABASE_VERSION)
+            val quickCheck = sqlite.rawQuery("PRAGMA quick_check", null).use { cursor ->
+                cursor.moveToFirst() && cursor.count == 1 && cursor.getString(0) == "ok"
+            }
+            require(quickCheck)
+            val foreignKeyViolation = sqlite.rawQuery("PRAGMA foreign_key_check", null).use {
+                it.moveToFirst()
+            }
+            require(!foreignKeyViolation)
+            val tables = sqlite.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+                null,
+            ).use { cursor ->
+                buildSet {
+                    while (cursor.moveToNext()) {
+                        val name = cursor.getString(0)
+                        if (name != "android_metadata" &&
+                            name != "room_master_table" &&
+                            !name.startsWith("sqlite_")
+                        ) {
+                            add(name)
+                        }
+                    }
+                }
+            }
+            require(tables == EXPECTED_REMINDER_TABLES)
+            tables.forEach { table ->
+                require(table.matches(Regex("[A-Za-z0-9_]+")))
+                val count = sqlite.rawQuery("SELECT COUNT(*) FROM `$table`", null).use { cursor ->
+                    check(cursor.moveToFirst())
+                    cursor.getLong(0)
+                }
+                require(count == 0L)
+            }
+        }
+    }
 }

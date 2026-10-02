@@ -106,6 +106,15 @@ class RivenArchiveExportAndStageTest {
         databaseClass = RivenDatabase::class,
     )
 
+    @get:Rule
+    val reminderMigrationHelper = MigrationTestHelper(
+        instrumentation = InstrumentationRegistry.getInstrumentation(),
+        file = InstrumentationRegistry.getInstrumentation().targetContext
+            .getDatabasePath(REMINDER_MIGRATION_DATABASE_NAME),
+        driver = AndroidSQLiteDriver(),
+        databaseClass = ReminderDatabase::class,
+    )
+
     private lateinit var context: Context
     private lateinit var root: File
     private lateinit var database: RivenDatabase
@@ -139,6 +148,7 @@ class RivenArchiveExportAndStageTest {
         reminderDatabase.close()
         database.close()
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
+        context.deleteDatabase(REMINDER_MIGRATION_DATABASE_NAME)
     }
 
     @Test
@@ -162,7 +172,7 @@ class RivenArchiveExportAndStageTest {
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
         assertEquals(10, manifest.databaseSchemaVersion)
-        assertEquals(1, manifest.reminderDatabaseSchemaVersion)
+        assertEquals(2, manifest.reminderDatabaseSchemaVersion)
         assertEquals(
             sha256Hex(entries.single { it.first == ARCHIVE_REMINDER_DATABASE_PATH }.second),
             manifest.reminderDatabaseSha256,
@@ -448,6 +458,49 @@ class RivenArchiveExportAndStageTest {
             zip(entries),
             RivenArchiveRestoreError.ArchiveIntegrityFailure("MISSING_REMINDER_DATABASE"),
         )
+    }
+
+    @Test
+    fun stageMigratesReminderDatabaseVersionOneNonDestructively() {
+        context.deleteDatabase(REMINDER_MIGRATION_DATABASE_NAME)
+        reminderMigrationHelper.createDatabase(1).apply {
+            execSQL(
+                "INSERT INTO reminder_feature_controls VALUES ('REMINDERS', 1, 0, 123)",
+            )
+            close()
+        }
+        val versionOneBytes = context.getDatabasePath(REMINDER_MIGRATION_DATABASE_NAME).readBytes()
+        val entries = readZip(validArchive()).map { (name, bytes) ->
+            when (name) {
+                ARCHIVE_REMINDER_DATABASE_PATH -> name to versionOneBytes
+                ARCHIVE_MANIFEST_PATH -> {
+                    val json = JSONObject(bytes.toString(Charsets.UTF_8))
+                        .put("reminderDatabaseSchemaVersion", 1)
+                        .put("reminderDatabaseSha256", sha256Hex(versionOneBytes))
+                    name to json.toString().toByteArray()
+                }
+                else -> name to bytes
+            }
+        }
+
+        val result = stage(zip(entries))
+
+        assertTrue(result is StageRivenRestoreResult.RestoreStaged)
+        val staged = ReminderDatabase.buildNamedForRestoreValidation(
+            context,
+            RivenRestorePaths(context, File(root, "restore")).pendingReminderDatabase.absolutePath,
+        )
+        try {
+            val controlCount = staged.openHelper.writableDatabase.query(
+                "SELECT COUNT(*) FROM reminder_feature_controls WHERE feature_key = 'REMINDERS'",
+            ).use { cursor ->
+                cursor.moveToFirst()
+                cursor.getInt(0)
+            }
+            assertEquals(1, controlCount)
+        } finally {
+            staged.close()
+        }
     }
 
     @Test
@@ -1474,5 +1527,6 @@ class RivenArchiveExportAndStageTest {
 
     private companion object {
         const val MIGRATION_DATABASE_NAME = "archive-restore-migration.db"
+        const val REMINDER_MIGRATION_DATABASE_NAME = "archive-reminder-migration.db"
     }
 }

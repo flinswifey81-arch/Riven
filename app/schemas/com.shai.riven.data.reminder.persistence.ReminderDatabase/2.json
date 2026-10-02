@@ -1,0 +1,330 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "784883c84c458b80b0413d987b0fe10d",
+    "entities": [
+      {
+        "tableName": "local_reminders",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`reminder_id` TEXT NOT NULL, `title` TEXT NOT NULL, `note` TEXT, `feature_key` TEXT NOT NULL, `delivery_mode` TEXT NOT NULL, `sound_kind` TEXT NOT NULL, `custom_sound_uri` TEXT, `requested_local_date_time` TEXT NOT NULL, `time_zone_id` TEXT NOT NULL, `time_zone_policy` TEXT NOT NULL, `requested_trigger_at` INTEGER NOT NULL, `scheduled_trigger_at` INTEGER, `status` TEXT NOT NULL, `schedule_revision` INTEGER NOT NULL, `delivery_token` TEXT, `ring_until_at` INTEGER, `last_failure_code` TEXT, `last_failure_detail` TEXT, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `finished_at` INTEGER, PRIMARY KEY(`reminder_id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "reminder_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "note",
+            "columnName": "note",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "featureKey",
+            "columnName": "feature_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deliveryMode",
+            "columnName": "delivery_mode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "soundKind",
+            "columnName": "sound_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "customSoundUri",
+            "columnName": "custom_sound_uri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "requestedLocalDateTime",
+            "columnName": "requested_local_date_time",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeZoneId",
+            "columnName": "time_zone_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeZonePolicy",
+            "columnName": "time_zone_policy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requestedTriggerAt",
+            "columnName": "requested_trigger_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scheduledTriggerAt",
+            "columnName": "scheduled_trigger_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scheduleRevision",
+            "columnName": "schedule_revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deliveryToken",
+            "columnName": "delivery_token",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ringUntilAt",
+            "columnName": "ring_until_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastFailureCode",
+            "columnName": "last_failure_code",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastFailureDetail",
+            "columnName": "last_failure_detail",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "finishedAt",
+            "columnName": "finished_at",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "reminder_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_reminders_status_scheduled_trigger_at",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "scheduled_trigger_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_reminders_status_scheduled_trigger_at` ON `${TABLE_NAME}` (`status`, `scheduled_trigger_at`)"
+          },
+          {
+            "name": "index_local_reminders_feature_key",
+            "unique": false,
+            "columnNames": [
+              "feature_key"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_reminders_feature_key` ON `${TABLE_NAME}` (`feature_key`)"
+          }
+        ]
+      },
+      {
+        "tableName": "reminder_feature_controls",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`feature_key` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `allow_during_quiet_hours` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`feature_key`))",
+        "fields": [
+          {
+            "fieldPath": "featureKey",
+            "columnName": "feature_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "allowDuringQuietHours",
+            "columnName": "allow_during_quiet_hours",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "feature_key"
+          ]
+        }
+      },
+      {
+        "tableName": "reminder_quiet_hours",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`settings_id` INTEGER NOT NULL, `enabled` INTEGER NOT NULL, `start_minute_of_day` INTEGER NOT NULL, `end_minute_of_day` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`settings_id`))",
+        "fields": [
+          {
+            "fieldPath": "settingsId",
+            "columnName": "settings_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startMinuteOfDay",
+            "columnName": "start_minute_of_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endMinuteOfDay",
+            "columnName": "end_minute_of_day",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "settings_id"
+          ]
+        }
+      },
+      {
+        "tableName": "reminder_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`event_id` TEXT NOT NULL, `reminder_id` TEXT NOT NULL, `event_kind` TEXT NOT NULL, `schedule_revision` INTEGER NOT NULL, `delivery_token` TEXT NOT NULL, `detail` TEXT, `created_at` INTEGER NOT NULL, PRIMARY KEY(`event_id`), FOREIGN KEY(`reminder_id`) REFERENCES `local_reminders`(`reminder_id`) ON UPDATE CASCADE ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "event_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reminderId",
+            "columnName": "reminder_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventKind",
+            "columnName": "event_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scheduleRevision",
+            "columnName": "schedule_revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deliveryToken",
+            "columnName": "delivery_token",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "detail",
+            "columnName": "detail",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "event_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_reminder_events_reminder_id_created_at",
+            "unique": false,
+            "columnNames": [
+              "reminder_id",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_reminder_events_reminder_id_created_at` ON `${TABLE_NAME}` (`reminder_id`, `created_at`)"
+          },
+          {
+            "name": "index_reminder_events_delivery_token_event_kind",
+            "unique": true,
+            "columnNames": [
+              "delivery_token",
+              "event_kind"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_reminder_events_delivery_token_event_kind` ON `${TABLE_NAME}` (`delivery_token`, `event_kind`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_reminders",
+            "onDelete": "CASCADE",
+            "onUpdate": "CASCADE",
+            "columns": [
+              "reminder_id"
+            ],
+            "referencedColumns": [
+              "reminder_id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '784883c84c458b80b0413d987b0fe10d')"
+    ]
+  }
+}

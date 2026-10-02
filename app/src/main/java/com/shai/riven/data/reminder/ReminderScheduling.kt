@@ -25,3 +25,11 @@ interface ReminderPlatformScheduler {
 
     fun cancel(reminderId: String)
 }
+
+interface ReminderDeliveryEffects {
+    fun cancelDelivery(reminderId: String, deliveryToken: String?)
+}
+
+object NoOpReminderDeliveryEffects : ReminderDeliveryEffects {
+    override fun cancelDelivery(reminderId: String, deliveryToken: String?) = Unit
+}

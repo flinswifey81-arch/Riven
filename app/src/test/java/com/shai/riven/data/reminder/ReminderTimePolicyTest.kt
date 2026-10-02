@@ -79,4 +79,25 @@ class ReminderTimePolicyTest {
             ),
         )
     }
+
+    @Test
+    fun equalQuietHourBoundariesDefineEmptyInterval() {
+        val policy = ReminderTimePolicy(Clock.fixed(utcNow, ZoneOffset.UTC)) { ZoneOffset.UTC }
+        val quiet = ReminderQuietHours(
+            enabled = true,
+            startMinuteOfDay = 8 * 60,
+            endMinuteOfDay = 8 * 60,
+        )
+        val requested = Instant.parse("2026-10-04T12:00:00Z")
+
+        val allowed = policy.nextAllowedInstant(
+            requested = requested,
+            quietHours = quiet,
+            featureControl = ReminderFeatureControl(ReminderFeature.REMINDERS, true, false),
+            zoneId = ZoneOffset.UTC,
+        )
+
+        assertEquals(requested, allowed)
+        assertEquals(false, policy.isWithinQuietHours(requested.atZone(ZoneOffset.UTC).toLocalTime(), quiet))
+    }
 }

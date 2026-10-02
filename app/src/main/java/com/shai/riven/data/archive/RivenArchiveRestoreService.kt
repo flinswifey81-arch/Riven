@@ -443,14 +443,15 @@ class RivenArchiveRestoreService(
             // in-flight deliveries prevents a restored alarm from ringing or nagging again.
             sqlite.execSQL(
                 "UPDATE local_reminders SET status = 'DISMISSED', delivery_token = NULL, " +
-                    "finished_at = ?, updated_at = ?, last_failure_code = NULL, " +
-                    "last_failure_detail = NULL WHERE status IN ('RINGING', 'DELIVERED')",
+                    "ring_until_at = NULL, finished_at = ?, updated_at = ?, " +
+                    "last_failure_code = NULL, last_failure_detail = NULL " +
+                    "WHERE status IN ('DELIVERING', 'RINGING', 'DELIVERED')",
                 arrayOf(occurredAt, occurredAt),
             )
             // Scheduled, snoozed, and failed rows are recreated by startup recovery through the
             // normal AlarmManager and notification permission checks.
             sqlite.execSQL(
-                "UPDATE local_reminders SET delivery_token = NULL " +
+                "UPDATE local_reminders SET delivery_token = NULL, ring_until_at = NULL " +
                     "WHERE status IN ('SCHEDULED', 'SNOOZED', 'FAILED')",
             )
         } catch (cancelled: CancellationException) {

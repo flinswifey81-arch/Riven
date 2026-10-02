@@ -23,7 +23,7 @@ interface ReminderDao {
         """
         SELECT * FROM local_reminders
         ORDER BY
-            CASE WHEN status IN ('SCHEDULED', 'SNOOZED', 'RINGING', 'DELIVERED', 'FAILED') THEN 0 ELSE 1 END,
+            CASE WHEN status IN ('SCHEDULED', 'SNOOZED', 'DELIVERING', 'RINGING', 'DELIVERED', 'FAILED') THEN 0 ELSE 1 END,
             COALESCE(scheduled_trigger_at, requested_trigger_at),
             created_at
         """,
@@ -42,11 +42,15 @@ interface ReminderDao {
     @Query("SELECT * FROM local_reminders WHERE status = 'RINGING' ORDER BY updated_at")
     suspend fun ringingReminders(): List<LocalReminderEntity>
 
+    @Query("SELECT * FROM local_reminders WHERE status = 'DELIVERING' ORDER BY updated_at")
+    suspend fun pendingNotificationDeliveries(): List<LocalReminderEntity>
+
     @Query(
         """
         UPDATE local_reminders
         SET status = :deliveryStatus,
             delivery_token = :deliveryToken,
+            ring_until_at = :ringUntilAt,
             last_failure_code = NULL,
             last_failure_detail = NULL,
             updated_at = :now
@@ -60,6 +64,7 @@ interface ReminderDao {
         reminderId: String,
         scheduleRevision: Long,
         deliveryToken: String,
+        ringUntilAt: Long?,
         deliveryStatus: String,
         now: Long,
     ): Int
@@ -72,6 +77,7 @@ interface ReminderDao {
         reminderId: String,
         scheduleRevision: Long,
         deliveryToken: String,
+        ringUntilAt: Long?,
         deliveryStatus: String,
         now: Long,
         event: ReminderEventEntity,
@@ -80,6 +86,7 @@ interface ReminderDao {
             reminderId = reminderId,
             scheduleRevision = scheduleRevision,
             deliveryToken = deliveryToken,
+            ringUntilAt = ringUntilAt,
             deliveryStatus = deliveryStatus,
             now = now,
         ) == 1
@@ -92,14 +99,18 @@ interface ReminderDao {
         UPDATE local_reminders
         SET status = :newStatus,
             delivery_token = NULL,
+            ring_until_at = NULL,
+            schedule_revision = schedule_revision + 1,
             finished_at = :finishedAt,
             updated_at = :finishedAt
         WHERE reminder_id = :reminderId
-          AND status IN ('SCHEDULED', 'SNOOZED', 'RINGING', 'DELIVERED', 'FAILED')
+          AND schedule_revision = :expectedRevision
+          AND status IN ('SCHEDULED', 'SNOOZED', 'DELIVERING', 'RINGING', 'DELIVERED', 'FAILED')
         """,
     )
     suspend fun finishActive(
         reminderId: String,
+        expectedRevision: Long,
         newStatus: String,
         finishedAt: Long,
     ): Int
@@ -109,15 +120,19 @@ interface ReminderDao {
         UPDATE local_reminders
         SET status = :newStatus,
             delivery_token = NULL,
+            ring_until_at = NULL,
+            schedule_revision = schedule_revision + 1,
             finished_at = :finishedAt,
             updated_at = :finishedAt
         WHERE reminder_id = :reminderId
+          AND schedule_revision = :expectedRevision
           AND delivery_token = :deliveryToken
-          AND status IN ('RINGING', 'DELIVERED')
+          AND status IN ('DELIVERING', 'RINGING', 'DELIVERED')
         """,
     )
     suspend fun finishDelivery(
         reminderId: String,
+        expectedRevision: Long,
         deliveryToken: String,
         newStatus: String,
         finishedAt: Long,
@@ -132,17 +147,20 @@ interface ReminderDao {
             status = 'SNOOZED',
             schedule_revision = schedule_revision + 1,
             delivery_token = NULL,
+            ring_until_at = NULL,
             last_failure_code = NULL,
             last_failure_detail = NULL,
             updated_at = :now,
             finished_at = NULL
         WHERE reminder_id = :reminderId
+          AND schedule_revision = :expectedRevision
           AND delivery_token = :deliveryToken
-          AND status IN ('RINGING', 'DELIVERED')
+          AND status IN ('DELIVERING', 'RINGING', 'DELIVERED')
         """,
     )
     suspend fun snoozeDelivery(
         reminderId: String,
+        expectedRevision: Long,
         deliveryToken: String,
         requestedLocalDateTime: String,
         requestedTriggerAt: Long,
@@ -156,11 +174,13 @@ interface ReminderDao {
         SET status = 'FAILED',
             scheduled_trigger_at = NULL,
             delivery_token = NULL,
+            ring_until_at = NULL,
             last_failure_code = :failureCode,
             last_failure_detail = :failureDetail,
             updated_at = :now
         WHERE reminder_id = :reminderId
           AND schedule_revision = :scheduleRevision
+          AND status IN ('SCHEDULED', 'SNOOZED', 'FAILED')
         """,
     )
     suspend fun markScheduleFailure(
@@ -197,13 +217,14 @@ interface ReminderDao {
         SET status = 'FAILED',
             scheduled_trigger_at = NULL,
             delivery_token = NULL,
+            ring_until_at = NULL,
             last_failure_code = :failureCode,
             last_failure_detail = :failureDetail,
             updated_at = :now
         WHERE reminder_id = :reminderId
           AND schedule_revision = :scheduleRevision
           AND delivery_token = :deliveryToken
-          AND status IN ('RINGING', 'DELIVERED')
+          AND status IN ('DELIVERING', 'RINGING', 'DELIVERED')
         """,
     )
     suspend fun markDeliveryFailure(
@@ -219,6 +240,7 @@ interface ReminderDao {
         """
         UPDATE local_reminders
         SET status = 'DELIVERED',
+            ring_until_at = NULL,
             updated_at = :now
         WHERE reminder_id = :reminderId
           AND schedule_revision = :scheduleRevision
@@ -232,6 +254,63 @@ interface ReminderDao {
         deliveryToken: String,
         now: Long,
     ): Int
+
+    @Query(
+        """
+        UPDATE local_reminders
+        SET status = 'DELIVERED', updated_at = :now
+        WHERE reminder_id = :reminderId
+          AND schedule_revision = :scheduleRevision
+          AND delivery_token = :deliveryToken
+          AND status = 'DELIVERING'
+        """,
+    )
+    suspend fun acknowledgeNotificationDelivery(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+        now: Long,
+    ): Int
+
+    @Transaction
+    suspend fun acknowledgeNotificationDelivery(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+        now: Long,
+        event: ReminderEventEntity,
+    ): Boolean {
+        val acknowledged = acknowledgeNotificationDelivery(
+            reminderId = reminderId,
+            scheduleRevision = scheduleRevision,
+            deliveryToken = deliveryToken,
+            now = now,
+        ) == 1
+        if (acknowledged) insertEvent(event)
+        return acknowledged
+    }
+
+    @Transaction
+    suspend fun replaceActiveIfCurrent(
+        expectedRevision: Long,
+        replacement: LocalReminderEntity,
+    ): Boolean {
+        val current = reminder(replacement.id) ?: return false
+        if (current.scheduleRevision != expectedRevision ||
+            current.status !in setOf(
+                "SCHEDULED",
+                "SNOOZED",
+                "DELIVERING",
+                "RINGING",
+                "DELIVERED",
+                "FAILED",
+            ) ||
+            replacement.scheduleRevision != expectedRevision + 1
+        ) {
+            return false
+        }
+        return updateReminder(replacement) == 1
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertFeatureControl(control: ReminderFeatureControlEntity)

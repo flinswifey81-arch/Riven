@@ -42,6 +42,8 @@ data class LocalReminderEntity(
     val scheduleRevision: Long,
     @ColumnInfo(name = "delivery_token")
     val deliveryToken: String?,
+    @ColumnInfo(name = "ring_until_at")
+    val ringUntilAt: Long?,
     @ColumnInfo(name = "last_failure_code")
     val lastFailureCode: String?,
     @ColumnInfo(name = "last_failure_detail")

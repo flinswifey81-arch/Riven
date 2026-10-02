@@ -12,7 +12,11 @@ import java.io.File
 import kotlinx.coroutines.CancellationException
 
 internal data class RivenRestoreBootstrapHooks(
+    val afterMainDatabaseMovedAside: () -> Unit = {},
+    val afterReminderDatabaseMovedAside: () -> Unit = {},
     val beforeDatabaseInstall: () -> Unit = {},
+    val afterMainDatabaseInstalled: () -> Unit = {},
+    val afterReminderDatabaseInstalled: () -> Unit = {},
     val beforeAttachmentInstall: () -> Unit = {},
     val beforePostInstallVerification: () -> Unit = {},
     val afterRollbackAttachmentsRestored: () -> Unit = {},
@@ -126,10 +130,12 @@ class RivenRestoreBootstrap(
             journal.write(activeRecord)
             deletePath(paths.rollbackRoot)
             moveIfExists(paths.canonicalDatabase, paths.rollbackDatabase)
+            hooks.afterMainDatabaseMovedAside()
             moveIfExists(paths.canonicalWal, paths.rollbackWal)
             moveIfExists(paths.canonicalShm, paths.rollbackShm)
             if (activeRecord.includesReminderDatabase) {
                 moveIfExists(paths.canonicalReminderDatabase, paths.rollbackReminderDatabase)
+                hooks.afterReminderDatabaseMovedAside()
                 moveIfExists(paths.canonicalReminderWal, paths.rollbackReminderWal)
                 moveIfExists(paths.canonicalReminderShm, paths.rollbackReminderShm)
             }
@@ -140,11 +146,13 @@ class RivenRestoreBootstrap(
             hooks.beforeDatabaseInstall()
             paths.canonicalDatabase.parentFile?.mkdirs()
             moveReplacing(paths.pendingDatabase, paths.canonicalDatabase)
+            hooks.afterMainDatabaseInstalled()
             deletePath(paths.canonicalWal)
             deletePath(paths.canonicalShm)
             if (activeRecord.includesReminderDatabase) {
                 paths.canonicalReminderDatabase.parentFile?.mkdirs()
                 moveReplacing(paths.pendingReminderDatabase, paths.canonicalReminderDatabase)
+                hooks.afterReminderDatabaseInstalled()
                 deletePath(paths.canonicalReminderWal)
                 deletePath(paths.canonicalReminderShm)
             }

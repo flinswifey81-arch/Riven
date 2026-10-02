@@ -45,6 +45,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -158,6 +159,34 @@ class RivenRestoreBootstrapTest {
 
         assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
         assertEquals("SCHEDULED", canonicalReminderStatus("local-reminder"))
+    }
+
+    @Test
+    fun processDeathAfterMainDatabaseMoveRollsBackBothDatabases() {
+        assertPerDatabaseMoveCrashRecovery(
+            RivenRestoreBootstrapHooks(afterMainDatabaseMovedAside = { throw SimulatedDeath() }),
+        )
+    }
+
+    @Test
+    fun processDeathAfterReminderDatabaseMoveRollsBackBothDatabases() {
+        assertPerDatabaseMoveCrashRecovery(
+            RivenRestoreBootstrapHooks(afterReminderDatabaseMovedAside = { throw SimulatedDeath() }),
+        )
+    }
+
+    @Test
+    fun processDeathAfterMainDatabaseInstallRollsBackBothDatabases() {
+        assertPerDatabaseMoveCrashRecovery(
+            RivenRestoreBootstrapHooks(afterMainDatabaseInstalled = { throw SimulatedDeath() }),
+        )
+    }
+
+    @Test
+    fun processDeathAfterReminderDatabaseInstallRollsBackBothDatabases() {
+        assertPerDatabaseMoveCrashRecovery(
+            RivenRestoreBootstrapHooks(afterReminderDatabaseInstalled = { throw SimulatedDeath() }),
+        )
     }
 
     @Test
@@ -756,6 +785,32 @@ class RivenRestoreBootstrapTest {
             current.close()
         }
     }
+
+    private fun assertPerDatabaseMoveCrashRecovery(hooks: RivenRestoreBootstrapHooks) {
+        prepareOldState()
+        insertCanonicalReminder("old-reminder", "SCHEDULED", null)
+        insertSourceReminder("new-reminder", "SCHEDULED", null)
+        stageValidArchive()
+        val interrupted = bootstrap().apply { this.hooks = hooks }
+        var died = false
+        try {
+            interrupted.recoverAndApply()
+        } catch (_: SimulatedDeath) {
+            died = true
+        }
+        assertTrue(died)
+
+        val recovered = bootstrap().recoverAndApply()
+
+        assertTrue(recovered is RivenRestoreBootstrapResult.PreviousStateRestored)
+        assertTrue(canonicalConversationExists("old-conversation"))
+        assertFalse(canonicalConversationExists("new-conversation"))
+        assertEquals("SCHEDULED", canonicalReminderStatus("old-reminder"))
+        assertNull(canonicalReminderStatus("new-reminder"))
+        assertFalse(RivenRestoreGate.isPending(context, restoreRoot))
+    }
+
+    private class SimulatedDeath : CancellationException("simulated process death")
 
     private fun insertSourceReminder(id: String, status: String, deliveryToken: String?) {
         insertReminder(sourceReminderDatabase, id, status, deliveryToken)
