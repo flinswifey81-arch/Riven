@@ -109,6 +109,7 @@ data class RivenContextPayload(
     val observedAt: Long? = null,
     val validUntil: Long? = null,
     val conversationRole: MessageRole? = null,
+    val budgetBehavior: RivenContextBudgetBehavior? = null,
 )
 
 sealed interface RivenContextFreshnessReceipt {

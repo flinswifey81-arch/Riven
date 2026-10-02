@@ -18,6 +18,21 @@ class ProviderProfileService(
 ) {
     private val dao = database.providerProfileDao()
 
+    fun validateCandidate(
+        displayName: String,
+        adapterId: String,
+        endpointBaseUrl: String,
+        modelId: String,
+        credentialSlotId: String?,
+        capabilities: List<ProviderCapability>,
+    ): ProviderProfileError? = try {
+        validateFields(displayName, adapterId, endpointBaseUrl, modelId, credentialSlotId)
+        validateCapabilities(capabilities)
+        null
+    } catch (abort: ProfileAbort) {
+        abort.error
+    }
+
     suspend fun create(input: CreateProviderProfileInput): CreateProviderProfileResult =
         executeCreate {
             val profileId = input.profileId ?: idGenerator.newProfileId()

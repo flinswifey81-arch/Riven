@@ -27,7 +27,7 @@ class ShaiSystemInstructionsContextSource(
         maxFragments = 1,
         maxCharsPerFragment = MAX_CONTEXT_CHARS,
         maxAggregateChars = MAX_CONTEXT_CHARS,
-        budgetBehavior = RivenContextBudgetBehavior.REQUIRED,
+        budgetBehavior = RivenContextBudgetBehavior.TRUNCATABLE,
         contentAuthority = RivenContextContentAuthority.INSTRUCTIONS,
     )
 

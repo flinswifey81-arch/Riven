@@ -339,6 +339,60 @@ class RivenContextSourceRegistryTest {
     }
 
     @Test
+    fun currentInteractionIsRequiredWhileRecentHistoryWinsTheBoundedHistoryWindow() = runBlocking {
+        val transcript = source(
+            descriptor(
+                sourceId = "transcript",
+                layer = RivenContextLayer.ACTIVE_CANONICAL_CONVERSATION_AND_CURRENT_INTERACTION,
+                provenanceClass = RivenContextProvenanceClass.ACTIVE_CONVERSATION,
+                criticality = RivenContextSourceCriticality.REQUIRED,
+                budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED,
+            ),
+            listOf(
+                payload("oldest", "1111", budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED),
+                payload("recent", "2222", budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED),
+                payload("current", "3333", budgetBehavior = RivenContextBudgetBehavior.REQUIRED),
+            ),
+        )
+
+        val snapshot = assertSuccess(
+            RivenContextSourceRegistry(listOf(transcript)).collect(
+                RivenContextReadRequest(now = 1, budget = RivenContextCollectionBudget(2, 8)),
+            ),
+        )
+
+        assertEquals(listOf("recent", "current"), snapshot.fragments.map { it.fragmentId })
+        assertEquals(listOf(RivenContextBudgetOmission("transcript", "oldest")), snapshot.budgetOmissions)
+    }
+
+    @Test
+    fun truncatableInstructionsCarryAnExplicitMarkerWithoutTruncatingRequiredCanon() = runBlocking {
+        val canon = source(
+            descriptor("canon", budgetBehavior = RivenContextBudgetBehavior.REQUIRED),
+            listOf(payload("locked", "c".repeat(10))),
+        )
+        val instructions = source(
+            descriptor(
+                sourceId = "instructions",
+                budgetBehavior = RivenContextBudgetBehavior.TRUNCATABLE,
+                maxCharsPerFragment = 200,
+                maxAggregateChars = 200,
+            ),
+            listOf(payload("shai", "i".repeat(100))),
+        )
+
+        val snapshot = assertSuccess(
+            RivenContextSourceRegistry(listOf(canon, instructions)).collect(
+                RivenContextReadRequest(now = 1, budget = RivenContextCollectionBudget(2, 80)),
+            ),
+        )
+
+        assertEquals("c".repeat(10), snapshot.fragments.single { it.sourceId == "canon" }.content)
+        assertTrue(snapshot.fragments.single { it.sourceId == "instructions" }.content.contains("Context truncated"))
+        assertEquals(listOf(RivenContextBudgetOmission("instructions", "shai")), snapshot.budgetOmissions)
+    }
+
+    @Test
     fun requiredContextOverflowFailsWithoutPublishingPartialPayload() = runBlocking {
         val required = source(
             descriptor("required", budgetBehavior = RivenContextBudgetBehavior.REQUIRED),
@@ -456,11 +510,13 @@ class RivenContextSourceRegistryTest {
         content: String = fragmentId,
         observedAt: Long? = null,
         validUntil: Long? = null,
+        budgetBehavior: RivenContextBudgetBehavior? = null,
     ) = RivenContextPayload(
         fragmentId = fragmentId,
         content = content,
         observedAt = observedAt,
         validUntil = validUntil,
+        budgetBehavior = budgetBehavior,
     )
 
     private class FakeSource(

@@ -20,12 +20,17 @@ import com.shai.riven.data.provider.openrouter.OpenRouterHttpClient
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpRequest
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpResponse
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -124,6 +129,7 @@ class RivenConversationRuntimeTest {
         assertEquals(ConversationEngineErrorCode.PROVIDER_FAILURE, (failed as RivenRuntimeResult.Failure).engineCode)
         assertEquals(listOf("Please retry"), checkNotNull(failed.snapshot).messages.map { it.content })
         assertFalse(failed.snapshot.messages.any { it.content.contains("partial") })
+        assertTrue(runtime.saveDraft("Keep this retry draft") is RivenRuntimeResult.Success)
 
         val retried = runtime.retry()
         assertTrue("Expected retry success, got $retried", retried is RivenRuntimeResult.Success)
@@ -131,6 +137,7 @@ class RivenConversationRuntimeTest {
             listOf("Please retry", "Recovered reply."),
             (retried as RivenRuntimeResult.Success).snapshot.messages.map { it.content },
         )
+        assertEquals("Keep this retry draft", retried.snapshot.draft)
         assertEquals(2, http.requests.size)
     }
 
@@ -146,6 +153,7 @@ class RivenConversationRuntimeTest {
         assertTrue(runtime.saveProfile(null, "Primary", "anthropic/example", "key") is RivenProfileSaveResult.Success)
 
         assertTrue(runtime.send("Start here") is RivenRuntimeResult.Success)
+        assertTrue(runtime.saveDraft("Keep this unfinished draft") is RivenRuntimeResult.Success)
         val regenerated = runtime.regenerate()
         assertTrue(regenerated is RivenRuntimeResult.Success)
         assertEquals(
@@ -156,6 +164,10 @@ class RivenConversationRuntimeTest {
             database.conversationTimelineDao().allMessages(RivenConversationRuntime.CONVERSATION_ID)
                 .any { it.content == "First reply." },
         )
+        assertEquals(
+            "Keep this unfinished draft",
+            (regenerated as RivenRuntimeResult.Success).snapshot.draft,
+        )
 
         val continued = runtime.continueConversation()
         assertTrue(continued is RivenRuntimeResult.Success)
@@ -163,7 +175,100 @@ class RivenConversationRuntimeTest {
             listOf("Start here", "Regenerated reply.", "Continue.", "Continued reply."),
             (continued as RivenRuntimeResult.Success).snapshot.messages.map { it.content },
         )
+        assertEquals(
+            "Keep this unfinished draft",
+            (continued as RivenRuntimeResult.Success).snapshot.draft,
+        )
         assertEquals(3, http.requests.size)
+    }
+
+    @Test
+    fun invalidProfileNeverReplacesPreviouslyStoredCredential() = runBlocking {
+        val runtime = runtime(QueueHttpClient())
+        runtime.initialize()
+        val saved = runtime.saveProfile(null, "Primary", "anthropic/example", "fake-old-key")
+        assertTrue(saved is RivenProfileSaveResult.Success)
+
+        val rejected = runtime.saveProfile(
+            profileId = (saved as RivenProfileSaveResult.Success).profile.profileId,
+            displayName = "x".repeat(201),
+            modelId = "anthropic/example",
+            apiKey = "fake-new-key",
+        )
+
+        assertTrue(rejected is RivenProfileSaveResult.Failure)
+        val stored = credentials.readCredential(RivenConversationRuntime.OPENROUTER_CREDENTIAL_SLOT)
+        assertEquals("fake-old-key", (stored as ReadProviderCredentialResult.Success).secret.reveal())
+    }
+
+    @Test
+    fun cancelBeforeProviderDispatchCancelsQueuedPreparationAndNeverStartsHttp() = runBlocking {
+        val http = QueueHttpClient(success("must not run"))
+        val runtime = runtime(http)
+        runtime.initialize()
+        val saved = runtime.saveProfile(null, "Primary", "anthropic/example", "fake-key")
+            as RivenProfileSaveResult.Success
+        credentials.blockNextPut()
+        val profileSave = async(Dispatchers.Default) {
+            runtime.saveProfile(saved.profile.profileId, "Primary", "anthropic/example", "fake-replacement")
+        }
+        assertTrue(credentials.awaitBlockedPut())
+        val sending = async(Dispatchers.Default) { runtime.send("Cancel during preparation") }
+
+        withTimeout(2_000) {
+            while (true) {
+                val result = runtime.cancel()
+                if (result is RivenRuntimeResult.Success) return@withTimeout result
+                yield()
+            }
+            error("unreachable")
+        }
+        credentials.releaseBlockedPut()
+        profileSave.await()
+        try {
+            sending.await()
+        } catch (_: CancellationException) {
+            // Expected: cancellation covers the operation before a run id or provider call exists.
+        }
+        assertTrue(http.requests.isEmpty())
+    }
+
+    @Test
+    fun exactCanonLongFirstTurnMultipleTurnsAndEnabledInstructionsFitBoundedContext() = runBlocking {
+        val http = QueueHttpClient(success("First reply."), success("Second reply."))
+        val runtime = runtime(http)
+        runtime.initialize()
+        assertTrue(runtime.saveProfile(null, "Primary", "anthropic/example", "fake-key") is RivenProfileSaveResult.Success)
+        assertTrue(runtime.saveInstructions("Follow this grounded preference. ".repeat(50), true, 0) is RivenRuntimeResult.Success)
+
+        assertTrue(runtime.send("a".repeat(8_000)) is RivenRuntimeResult.Success)
+        assertTrue(runtime.send("b".repeat(3_000)) is RivenRuntimeResult.Success)
+
+        assertEquals(2, http.requests.size)
+        val messages = JSONObject(checkNotNull(http.requests.last().body)).getJSONArray("messages")
+        val canon = context.assets.open(LockedRivenPersonalityContextSource.ASSET_NAME)
+            .bufferedReader().use { it.readText() }
+            .replace("\r\n", "\n").replace('\r', '\n').trimEnd('\n')
+        assertTrue((0 until messages.length()).any { messages.getJSONObject(it).optString("content") == canon })
+        assertTrue(
+            (0 until messages.length()).any {
+                messages.getJSONObject(it).optString("content") == "role=USER\n${"b".repeat(3_000)}"
+            },
+        )
+    }
+
+    @Test
+    fun singleTurnBeyondExplicitUnknownModelBudgetFailsBeforeHttp() = runBlocking {
+        val http = QueueHttpClient(success("must not run"))
+        val runtime = runtime(http)
+        runtime.initialize()
+        assertTrue(runtime.saveProfile(null, "Primary", "anthropic/example", "fake-key") is RivenProfileSaveResult.Success)
+
+        val result = runtime.send("x".repeat(20_000))
+
+        assertTrue(result is RivenRuntimeResult.Failure)
+        assertEquals(ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED, (result as RivenRuntimeResult.Failure).engineCode)
+        assertTrue(http.requests.isEmpty())
     }
 
     @Test
@@ -219,11 +324,11 @@ class RivenConversationRuntimeTest {
 
         override suspend fun execute(
             request: OpenRouterHttpRequest,
-            onLine: suspend (String) -> Unit,
+            onLine: suspend (String) -> Boolean,
         ): OpenRouterHttpResponse {
             requests += request
             val lines = responses.removeFirstOrNull() ?: error("Unexpected HTTP request")
-            lines.forEach { onLine(it) }
+            for (line in lines) if (!onLine(line)) break
             return OpenRouterHttpResponse(200, emptyMap())
         }
     }
@@ -233,7 +338,7 @@ class RivenConversationRuntimeTest {
 
         override suspend fun execute(
             request: OpenRouterHttpRequest,
-            onLine: suspend (String) -> Unit,
+            onLine: suspend (String) -> Boolean,
         ): OpenRouterHttpResponse {
             entered.complete(Unit)
             awaitCancellation()
@@ -250,8 +355,26 @@ class RivenConversationRuntimeTest {
 
     private class InMemoryCredentialStore : ProviderCredentialStore {
         private val values = mutableMapOf<String, ProviderSecret>()
+        @Volatile private var blockNextPut = false
+        private var putEntered = CountDownLatch(1)
+        private var releasePut = CountDownLatch(1)
+
+        fun blockNextPut() {
+            putEntered = CountDownLatch(1)
+            releasePut = CountDownLatch(1)
+            blockNextPut = true
+        }
+
+        fun awaitBlockedPut(): Boolean = putEntered.await(2, TimeUnit.SECONDS)
+
+        fun releaseBlockedPut() = releasePut.countDown()
 
         override fun putCredential(credentialSlotId: String, secret: ProviderSecret): PutProviderCredentialResult {
+            if (blockNextPut) {
+                blockNextPut = false
+                putEntered.countDown()
+                check(releasePut.await(2, TimeUnit.SECONDS)) { "Blocked credential write was not released" }
+            }
             values[credentialSlotId] = secret
             return PutProviderCredentialResult.Success
         }

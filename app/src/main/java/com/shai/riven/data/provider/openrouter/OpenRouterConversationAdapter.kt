@@ -18,6 +18,7 @@ import org.json.JSONObject
 
 class OpenRouterConversationAdapter(
     private val httpClient: OpenRouterHttpClient = HttpUrlConnectionOpenRouterHttpClient(),
+    private val maxSseEventChars: Int = OpenRouterSseDecoder.MAX_EVENT_CHARS,
 ) : ConversationProviderAdapter {
     override val descriptor = ProviderAdapterDescriptor(
         adapterId = ADAPTER_ID,
@@ -39,7 +40,7 @@ class OpenRouterConversationAdapter(
             emit(ProviderStreamEvent.Failure(ProviderFailureCode.INVALID_REQUEST))
             return
         }
-        val decoder = OpenRouterSseDecoder()
+        val decoder = OpenRouterSseDecoder(maxSseEventChars)
         var providerRequestId: String? = null
         var terminal = false
         suspend fun handle(event: OpenRouterSseEvent) {
@@ -83,6 +84,7 @@ class OpenRouterConversationAdapter(
                 ),
             ) { line ->
                 decoder.accept(line)?.let { handle(it) }
+                !terminal
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -151,8 +153,12 @@ class OpenRouterConversationAdapter(
             if (finishReason == "error") {
                 OpenRouterPayload.Error(ProviderFailureCode.OTHER, requestId)
             } else {
-                val content = choice?.optJSONObject("delta")?.optString("content")
-                    ?.takeIf(String::isNotEmpty)
+                val delta = choice?.optJSONObject("delta")
+                val content = if (delta != null && delta.has("content") && !delta.isNull("content")) {
+                    (delta.opt("content") as? String)?.takeIf(String::isNotEmpty)
+                } else {
+                    null
+                }
                 if (content == null) OpenRouterPayload.Metadata(requestId)
                 else OpenRouterPayload.Delta(content, requestId)
             }
@@ -231,16 +237,32 @@ internal sealed interface OpenRouterSseEvent {
     data object Malformed : OpenRouterSseEvent
 }
 
-internal class OpenRouterSseDecoder {
+internal class OpenRouterSseDecoder(
+    private val maxEventChars: Int = MAX_EVENT_CHARS,
+) {
     private val dataLines = mutableListOf<String>()
+    private var eventChars = 0
     private var done = false
+
+    init {
+        require(maxEventChars > 0)
+    }
 
     fun accept(line: String): OpenRouterSseEvent? {
         if (done) return null
         if (line.isEmpty()) return flush()
         if (line.startsWith(':')) return null
         if (line.startsWith("data:")) {
-            dataLines += line.removePrefix("data:").trimStart()
+            val data = line.removePrefix("data:").trimStart()
+            val separatorChars = if (dataLines.isEmpty()) 0 else 1
+            if (eventChars.toLong() + separatorChars + data.length > maxEventChars) {
+                dataLines.clear()
+                eventChars = 0
+                done = true
+                return OpenRouterSseEvent.Malformed
+            }
+            dataLines += data
+            eventChars += separatorChars + data.length
         }
         return null
     }
@@ -255,10 +277,15 @@ internal class OpenRouterSseDecoder {
         if (dataLines.isEmpty()) return null
         val data = dataLines.joinToString("\n")
         dataLines.clear()
+        eventChars = 0
         if (data == "[DONE]") {
             done = true
             return OpenRouterSseEvent.Done
         }
         return OpenRouterSseEvent.Payload(data)
+    }
+
+    companion object {
+        const val MAX_EVENT_CHARS = 1_048_576
     }
 }

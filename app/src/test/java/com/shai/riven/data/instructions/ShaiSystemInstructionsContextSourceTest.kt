@@ -65,7 +65,7 @@ class ShaiSystemInstructionsContextSourceTest {
         assertEquals(RivenContextLayer.SHAI_SYSTEM_INSTRUCTIONS, fragment.layer)
         assertEquals(RivenContextProvenanceClass.SHAI_CONFIGURATION, fragment.provenanceClass)
         assertEquals(RivenContextSourceCriticality.REQUIRED, fragment.criticality)
-        assertEquals(RivenContextBudgetBehavior.REQUIRED, fragment.budgetBehavior)
+        assertEquals(RivenContextBudgetBehavior.TRUNCATABLE, fragment.budgetBehavior)
         assertEquals(content, fragment.content)
         assertEquals(1L, fragment.revision)
         assertEquals(44L, fragment.observedAt)

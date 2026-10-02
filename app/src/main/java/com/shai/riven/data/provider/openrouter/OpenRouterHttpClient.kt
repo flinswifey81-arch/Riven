@@ -10,6 +10,7 @@ import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -32,20 +33,24 @@ data class OpenRouterHttpResponse(
 fun interface OpenRouterHttpClient {
     suspend fun execute(
         request: OpenRouterHttpRequest,
-        onLine: suspend (String) -> Unit,
+        onLine: suspend (String) -> Boolean,
     ): OpenRouterHttpResponse
 }
 
 class HttpUrlConnectionOpenRouterHttpClient(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val connectionFactory: (URL) -> HttpURLConnection = { url ->
+        url.openConnection() as HttpURLConnection
+    },
 ) : OpenRouterHttpClient {
+    @OptIn(InternalCoroutinesApi::class)
     override suspend fun execute(
         request: OpenRouterHttpRequest,
-        onLine: suspend (String) -> Unit,
+        onLine: suspend (String) -> Boolean,
     ): OpenRouterHttpResponse = withContext(dispatcher) {
         require(request.method == "GET" || request.method == "POST")
         require(request.maxLineChars > 0)
-        val connection = (URL(request.url).openConnection() as HttpURLConnection).apply {
+        val connection = connectionFactory(URL(request.url)).apply {
             requestMethod = request.method
             connectTimeout = request.connectTimeoutMillis
             readTimeout = request.readTimeoutMillis
@@ -54,7 +59,10 @@ class HttpUrlConnectionOpenRouterHttpClient(
             request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
             doOutput = request.body != null
         }
-        val cancellationHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+        val cancellationHandle = coroutineContext[Job]?.invokeOnCompletion(
+            onCancelling = true,
+            invokeImmediately = true,
+        ) { cause ->
             if (cause is CancellationException) connection.disconnect()
         }
         try {
@@ -72,7 +80,7 @@ class HttpUrlConnectionOpenRouterHttpClient(
                     while (true) {
                         coroutineContext.ensureActive()
                         val line = reader.readBoundedLine(request.maxLineChars) ?: break
-                        onLine(line)
+                        if (!onLine(line)) break
                     }
                 }
             }

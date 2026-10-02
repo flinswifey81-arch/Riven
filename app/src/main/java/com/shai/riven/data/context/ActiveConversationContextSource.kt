@@ -19,7 +19,7 @@ class ActiveConversationContextSource(
         maxFragments = MAX_FRAGMENTS,
         maxCharsPerFragment = MAX_CHARS_PER_FRAGMENT,
         maxAggregateChars = MAX_AGGREGATE_CHARS,
-        budgetBehavior = RivenContextBudgetBehavior.REQUIRED,
+        budgetBehavior = RivenContextBudgetBehavior.DROP_IF_NEEDED,
         contentAuthority = RivenContextContentAuthority.UNTRUSTED_DATA,
     )
 
@@ -54,7 +54,10 @@ class ActiveConversationContextSource(
             return failure("CurrentInteractionMismatch")
         }
         val payloads = eligibleMessages.map { message ->
-            message.toContextPayload(read.timelineRevision)
+            message.toContextPayload(
+                timelineRevision = read.timelineRevision,
+                required = message.id == matching?.id,
+            )
         }.toMutableList()
         if (matching == null) {
             payloads += RivenContextPayload(
@@ -63,6 +66,7 @@ class ActiveConversationContextSource(
                 revision = read.timelineRevision,
                 observedAt = request.now,
                 conversationRole = MessageRole.USER,
+                budgetBehavior = RivenContextBudgetBehavior.REQUIRED,
             )
         }
         return RivenContextSourceResult.Success(
@@ -86,12 +90,20 @@ class ActiveConversationContextSource(
         -> false
     }
 
-    private fun MessageEntity.toContextPayload(timelineRevision: Long) = RivenContextPayload(
+    private fun MessageEntity.toContextPayload(
+        timelineRevision: Long,
+        required: Boolean,
+    ) = RivenContextPayload(
         fragmentId = id,
         content = "role=${role.name}\n$content",
         revision = timelineRevision,
         observedAt = updatedAt,
         conversationRole = role,
+        budgetBehavior = if (required) {
+            RivenContextBudgetBehavior.REQUIRED
+        } else {
+            RivenContextBudgetBehavior.DROP_IF_NEEDED
+        },
     )
 
     private fun failure(errorType: String) = RivenContextSourceResult.Failure(

@@ -114,6 +114,70 @@ class OpenRouterConversationAdapterTest {
     }
 
     @Test
+    fun ignoresNullAndToolOnlyDeltasWithoutAppendingLiteralNull() = runBlocking {
+        val http = RecordingHttpClient(
+            200,
+            listOf(
+                "data: {\"id\":\"req-null\",\"choices\":[{\"delta\":{\"content\":null}}]}",
+                "",
+                "data: {\"id\":\"req-null\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"tool\"}]}}]}",
+                "",
+                "data: {\"id\":\"req-null\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}",
+                "",
+                "data: [DONE]",
+                "",
+            ),
+        )
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        OpenRouterConversationAdapter(http).stream(request()) { events += it }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Delta("answer"), ProviderStreamEvent.Completed("req-null")),
+            events,
+        )
+    }
+
+    @Test
+    fun doneStopsReadingBeforeLaterFailureCanDiscardCompletedAnswer() = runBlocking {
+        val http = RecordingHttpClient(
+            200,
+            listOf(
+                "data: {\"id\":\"req-done\",\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}",
+                "",
+                "data: [DONE]",
+                "",
+                "data: {not-json}",
+                "",
+            ),
+        )
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        OpenRouterConversationAdapter(http).stream(request()) { events += it }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Delta("kept"), ProviderStreamEvent.Completed("req-done")),
+            events,
+        )
+        assertEquals(4, http.consumedLines)
+    }
+
+    @Test
+    fun aggregateSseEventLimitRejectsManyShortLinesWithoutLeakingPartialData() = runBlocking {
+        val http = RecordingHttpClient(
+            200,
+            listOf("data: secret-a", "data: secret-b", "data: secret-c", ""),
+        )
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        OpenRouterConversationAdapter(http, maxSseEventChars = 16).stream(request()) { events += it }
+
+        assertEquals(listOf(ProviderStreamEvent.Failure(ProviderFailureCode.OTHER)), events)
+        assertFalse(events.toString().contains("secret"))
+        assertEquals(2, http.consumedLines)
+    }
+
+    @Test
     fun sseDecoderIgnoresCommentsAndJoinsDataLines() {
         val decoder = OpenRouterSseDecoder()
         assertEquals(null, decoder.accept(": keepalive"))
@@ -182,13 +246,17 @@ class OpenRouterConversationAdapterTest {
         private val lines: List<String>,
     ) : OpenRouterHttpClient {
         var request: OpenRouterHttpRequest? = null
+        var consumedLines: Int = 0
 
         override suspend fun execute(
             request: OpenRouterHttpRequest,
-            onLine: suspend (String) -> Unit,
+            onLine: suspend (String) -> Boolean,
         ): OpenRouterHttpResponse {
             this.request = request
-            lines.forEach { onLine(it) }
+            for (line in lines) {
+                consumedLines++
+                if (!onLine(line)) break
+            }
             return OpenRouterHttpResponse(status, emptyMap())
         }
     }

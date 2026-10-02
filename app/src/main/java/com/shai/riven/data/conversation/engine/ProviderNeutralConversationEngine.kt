@@ -4,10 +4,14 @@ import com.shai.riven.data.context.ActiveConversationReceiptValidator
 import com.shai.riven.data.context.ConversationalContextAssembler
 import com.shai.riven.data.context.ConversationalContextAssemblyInput
 import com.shai.riven.data.context.ConversationalContextFreshnessValidator
+import com.shai.riven.data.context.DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET
 import com.shai.riven.data.context.EphemeralAppStateReceiptValidator
 import com.shai.riven.data.context.EphemeralAppStateStore
 import com.shai.riven.data.context.ProviderProfileReceiptValidator
 import com.shai.riven.data.context.RivenContextCollectionResult
+import com.shai.riven.data.context.RivenContextCollectionBudget
+import com.shai.riven.data.context.RivenContextContractViolation
+import com.shai.riven.data.context.RivenContextFailureCause
 import com.shai.riven.data.context.RivenContextContentAuthority
 import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextFreshnessValidation
@@ -25,6 +29,7 @@ import com.shai.riven.data.persistence.model.ConversationRunState
 import com.shai.riven.data.provider.ProviderCapability
 import com.shai.riven.data.provider.ProviderProfileReadResult
 import com.shai.riven.data.provider.ProviderProfileService
+import com.shai.riven.data.provider.ProviderProfileSnapshot
 import com.shai.riven.data.provider.ProviderRuntimeProfileError
 import com.shai.riven.data.provider.ProviderRuntimeProfileResolver
 import com.shai.riven.data.provider.ResolveProviderRuntimeProfileResult
@@ -49,6 +54,9 @@ class ProviderNeutralConversationEngine(
     private val instructionsService: ShaiSystemInstructionsService,
     private val ephemeralStateStore: EphemeralAppStateStore,
     private val adapterRegistry: ProviderAdapterRegistry,
+    private val contextBudgetResolver: (ProviderProfileSnapshot) -> RivenContextCollectionBudget = {
+        DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET
+    },
     private val limits: ConversationEngineLimits = ConversationEngineLimits(),
     private val clock: () -> Long = System::currentTimeMillis,
     private val limiter: ConversationRunLimiter = ConversationRunLimiterPool.forMaximum(limits.maxConcurrentRuns),
@@ -244,14 +252,24 @@ class ProviderNeutralConversationEngine(
                         ),
                         contextHeadMessageId = attachedRun.contextHeadMessageId,
                     ),
+                    budget = contextBudgetResolver(runtime.profile),
                 ),
             )
             val contextSnapshot = when (assembled) {
                 is RivenContextCollectionResult.Success -> assembled.snapshot
                 is RivenContextCollectionResult.Failure -> {
+                    val errorCode = if (assembled.requiredFailures.any { failure ->
+                            val cause = failure.cause as? RivenContextFailureCause.ContractViolation
+                            cause?.violation is RivenContextContractViolation.CollectionBudgetExceeded
+                        }
+                    ) {
+                        ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED
+                    } else {
+                        ConversationEngineErrorCode.CONTEXT_ASSEMBLY_FAILED
+                    }
                     return failRun(
                         attachedRun,
-                        ConversationEngineErrorCode.CONTEXT_ASSEMBLY_FAILED,
+                        errorCode,
                         ConversationRunState.FAILED,
                     )
                 }

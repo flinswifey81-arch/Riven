@@ -91,8 +91,7 @@ class RivenContextSourceRegistry(
         budget: RivenContextCollectionBudget,
     ): BudgetApplication {
         val required = fragments.filter { fragment ->
-            fragment.criticality == RivenContextSourceCriticality.REQUIRED ||
-                fragment.budgetBehavior == RivenContextBudgetBehavior.REQUIRED
+            fragment.budgetBehavior == RivenContextBudgetBehavior.REQUIRED
         }
         val requiredChars = required.sumOf { fragment -> fragment.content.length.toLong() }
         if (required.size > budget.maxFragments || requiredChars > budget.maxAggregateChars) {
@@ -112,7 +111,7 @@ class RivenContextSourceRegistry(
         val omissions = mutableListOf<RivenContextBudgetOmission>()
         var remainingFragments = budget.maxFragments - required.size
         var remainingChars = budget.maxAggregateChars.toLong() - requiredChars
-        fragments.filterNot(required::contains).forEach { fragment ->
+        fragments.filterNot(required::contains).sortedWith(BUDGET_SELECTION_ORDER).forEach { fragment ->
             if (remainingFragments == 0 || remainingChars == 0L) {
                 omissions += fragment.omission()
             } else if (fragment.content.length <= remainingChars) {
@@ -120,9 +119,17 @@ class RivenContextSourceRegistry(
                 remainingFragments--
                 remainingChars -= fragment.content.length
             } else if (fragment.budgetBehavior == RivenContextBudgetBehavior.TRUNCATABLE) {
-                selected += fragment.copy(content = fragment.content.take(remainingChars.toInt()))
-                remainingFragments--
-                remainingChars = 0
+                val limit = remainingChars.toInt()
+                if (limit > TRUNCATION_MARKER.length) {
+                    selected += fragment.copy(
+                        content = fragment.content.take(limit - TRUNCATION_MARKER.length) + TRUNCATION_MARKER,
+                    )
+                    omissions += fragment.omission()
+                    remainingFragments--
+                    remainingChars = 0
+                } else {
+                    omissions += fragment.omission()
+                }
             } else {
                 omissions += fragment.omission()
             }
@@ -209,7 +216,7 @@ class RivenContextSourceRegistry(
         criticality = criticality,
         orderWithinLayer = orderWithinLayer,
         orderWithinSource = orderWithinSource,
-        budgetBehavior = budgetBehavior,
+        budgetBehavior = payload.budgetBehavior ?: budgetBehavior,
         revision = payload.revision,
         observedAt = payload.observedAt,
         validUntil = payload.validUntil,
@@ -275,6 +282,27 @@ class RivenContextSourceRegistry(
             { fragment -> fragment.orderWithinSource },
             { fragment -> fragment.fragmentId },
         )
+
+        val BUDGET_SELECTION_ORDER = Comparator<RivenContextFragment> { left, right ->
+            val priority = budgetPriority(left).compareTo(budgetPriority(right))
+            if (priority != 0) {
+                priority
+            } else if (left.provenanceClass == RivenContextProvenanceClass.ACTIVE_CONVERSATION &&
+                right.provenanceClass == RivenContextProvenanceClass.ACTIVE_CONVERSATION
+            ) {
+                right.orderWithinSource.compareTo(left.orderWithinSource)
+            } else {
+                FRAGMENT_ORDER.compare(left, right)
+            }
+        }
+
+        const val TRUNCATION_MARKER = "\n[Context truncated to fit the configured model budget.]"
+
+        fun budgetPriority(fragment: RivenContextFragment): Int = when (fragment.provenanceClass) {
+            RivenContextProvenanceClass.SHAI_CONFIGURATION -> 0
+            RivenContextProvenanceClass.ACTIVE_CONVERSATION -> 1
+            else -> 2
+        }
     }
 
     private data class BudgetApplication(

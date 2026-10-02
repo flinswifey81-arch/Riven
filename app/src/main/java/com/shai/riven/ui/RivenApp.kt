@@ -42,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,6 +83,7 @@ import com.shai.riven.ui.theme.TableNavyRaised
 import com.shai.riven.ui.theme.WarmIvory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -104,17 +106,71 @@ fun RivenApp(
     var snapshot by remember { mutableStateOf<RivenRuntimeSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var draft by rememberSaveable { mutableStateOf("") }
+    var draftInitialized by rememberSaveable { mutableStateOf(false) }
+    var persistedDraft by remember { mutableStateOf("") }
+    var submittedDraft by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeConversationJob by remember { mutableStateOf<Job?>(null) }
+
+    fun navigateTo(target: RivenDestination) {
+        if (destination == RivenDestination.CHAT && target != RivenDestination.CHAT) {
+            activeConversationJob?.cancel(CancellationException("Chat screen left"))
+        }
+        destination = target
+    }
 
     DisposableEffect(runtime) { onDispose(runtime::close) }
     LaunchedEffect(runtime) {
         when (val result = runtimeIo { runtime.initialize() }) {
-            is RivenRuntimeResult.Success -> snapshot = result.snapshot
+            is RivenRuntimeResult.Success -> {
+                snapshot = result.snapshot
+                persistedDraft = result.snapshot.draft
+                val submittedWasCommitted = submittedDraft != null &&
+                    result.snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content == submittedDraft
+                if (!draftInitialized || submittedWasCommitted) draft = result.snapshot.draft
+                submittedDraft = null
+                draftInitialized = true
+            }
             is RivenRuntimeResult.Failure -> {
                 snapshot = result.snapshot
                 notice = result.message
+                result.snapshot?.let { restored ->
+                    persistedDraft = restored.draft
+                    if (!draftInitialized) draft = restored.draft
+                    draftInitialized = true
+                }
             }
         }
         loading = false
+    }
+
+    LaunchedEffect(runtime, draft, persistedDraft, draftInitialized, submittedDraft) {
+        if (draftInitialized && submittedDraft == null && draft != persistedDraft) {
+            delay(DRAFT_SAVE_DELAY_MILLIS)
+            when (val result = runtimeIo { runtime.saveDraft(draft) }) {
+                is RivenRuntimeResult.Success -> {
+                    snapshot = result.snapshot
+                    persistedDraft = result.snapshot.draft
+                }
+                is RivenRuntimeResult.Failure -> notice = result.message
+            }
+        }
+    }
+
+    LaunchedEffect(runtime, destination, loading) {
+        if (!loading) {
+            when (val result = runtimeIo { runtime.snapshot() }) {
+                is RivenRuntimeResult.Success -> {
+                    snapshot = result.snapshot
+                    persistedDraft = result.snapshot.draft
+                    val submittedWasCommitted = submittedDraft != null &&
+                        result.snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content == submittedDraft
+                    if (!draftInitialized || submittedWasCommitted) draft = result.snapshot.draft
+                    submittedDraft = null
+                }
+                is RivenRuntimeResult.Failure -> notice = result.message
+            }
+        }
     }
 
     Scaffold(
@@ -125,7 +181,7 @@ fun RivenApp(
                 RivenDestination.entries.forEach { item ->
                     NavigationBarItem(
                         selected = destination == item,
-                        onClick = { destination = item },
+                        onClick = { navigateTo(item) },
                         icon = { DestinationIcon(item) },
                         label = { Text(item.label) },
                         modifier = Modifier.testTag("nav_${item.name.lowercase()}"),
@@ -146,9 +202,18 @@ fun RivenApp(
             else -> ChatScreen(
                 runtime = runtime,
                 initialSnapshot = snapshot,
+                draft = draft,
+                onDraftChange = { draft = it },
+                onDraftSubmitted = { submittedDraft = it },
+                onRuntimeDraft = { storedDraft ->
+                    draft = storedDraft
+                    persistedDraft = storedDraft
+                    submittedDraft = null
+                },
                 externalNotice = notice,
                 onSnapshot = { snapshot = it },
-                onOpenSettings = { destination = RivenDestination.SETTINGS },
+                onConversationJobChanged = { activeConversationJob = it },
+                onOpenSettings = { navigateTo(RivenDestination.SETTINGS) },
                 modifier = Modifier.padding(padding),
             )
         }
@@ -229,36 +294,41 @@ private fun LoadingScreen(padding: PaddingValues) {
 private fun ChatScreen(
     runtime: RivenRuntimeController,
     initialSnapshot: RivenRuntimeSnapshot?,
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    onDraftSubmitted: (String) -> Unit,
+    onRuntimeDraft: (String) -> Unit,
     externalNotice: String?,
     onSnapshot: (RivenRuntimeSnapshot) -> Unit,
+    onConversationJobChanged: (Job?) -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var snapshot by remember(initialSnapshot) { mutableStateOf(initialSnapshot) }
-    var draft by remember(initialSnapshot?.conversationId) { mutableStateOf(initialSnapshot?.draft.orEmpty()) }
-    var persistedDraft by remember(initialSnapshot?.conversationId) {
-        mutableStateOf(initialSnapshot?.draft.orEmpty())
-    }
     var sending by remember { mutableStateOf(false) }
     var streamedReply by remember { mutableStateOf("") }
     var notice by remember(externalNotice) { mutableStateOf(externalNotice) }
+    var conversationJob by remember { mutableStateOf<Job?>(null) }
+    val latestConversationJob by rememberUpdatedState(conversationJob)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    DisposableEffect(runtime) {
+        onDispose { latestConversationJob?.cancel(CancellationException("Chat screen left")) }
+    }
 
     fun apply(result: RivenRuntimeResult) {
         when (result) {
             is RivenRuntimeResult.Success -> {
                 snapshot = result.snapshot
-                draft = result.snapshot.draft
-                persistedDraft = result.snapshot.draft
+                onRuntimeDraft(result.snapshot.draft)
                 notice = null
                 onSnapshot(result.snapshot)
             }
             is RivenRuntimeResult.Failure -> {
                 result.snapshot?.let {
                     snapshot = it
-                    draft = it.draft
-                    persistedDraft = it.draft
+                    onRuntimeDraft(it.draft)
                     onSnapshot(it)
                 }
                 notice = result.message
@@ -266,13 +336,29 @@ private fun ChatScreen(
         }
     }
 
-    fun runConversation(block: suspend (suspend (String) -> Unit) -> RivenRuntimeResult) {
+    fun runConversation(
+        preserveDraft: Boolean,
+        block: suspend (suspend (String) -> Unit) -> RivenRuntimeResult,
+    ) {
         if (sending) return
         sending = true
         streamedReply = ""
         notice = null
-        scope.launch {
+        conversationJob = scope.launch {
             try {
+                if (preserveDraft) {
+                    when (val saved = runtimeIo { runtime.saveDraft(draft) }) {
+                        is RivenRuntimeResult.Success -> onSnapshot(saved.snapshot)
+                        is RivenRuntimeResult.Failure -> {
+                            saved.snapshot?.let {
+                                snapshot = it
+                                onSnapshot(it)
+                            }
+                            notice = saved.message
+                            return@launch
+                        }
+                    }
+                }
                 val result = runtimeIo {
                     block { delta ->
                         withContext(Dispatchers.Main.immediate) { streamedReply += delta }
@@ -286,21 +372,11 @@ private fun ChatScreen(
             } finally {
                 streamedReply = ""
                 sending = false
+                conversationJob = null
+                onConversationJobChanged(null)
             }
         }
-    }
-
-    LaunchedEffect(draft, persistedDraft, sending) {
-        if (!sending && draft != persistedDraft) {
-            delay(DRAFT_SAVE_DELAY_MILLIS)
-            when (val result = runtimeIo { runtime.saveDraft(draft) }) {
-                is RivenRuntimeResult.Success -> {
-                    persistedDraft = result.snapshot.draft
-                    onSnapshot(result.snapshot)
-                }
-                is RivenRuntimeResult.Failure -> notice = result.message
-            }
-        }
+        onConversationJobChanged(conversationJob)
     }
 
     LaunchedEffect(snapshot?.messages?.size, streamedReply) {
@@ -366,17 +442,17 @@ private fun ChatScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     item {
-                        TextButton(onClick = { runConversation { runtime.retry(it) } }, enabled = !sending) {
+                        TextButton(onClick = { runConversation(true) { runtime.retry(it) } }, enabled = !sending) {
                             Text("Retry")
                         }
                     }
                     item {
-                        TextButton(onClick = { runConversation { runtime.regenerate(it) } }, enabled = !sending) {
+                        TextButton(onClick = { runConversation(true) { runtime.regenerate(it) } }, enabled = !sending) {
                             Text("Regenerate")
                         }
                     }
                     item {
-                        TextButton(onClick = { runConversation { runtime.continueConversation(it) } }, enabled = !sending) {
+                        TextButton(onClick = { runConversation(true) { runtime.continueConversation(it) } }, enabled = !sending) {
                             Text("Continue")
                         }
                     }
@@ -384,10 +460,17 @@ private fun ChatScreen(
                         item {
                             TextButton(
                                 onClick = {
+                                    conversationJob?.cancel()
                                     scope.launch {
-                                        apply(runtimeIo { runtime.cancel() })
-                                        streamedReply = ""
-                                        sending = false
+                                        when (val result = runtimeIo { runtime.cancel() }) {
+                                            is RivenRuntimeResult.Success -> apply(result)
+                                            is RivenRuntimeResult.Failure -> {
+                                                result.snapshot?.let {
+                                                    snapshot = it
+                                                    onSnapshot(it)
+                                                }
+                                            }
+                                        }
                                     }
                                 },
                             ) { Text("Cancel") }
@@ -403,7 +486,7 @@ private fun ChatScreen(
             ) {
                 OutlinedTextField(
                     value = draft,
-                    onValueChange = { draft = it },
+                    onValueChange = onDraftChange,
                     modifier = Modifier.weight(1f).testTag("chat_input"),
                     enabled = !sending,
                     label = { Text("Message Riven") },
@@ -411,7 +494,10 @@ private fun ChatScreen(
                     maxLines = if (compact) 3 else 5,
                 )
                 Button(
-                    onClick = { runConversation { runtime.send(draft, it) } },
+                    onClick = {
+                        onDraftSubmitted(draft)
+                        runConversation(false) { runtime.send(draft, it) }
+                    },
                     enabled = !sending && draft.isNotBlank(),
                     modifier = Modifier.testTag("chat_send"),
                     colors = ButtonDefaults.buttonColors(containerColor = RubyHeart),
@@ -465,7 +551,7 @@ private fun MessageBubble(role: MessageRole, content: String, streaming: Boolean
             shape = RoundedCornerShape(18.dp),
         ) {
             Column(
-                Modifier.artDecoBubbleFiligree().padding(horizontal = 18.dp, vertical = 14.dp),
+                Modifier.artDecoBubbleFiligree().padding(horizontal = 32.dp, vertical = 24.dp),
             ) {
                 Text(if (isRiven) "Riven" else "Shai", color = MutedGold, fontWeight = FontWeight.Bold)
                 Text(
@@ -506,7 +592,7 @@ private fun SettingsScreen(
     var editingProfileId by rememberSaveable { mutableStateOf<String?>(null) }
     var displayName by rememberSaveable { mutableStateOf("") }
     var modelId by rememberSaveable { mutableStateOf("") }
-    var apiKey by rememberSaveable { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
     var models by remember { mutableStateOf<List<OpenRouterModel>>(emptyList()) }
     var notice by remember { mutableStateOf<String?>(null) }
     var instructions by remember(snapshot?.instructions?.revision) {
@@ -619,6 +705,8 @@ private fun SettingsScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = {
+                        val submittedApiKey = apiKey
+                        apiKey = ""
                         scope.launch {
                             when (
                                 val result = runtimeIo {
@@ -626,13 +714,12 @@ private fun SettingsScreen(
                                         editingProfileId,
                                         displayName,
                                         modelId,
-                                        apiKey,
+                                        submittedApiKey,
                                     )
                                 }
                             ) {
                                 is RivenProfileSaveResult.Success -> {
                                     editingProfileId = result.profile.profileId
-                                    apiKey = ""
                                     val refreshed = runtimeIo { runtime.snapshot() }
                                     apply(refreshed, "Profile saved.")
                                 }
@@ -745,8 +832,13 @@ private fun SettingsScreen(
             Button(
                 onClick = {
                     scope.launch {
-                        apply(runtimeIo { runtime.remember(memoryMeaning) }, "Memory saved.")
-                        memoryMeaning = ""
+                        when (val result = runtimeIo { runtime.remember(memoryMeaning) }) {
+                            is RivenRuntimeResult.Success -> {
+                                apply(result, "Memory saved.")
+                                memoryMeaning = ""
+                            }
+                            is RivenRuntimeResult.Failure -> apply(result)
+                        }
                     }
                 },
                 enabled = memoryMeaning.isNotBlank(),
@@ -766,9 +858,14 @@ private fun SettingsScreen(
                 onCorrectionChange = { correction = it },
                 onCorrect = {
                     scope.launch {
-                        apply(runtimeIo { runtime.correct(memory.id, correction) }, "Memory corrected.")
-                        correctingId = null
-                        correction = ""
+                        when (val result = runtimeIo { runtime.correct(memory.id, correction) }) {
+                            is RivenRuntimeResult.Success -> {
+                                apply(result, "Memory corrected.")
+                                correctingId = null
+                                correction = ""
+                            }
+                            is RivenRuntimeResult.Failure -> apply(result)
+                        }
                     }
                 },
                 onForget = {
@@ -815,7 +912,7 @@ private fun MemoryControlCard(
                     value = correction,
                     onValueChange = onCorrectionChange,
                     label = { Text("Corrected meaning") },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().testTag("memory_correction_input"),
                 )
                 Button(onClick = onCorrect, enabled = correction.isNotBlank()) { Text("Apply correction") }
             } else if (confirmingDelete) {

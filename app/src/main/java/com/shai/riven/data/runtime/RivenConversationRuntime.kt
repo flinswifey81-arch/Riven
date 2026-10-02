@@ -14,6 +14,8 @@ import com.shai.riven.data.context.OpenLoopContextSource
 import com.shai.riven.data.context.RivenContextSourceRegistry
 import com.shai.riven.data.conversation.ConversationTimelineService
 import com.shai.riven.data.conversation.CreateTimelineConversationInput
+import com.shai.riven.data.conversation.AppendTimelineMessageInput
+import com.shai.riven.data.conversation.NewTimelineMessageInput
 import com.shai.riven.data.conversation.TimelineReadResult
 import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.conversation.engine.ConversationEngineErrorCode
@@ -69,6 +71,7 @@ import com.shai.riven.data.provider.ProviderRuntimeProfileResolver
 import com.shai.riven.data.provider.UpdateProviderProfileInput
 import com.shai.riven.data.provider.UpdateProviderProfileResult
 import com.shai.riven.data.provider.openrouter.OpenRouterConversationAdapter
+import com.shai.riven.data.provider.openrouter.OpenRouterContextBudgetPolicy
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpClient
 import com.shai.riven.data.provider.openrouter.OpenRouterModel
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalog
@@ -76,10 +79,14 @@ import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
 import com.shai.riven.data.recall.ConversationalMemoryContextSource
 import com.shai.riven.data.recall.TargetedConversationalMemoryRetriever
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -206,6 +213,7 @@ class RivenConversationRuntime(
     private val memoryIntents = ManualMemoryIntentService(database, backgroundScheduler)
     private val adapter = OpenRouterConversationAdapter(httpClient)
     private val modelCatalog = OpenRouterModelCatalog(httpClient)
+    private val contextBudgetPolicy = OpenRouterContextBudgetPolicy()
     private val engine = ProviderNeutralConversationEngine(
         database = database,
         contextAssembler = ConversationalContextAssembler(
@@ -227,12 +235,12 @@ class RivenConversationRuntime(
         instructionsService = instructionsService,
         ephemeralStateStore = ephemeralStore,
         adapterRegistry = ProviderAdapterRegistry(listOf(adapter)),
+        contextBudgetResolver = { profile -> contextBudgetPolicy.budgetFor(profile.modelId) },
         clock = clock,
     )
     private val actionMutex = Mutex()
 
-    @Volatile
-    private var activeRunId: String? = null
+    private val activeConversationOperation = AtomicReference<ActiveConversationOperation?>()
 
     override suspend fun initialize(): RivenRuntimeResult = actionMutex.withLock {
         engine.recoverInterruptedRuns()
@@ -268,17 +276,19 @@ class RivenConversationRuntime(
     override suspend fun send(
         content: String,
         onDelta: suspend (String) -> Unit,
-    ): RivenRuntimeResult = actionMutex.withLock {
+    ): RivenRuntimeResult = conversationOperation { operation ->
         ensureConversation()
+        coroutineContext.ensureActive()
         val profileId = selectedProfileOrNull()?.profileId
-            ?: return@withLock RivenRuntimeResult.Failure(
+            ?: return@conversationOperation RivenRuntimeResult.Failure(
                 message = "Configure and select an enabled OpenRouter profile before sending.",
                 snapshot = snapshotOrNull(),
             )
         val saved = saveDraftWithinLock(content)
-        if (saved is RivenRuntimeResult.Failure) return@withLock saved
+        if (saved is RivenRuntimeResult.Failure) return@conversationOperation saved
+        coroutineContext.ensureActive()
         val timelineSnapshot = activeTimelineOrNull()
-            ?: return@withLock RivenRuntimeResult.Failure("Conversation is unavailable.")
+            ?: return@conversationOperation RivenRuntimeResult.Failure("Conversation is unavailable.")
         val draft = readDraft()
         val userMessageId = UUID.randomUUID().toString()
         val committed = draftService.commitDraftAsUserMessage(
@@ -291,11 +301,12 @@ class RivenConversationRuntime(
             ),
         )
         val revision = (committed as? CommitDraftAsUserMessageResult.MessageCommitted)?.timelineRevision
-            ?: return@withLock RivenRuntimeResult.Failure(
+            ?: return@conversationOperation RivenRuntimeResult.Failure(
                 message = "The message could not be committed.",
                 snapshot = snapshotOrNull(),
             )
         executeRun(
+            operation = operation,
             profileId = profileId,
             userMessageId = userMessageId,
             expectedTimelineRevision = revision,
@@ -304,21 +315,23 @@ class RivenConversationRuntime(
         )
     }
 
-    override suspend fun retry(onDelta: suspend (String) -> Unit): RivenRuntimeResult = actionMutex.withLock {
+    override suspend fun retry(onDelta: suspend (String) -> Unit): RivenRuntimeResult = conversationOperation { operation ->
         val profileId = selectedProfileOrNull()?.profileId
-            ?: return@withLock RivenRuntimeResult.Failure("Select an enabled provider profile first.")
+            ?: return@conversationOperation RivenRuntimeResult.Failure("Select an enabled provider profile first.")
+        coroutineContext.ensureActive()
         val active = activeTimelineOrNull()
-            ?: return@withLock RivenRuntimeResult.Failure("Conversation is unavailable.")
+            ?: return@conversationOperation RivenRuntimeResult.Failure("Conversation is unavailable.")
         val selectedHead = active.messages.lastOrNull()?.id
         val failed = withContext(ioDispatcher) {
             database.conversationRunDao().runsForConversation(CONVERSATION_ID).lastOrNull { run ->
                 run.selectedHeadMessageId == selectedHead && run.state in RETRYABLE_RUN_STATES
             }
-        } ?: return@withLock RivenRuntimeResult.Failure(
+        } ?: return@conversationOperation RivenRuntimeResult.Failure(
             message = "There is no failed or interrupted reply to retry.",
             snapshot = snapshotOrNull(),
         )
         executeRun(
+            operation = operation,
             profileId = profileId,
             userMessageId = failed.userMessageId,
             expectedTimelineRevision = active.timelineRevision,
@@ -328,23 +341,25 @@ class RivenConversationRuntime(
         )
     }
 
-    override suspend fun regenerate(onDelta: suspend (String) -> Unit): RivenRuntimeResult = actionMutex.withLock {
+    override suspend fun regenerate(onDelta: suspend (String) -> Unit): RivenRuntimeResult = conversationOperation { operation ->
         val profileId = selectedProfileOrNull()?.profileId
-            ?: return@withLock RivenRuntimeResult.Failure("Select an enabled provider profile first.")
+            ?: return@conversationOperation RivenRuntimeResult.Failure("Select an enabled provider profile first.")
+        coroutineContext.ensureActive()
         val active = activeTimelineOrNull()
-            ?: return@withLock RivenRuntimeResult.Failure("Conversation is unavailable.")
+            ?: return@conversationOperation RivenRuntimeResult.Failure("Conversation is unavailable.")
         val original = active.messages.lastOrNull()
         val user = active.messages.dropLast(1).lastOrNull()
         if (original?.role != MessageRole.ASSISTANT ||
             original.deliveryState != MessageDeliveryState.SUCCEEDED ||
             user?.role != MessageRole.USER
         ) {
-            return@withLock RivenRuntimeResult.Failure(
+            return@conversationOperation RivenRuntimeResult.Failure(
                 message = "Only the current successful Riven reply can be regenerated.",
                 snapshot = snapshotOrNull(),
             )
         }
         executeRun(
+            operation = operation,
             profileId = profileId,
             userMessageId = user.id,
             expectedTimelineRevision = active.timelineRevision,
@@ -354,16 +369,59 @@ class RivenConversationRuntime(
         )
     }
 
-    override suspend fun continueConversation(onDelta: suspend (String) -> Unit): RivenRuntimeResult =
-        send(CONTINUE_MESSAGE, onDelta)
+    override suspend fun continueConversation(
+        onDelta: suspend (String) -> Unit,
+    ): RivenRuntimeResult = conversationOperation { operation ->
+        ensureConversation()
+        val profileId = selectedProfileOrNull()?.profileId
+            ?: return@conversationOperation RivenRuntimeResult.Failure(
+                "Select an enabled provider profile first.",
+            )
+        coroutineContext.ensureActive()
+        val active = activeTimelineOrNull()
+            ?: return@conversationOperation RivenRuntimeResult.Failure("Conversation is unavailable.")
+        val userMessageId = UUID.randomUUID().toString()
+        val occurredAt = clock()
+        val appended = timeline.appendMessage(
+            AppendTimelineMessageInput(
+                conversationId = CONVERSATION_ID,
+                message = NewTimelineMessageInput(
+                    messageId = userMessageId,
+                    role = MessageRole.USER,
+                    deliveryState = MessageDeliveryState.PERSISTED,
+                    content = CONTINUE_MESSAGE,
+                    createdAt = occurredAt,
+                    updatedAt = occurredAt,
+                ),
+                expectedTimelineRevision = active.timelineRevision,
+                occurredAt = occurredAt,
+            ),
+        )
+        val revision = (appended as? TimelineWriteResult.MessageAppended)?.timelineRevision
+            ?: return@conversationOperation RivenRuntimeResult.Failure(
+                message = "Continue could not be added to the conversation.",
+                snapshot = snapshotOrNull(),
+            )
+        executeRun(
+            operation = operation,
+            profileId = profileId,
+            userMessageId = userMessageId,
+            expectedTimelineRevision = revision,
+            trigger = ConversationRunTrigger.INITIAL,
+            onDelta = onDelta,
+        )
+    }
 
     override suspend fun cancel(): RivenRuntimeResult {
-        val runId = activeRunId
+        val operation = activeConversationOperation.get()
             ?: return RivenRuntimeResult.Failure(
                 message = "There is no active reply to cancel.",
                 snapshot = snapshotOrNull(),
             )
-        engine.cancel(runId)
+        operation.job.cancel(CancellationException("Conversation operation cancelled"))
+        operation.runId.get()?.let { runId ->
+            withContext(NonCancellable) { engine.cancel(runId) }
+        }
         return withContext(NonCancellable) { snapshotResult() }
     }
 
@@ -373,6 +431,30 @@ class RivenConversationRuntime(
         modelId: String,
         apiKey: String,
     ): RivenProfileSaveResult = actionMutex.withLock {
+        val normalizedDisplayName = displayName.trim()
+        val normalizedModelId = modelId.trim()
+        val validation = profileService.validateCandidate(
+            displayName = normalizedDisplayName,
+            adapterId = OpenRouterConversationAdapter.ADAPTER_ID,
+            endpointBaseUrl = OpenRouterConversationAdapter.DEFAULT_BASE_URL,
+            modelId = normalizedModelId,
+            credentialSlotId = OPENROUTER_CREDENTIAL_SLOT,
+            capabilities = OPENROUTER_CAPABILITIES,
+        )
+        if (validation != null) {
+            return@withLock RivenProfileSaveResult.Failure(
+                "Profile validation failed: ${validation::class.java.simpleName}",
+            )
+        }
+        val currentProfile = profileId?.let { id ->
+            val current = profileService.profile(id)
+            if (current !is ProviderProfileReadResult.Success ||
+                current.profile.adapterId != OpenRouterConversationAdapter.ADAPTER_ID
+            ) {
+                return@withLock RivenProfileSaveResult.Failure("The selected profile is unavailable.")
+            }
+            current.profile
+        }
         if (apiKey.isNotBlank()) {
             val credential = withContext(ioDispatcher) {
                 credentialStore.putCredential(
@@ -389,10 +471,10 @@ class RivenConversationRuntime(
             profileService.create(
                 CreateProviderProfileInput(
                     profileId = UUID.randomUUID().toString(),
-                    displayName = displayName.trim(),
+                    displayName = normalizedDisplayName,
                     adapterId = OpenRouterConversationAdapter.ADAPTER_ID,
                     endpointBaseUrl = OpenRouterConversationAdapter.DEFAULT_BASE_URL,
-                    modelId = modelId.trim(),
+                    modelId = normalizedModelId,
                     credentialSlotId = OPENROUTER_CREDENTIAL_SLOT,
                     capabilities = OPENROUTER_CAPABILITIES,
                     occurredAt = occurredAt,
@@ -406,20 +488,15 @@ class RivenConversationRuntime(
                 }
             }
         } else {
-            val current = profileService.profile(profileId)
-            if (current !is ProviderProfileReadResult.Success ||
-                current.profile.adapterId != OpenRouterConversationAdapter.ADAPTER_ID
-            ) {
-                return@withLock RivenProfileSaveResult.Failure("The selected profile is unavailable.")
-            }
+            val current = checkNotNull(currentProfile)
             profileService.update(
                 UpdateProviderProfileInput(
-                    profileId = current.profile.profileId,
-                    expectedRevision = current.profile.revision,
-                    displayName = displayName.trim(),
+                    profileId = current.profileId,
+                    expectedRevision = current.revision,
+                    displayName = normalizedDisplayName,
                     adapterId = OpenRouterConversationAdapter.ADAPTER_ID,
                     endpointBaseUrl = OpenRouterConversationAdapter.DEFAULT_BASE_URL,
-                    modelId = modelId.trim(),
+                    modelId = normalizedModelId,
                     credentialSlotId = OPENROUTER_CREDENTIAL_SLOT,
                     isEnabled = true,
                     capabilities = OPENROUTER_CAPABILITIES,
@@ -466,7 +543,11 @@ class RivenConversationRuntime(
             credentialStore.readCredential(OPENROUTER_CREDENTIAL_SLOT)
         }
         return if (credential is ReadProviderCredentialResult.Success) {
-            modelCatalog.models(credential.secret)
+            modelCatalog.models(credential.secret).also { result ->
+                if (result is OpenRouterModelCatalogResult.Success) {
+                    contextBudgetPolicy.record(result.models)
+                }
+            }
         } else {
             OpenRouterModelCatalogResult.Failure(
                 com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogError.AUTHENTICATION,
@@ -540,12 +621,14 @@ class RivenConversationRuntime(
     }
 
     override fun close() {
+        activeConversationOperation.get()?.job?.cancel(CancellationException("Riven runtime closed"))
         engine.close()
         recall.close()
         if (ownsDatabase) database.close()
     }
 
     private suspend fun executeRun(
+        operation: ActiveConversationOperation,
         profileId: String,
         userMessageId: String,
         expectedTimelineRevision: Long,
@@ -555,7 +638,7 @@ class RivenConversationRuntime(
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult {
         val runId = UUID.randomUUID().toString()
-        activeRunId = runId
+        operation.runId.set(runId)
         return try {
             val result = engine.execute(
                 StartConversationRunInput(
@@ -592,8 +675,25 @@ class RivenConversationRuntime(
                     snapshot = snapshotOrNull(),
                 )
             }
+        }
+    }
+
+    private suspend fun conversationOperation(
+        block: suspend (ActiveConversationOperation) -> RivenRuntimeResult,
+    ): RivenRuntimeResult {
+        val job = coroutineContext[Job]
+            ?: return RivenRuntimeResult.Failure("Conversation operation is unavailable.")
+        val operation = ActiveConversationOperation(job)
+        if (!activeConversationOperation.compareAndSet(null, operation)) {
+            return RivenRuntimeResult.Failure("Another reply is already in progress.")
+        }
+        return try {
+            actionMutex.withLock {
+                coroutineContext.ensureActive()
+                block(operation)
+            }
         } finally {
-            activeRunId = null
+            activeConversationOperation.compareAndSet(operation, null)
         }
     }
 
@@ -737,10 +837,17 @@ class RivenConversationRuntime(
         -> "The conversation changed while Riven was replying. Nothing partial was saved."
         ConversationEngineErrorCode.CONTEXT_ASSEMBLY_FAILED ->
             "Riven's grounded context could not be assembled. No provider request was made."
+        ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED ->
+            "This turn cannot fit beside Riven's locked canon within the selected model's context limit. No provider request was made."
         else -> "Riven could not complete this reply. Your message is saved and can be retried."
     }
 
     private data class DraftValue(val content: String, val revision: Long)
+
+    private data class ActiveConversationOperation(
+        val job: Job,
+        val runId: AtomicReference<String?> = AtomicReference(null),
+    )
 
     companion object {
         const val CONVERSATION_ID = "riven-primary-conversation"

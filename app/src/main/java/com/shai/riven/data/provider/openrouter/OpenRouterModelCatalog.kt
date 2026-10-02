@@ -53,6 +53,7 @@ class OpenRouterModelCatalog(
                     throw OpenRouterResponseLimitException()
                 }
                 body.append(line).append('\n')
+                true
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
