@@ -18,6 +18,7 @@ sealed interface RivenResetError {
     data class CredentialKeyDeleteFailure(val causeType: String) : RivenResetError
     data class ArchiveStagingDeleteFailure(val causeType: String) : RivenResetError
     data class RestoreStateDeleteFailure(val causeType: String) : RivenResetError
+    data class ReminderDeleteFailure(val causeType: String) : RivenResetError
     data class FreshDatabaseCreationFailure(val causeType: String) : RivenResetError
     data class FreshDatabaseVerificationFailure(val causeType: String) : RivenResetError
     data class RecoveryFailure(val state: String) : RivenResetError

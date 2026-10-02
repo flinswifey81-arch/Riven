@@ -7,6 +7,8 @@ import com.shai.riven.data.archive.safeCauseType
 import com.shai.riven.data.credential.AndroidKeystoreProviderCredentialKeyResetter
 import com.shai.riven.data.credential.ProviderCredentialKeyResetter
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
+import com.shai.riven.data.reminder.platform.ReminderResetCoordinator
 import java.io.File
 import kotlinx.coroutines.CancellationException
 
@@ -26,6 +28,7 @@ class RivenResetBootstrap(
         RivenResetPaths.RESET_DIRECTORY,
     ),
     private val keyResetter: ProviderCredentialKeyResetter = AndroidKeystoreProviderCredentialKeyResetter(),
+    private val reminderReset: ReminderResetCoordinator = ReminderResetCoordinator(context),
 ) {
     private val appContext = context.applicationContext
     private val paths = RivenResetPaths(appContext, resetRoot)
@@ -72,6 +75,10 @@ class RivenResetBootstrap(
     ): FactoryResetBootstrapResult {
         writeStage(record, RivenResetJournalStage.ERASING)?.let(::failure)?.let { return it }
 
+        runStep(RivenResetError::ReminderDeleteFailure) {
+            reminderReset.eraseAll()
+        }?.let(::failure)?.let { return it }
+
         runStep(RivenResetError::DatabaseDeleteFailure) {
             deleteFile(paths.canonicalDatabase)
             deleteFile(paths.canonicalWal)
@@ -108,6 +115,12 @@ class RivenResetBootstrap(
                 fresh.openHelper.writableDatabase
             } finally {
                 fresh.close()
+            }
+            val freshReminders = ReminderDatabase.build(appContext)
+            try {
+                freshReminders.openHelper.writableDatabase
+            } finally {
+                freshReminders.close()
             }
         }?.let(::failure)?.let { return it }
 

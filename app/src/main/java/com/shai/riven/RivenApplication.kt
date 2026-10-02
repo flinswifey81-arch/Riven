@@ -11,6 +11,8 @@ import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.WorkManagerRivenBackgroundWorkScheduler
 import com.shai.riven.data.reset.FactoryResetBootstrapResult
 import com.shai.riven.data.reset.RivenResetBootstrap
+import com.shai.riven.data.reminder.platform.ReminderNotificationChannels
+import com.shai.riven.data.reminder.platform.ReminderRecoveryScheduler
 
 class RivenApplication : Application(), Configuration.Provider {
     override val workManagerConfiguration: Configuration
@@ -18,11 +20,17 @@ class RivenApplication : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
-        settleStartupMutationsThenBootstrap(
+        ReminderNotificationChannels.ensureCreated(this)
+        val startup = settleStartupMutationsThenBootstrap(
             reset = { RivenResetBootstrap(this).recoverAndApply() },
             restore = { RivenRestoreBootstrap(this).recoverAndApply() },
             scheduler = WorkManagerRivenBackgroundWorkScheduler(WorkManager.getInstance(this)),
         )
+        if (startup.reset !is FactoryResetBootstrapResult.Failure &&
+            startup.restore !is RivenRestoreBootstrapResult.Failure
+        ) {
+            ReminderRecoveryScheduler.enqueue(this, "application_start")
+        }
     }
 
     internal fun settleRestoreThenBootstrap(
