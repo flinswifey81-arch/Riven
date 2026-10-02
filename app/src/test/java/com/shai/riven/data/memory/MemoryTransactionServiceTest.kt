@@ -17,6 +17,7 @@ import com.shai.riven.data.persistence.entity.ExperienceMessageSourceEntity
 import com.shai.riven.data.persistence.entity.KnownEntityEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
+import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
@@ -863,6 +864,89 @@ class MemoryTransactionServiceTest {
         )
         assertEquals(MemoryAuditAction.FORGOTTEN, database.maintenanceDao().memoryAuditHistory("memory-a").single().action)
         assertEquals(MemoryAuditAction.FORGOTTEN, database.maintenanceDao().memoryAuditHistory("memory-b").single().action)
+    }
+
+    @Test
+    fun terminalDependentsFillingCapacityCannotHideOneActiveConclusion() = runBlocking {
+        insertExperience("capacity-source-e", 1)
+        insertCanonicalMemory("capacity-source", "capacity-source-e")
+        repeat(128) { index ->
+            val memoryId = "terminal-${index.toString().padStart(3, '0')}"
+            database.memoryDao().insertMemory(
+                MemoryEntity(
+                    id = memoryId,
+                    kind = MemoryKind.SEMANTIC,
+                    scope = MemoryScope.SHAI,
+                    meaning = "Terminal conclusion $index",
+                    epistemicBasis = EpistemicBasis.CONSOLIDATION,
+                    certainty = MemoryCertainty.CERTAIN,
+                    truthState = MemoryTruthState.CORRECTED_FALSE,
+                    retentionState = MemoryRetentionState.ACTIVE,
+                    lifecycleState = MemoryLifecycleState.VALIDATED,
+                    temporalState = TemporalState.CURRENT,
+                    learnedAt = 1,
+                    sensitivity = SensitivityLevel.STANDARD,
+                    createdAt = 1,
+                    updatedAt = 1,
+                ),
+            )
+            database.memoryDao().insertMemoryRelationship(
+                MemoryRelationshipEntity(
+                    sourceMemoryId = memoryId,
+                    targetMemoryId = "capacity-source",
+                    relationshipType = MemoryRelationshipType.DERIVED_FROM,
+                    createdByExperienceId = null,
+                    createdAt = 1,
+                ),
+            )
+        }
+        database.memoryDao().insertMemory(
+            MemoryEntity(
+                id = "active-conclusion",
+                kind = MemoryKind.SEMANTIC,
+                scope = MemoryScope.SHAI,
+                meaning = "Active conclusion must be fenced or the write must fail.",
+                epistemicBasis = EpistemicBasis.CONSOLIDATION,
+                certainty = MemoryCertainty.CERTAIN,
+                truthState = MemoryTruthState.SUPPORTED,
+                retentionState = MemoryRetentionState.ACTIVE,
+                lifecycleState = MemoryLifecycleState.VALIDATED,
+                temporalState = TemporalState.CURRENT,
+                learnedAt = 1,
+                sensitivity = SensitivityLevel.STANDARD,
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+        database.memoryDao().insertMemoryRelationship(
+            MemoryRelationshipEntity(
+                sourceMemoryId = "active-conclusion",
+                targetMemoryId = "capacity-source",
+                relationshipType = MemoryRelationshipType.DERIVED_FROM,
+                createdByExperienceId = null,
+                createdAt = 1,
+            ),
+        )
+
+        val failure = assertFailure(
+            service.forget(MemoryStateTransitionInput("capacity-source", occurredAt = 200)),
+        )
+
+        assertEquals(
+            MemoryWriteError.StorageFailure(MemoryWriteOperation.FORGET, "IllegalStateException"),
+            failure,
+        )
+        assertEquals(
+            MemoryRetentionState.ACTIVE,
+            database.memoryDao().memory("capacity-source")?.retentionState,
+        )
+        assertEquals(
+            MemoryLifecycleState.VALIDATED,
+            database.memoryDao().memory("active-conclusion")?.lifecycleState,
+        )
+        assertTrue(database.maintenanceDao().repairJobs("MEMORY", "active-conclusion").isEmpty())
+        assertTrue(database.maintenanceDao().repairJobs("MEMORY", "terminal-000").isEmpty())
+        assertTrue(database.maintenanceDao().suppressionTombstones().isEmpty())
     }
 
     @Test

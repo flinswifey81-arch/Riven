@@ -944,7 +944,9 @@ class MemoryTransactionService(
             remaining = MAX_PROVENANCE_DEPENDENTS - pendingDependents.size - terminalDependents.size
             check(remaining > 0 || terminal.isNotEmpty()) { "Provenance dependency capacity exceeded" }
             if (remaining == 0) {
-                frontier = emptyList()
+                check(memoryDao.consolidatedDependentsOf(frontier, 1).isEmpty()) {
+                    "Provenance dependency capacity exceeded"
+                }
                 break
             }
             val candidates = memoryDao.consolidatedDependentsOf(frontier, remaining + 1)
