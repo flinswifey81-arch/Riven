@@ -72,6 +72,9 @@ data class StarstruckMoveResult(
     val resolutionWaves: Int = 0,
     val clearedTiles: Int = 0,
     val powerupsCreated: Int = 0,
+    val powerupsActivated: Int = 0,
+    val powerupsActivatedAtCreationAnchors: Int = 0,
+    val cascadeAnchorPowerupsActivated: Int = 0,
     val reshuffled: Boolean = false,
     val sounds: List<StarstruckSoundCue> = emptyList(),
 )
@@ -93,7 +96,15 @@ object StarstruckEngine {
         state: StarstruckState,
         first: StarPoint,
         second: StarPoint,
+    ): StarstruckMoveResult = swap(state, first, second, MAX_CASCADE_WAVES)
+
+    internal fun swap(
+        state: StarstruckState,
+        first: StarPoint,
+        second: StarPoint,
+        cascadeWaveLimit: Int,
     ): StarstruckMoveResult {
+        require(cascadeWaveLimit > 0)
         if (!isOnBoard(first) || !isOnBoard(second) || !areAdjacent(first, second)) {
             return StarstruckMoveResult(state = state, accepted = false)
         }
@@ -116,6 +127,7 @@ object StarstruckEngine {
             initialForcedClear = directColorClear?.points,
             initialSuppressedPowers = directColorClear?.suppressedPowers.orEmpty(),
             preferredAnchors = listOf(second, first),
+            cascadeWaveLimit = cascadeWaveLimit,
         )
         var nextState = state.copy(
             board = resolved.board,
@@ -124,9 +136,10 @@ object StarstruckEngine {
             matchesMade = state.matchesMade + 1,
             cascadeWaves = state.cascadeWaves + (resolved.waves - 1).coerceAtLeast(0),
             tilesCleared = state.tilesCleared + resolved.clearedTiles,
+            reshuffles = state.reshuffles + if (resolved.safetyRecovered) 1 else 0,
         )
         val playable = ensurePlayable(nextState)
-        val reshuffled = playable !== nextState
+        val reshuffled = resolved.safetyRecovered || playable !== nextState
         nextState = playable
 
         val sounds = buildList {
@@ -143,6 +156,9 @@ object StarstruckEngine {
             resolutionWaves = resolved.waves,
             clearedTiles = resolved.clearedTiles,
             powerupsCreated = resolved.powerupsCreated,
+            powerupsActivated = resolved.powerupsActivated,
+            powerupsActivatedAtCreationAnchors = resolved.powerupsActivatedAtCreationAnchors,
+            cascadeAnchorPowerupsActivated = resolved.cascadeAnchorPowerupsActivated,
             reshuffled = reshuffled,
             sounds = sounds,
         )
@@ -220,6 +236,7 @@ object StarstruckEngine {
         initialForcedClear: Set<StarPoint>?,
         initialSuppressedPowers: Set<StarPoint>,
         preferredAnchors: List<StarPoint>,
+        cascadeWaveLimit: Int,
     ): Resolution {
         var currentBoard = board
         var currentRandom = randomState
@@ -230,15 +247,21 @@ object StarstruckEngine {
         var clearedTiles = 0
         var powerupsCreated = 0
         var powerupsActivated = 0
+        var powerupsActivatedAtCreationAnchors = 0
+        var cascadeAnchorPowerupsActivated = 0
 
-        while (waves < MAX_CASCADE_WAVES) {
+        while (waves < cascadeWaveLimit) {
             val runs = findRuns(currentBoard)
             if (forcedClear == null && runs.isEmpty()) break
             val creations = if (forcedClear == null) powerCreations(runs, preferred) else emptyMap()
             val matched = forcedClear ?: runs.flatMapTo(linkedSetOf()) { it.points }
+            val poweredCreationAnchors = creations.keys.count { point ->
+                currentBoard[starIndex(point)].power != StarPower.NONE
+            }
             val expanded = expandPowerClear(
                 board = currentBoard,
-                initial = matched - creations.keys,
+                // Earned powers fire before a matched cell becomes the anchor for a new power.
+                initial = matched,
                 suppressedPowers = suppressedPowers,
             )
             val clearSet = expanded.points - creations.keys
@@ -253,12 +276,19 @@ object StarstruckEngine {
             clearedTiles += clearSet.size
             powerupsCreated += creations.size
             powerupsActivated += expanded.powerupsActivated
+            powerupsActivatedAtCreationAnchors += poweredCreationAnchors
+            if (waves > 0) cascadeAnchorPowerupsActivated += poweredCreationAnchors
             waves += 1
             forcedClear = null
             suppressedPowers = emptySet()
             preferred = emptyList()
         }
-        check(waves < MAX_CASCADE_WAVES) { "Starstruck cascade safety bound exceeded" }
+        val safetyRecovered = findRuns(currentBoard).isNotEmpty()
+        if (safetyRecovered) {
+            val recovered = reshuffle(currentBoard, currentRandom)
+            currentBoard = recovered.board
+            currentRandom = recovered.randomState
+        }
         return Resolution(
             currentBoard,
             currentRandom,
@@ -266,6 +296,9 @@ object StarstruckEngine {
             clearedTiles,
             powerupsCreated,
             powerupsActivated,
+            powerupsActivatedAtCreationAnchors,
+            cascadeAnchorPowerupsActivated,
+            safetyRecovered,
         )
     }
 
@@ -484,6 +517,9 @@ object StarstruckEngine {
         val clearedTiles: Int,
         val powerupsCreated: Int,
         val powerupsActivated: Int,
+        val powerupsActivatedAtCreationAnchors: Int,
+        val cascadeAnchorPowerupsActivated: Int,
+        val safetyRecovered: Boolean,
     )
 
     private data class ExpandedClear(

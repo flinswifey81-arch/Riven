@@ -95,13 +95,16 @@ fun StarstruckGame(
     val settingsHolder = remember(store) { mutableStateOf(store.loadSettings().normalized()) }
     var settings by settingsHolder
     var selected by remember { mutableStateOf<StarPoint?>(null) }
-    var manuallyPaused by rememberSaveable { mutableStateOf(false) }
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
+    val manuallyPausedHolder = rememberSaveable { mutableStateOf(false) }
+    var manuallyPaused by manuallyPausedHolder
+    val settingsOpenHolder = rememberSaveable { mutableStateOf(false) }
+    var settingsOpen by settingsOpenHolder
     var effectMessage by remember { mutableStateOf<String?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    var lifecycleResumed by remember(lifecycleOwner) {
+    val lifecycleResumedHolder = remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
+    var lifecycleResumed by lifecycleResumedHolder
 
     DisposableEffect(lifecycleOwner, store, soundPlayer, stateHolder, settingsHolder) {
         val observer = LifecycleEventObserver { _, _ ->
@@ -134,7 +137,14 @@ fun StarstruckGame(
         soundPlayer.update(normalized.soundVolume, normalized.soundMuted)
     }
     val onTile: (StarPoint) -> Unit = tileClick@{ point ->
-        if (paused) return@tileClick
+        if (
+            externallyPaused ||
+            manuallyPausedHolder.value ||
+            settingsOpenHolder.value ||
+            !lifecycleResumedHolder.value
+        ) {
+            return@tileClick
+        }
         val first = selected
         when {
             first == null -> selected = point

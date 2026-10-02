@@ -71,6 +71,31 @@ class StarstruckEngineTest {
     }
 
     @Test
+    fun earnedRowBurstAtNewPowerAnchorFiresBeforeCreationAndChains() {
+        val board = fourMatchBoard().toMutableList().apply {
+            this[starIndex(StarPoint(2, 2))] = this[starIndex(StarPoint(2, 2))].copy(
+                power = StarPower.ROW_CLEAR,
+            )
+            this[starIndex(StarPoint(5, 3))] = this[starIndex(StarPoint(5, 3))].copy(
+                power = StarPower.ROW_CLEAR,
+            )
+        }
+        val state = fixtureState(board, randomState = 71L)
+        assertFalse(StarstruckEngine.hasImmediateMatches(state.board))
+
+        val result = StarstruckEngine.swap(state, StarPoint(2, 2), StarPoint(2, 3))
+
+        assertTrue(result.accepted)
+        assertTrue(result.powerupsActivated >= 2)
+        assertTrue(result.powerupsActivatedAtCreationAnchors >= 1)
+        assertTrue(result.powerupsCreated >= 1)
+        assertTrue(result.clearedTiles >= STARSTRUCK_COLUMNS - 1)
+        assertTrue(result.state.board.any { it.power == StarPower.ROW_CLEAR })
+        assertTrue(StarstruckSoundCue.POWERUP in result.sounds)
+        assertFalse(StarstruckEngine.hasImmediateMatches(result.state.board))
+    }
+
+    @Test
     fun straightFiveCreatesColorNovaAtMovedTileAsReviewDefault() {
         val state = fixtureState(fiveMatchBoard(), randomState = 23L)
         assertFalse(StarstruckEngine.hasImmediateMatches(state.board))
@@ -80,6 +105,28 @@ class StarstruckEngineTest {
         assertTrue(result.accepted)
         assertTrue(result.state.board.any { it.power == StarPower.COLOR_CLEAR })
         assertTrue(result.powerupsCreated >= 1)
+    }
+
+    @Test
+    fun earnedRowBurstFiresBeforeTheSameAnchorBecomesColorNova() {
+        val board = fiveMatchBoard().toMutableList().apply {
+            this[starIndex(StarPoint(2, 2))] = this[starIndex(StarPoint(2, 2))].copy(
+                power = StarPower.ROW_CLEAR,
+            )
+            this[starIndex(StarPoint(6, 3))] = this[starIndex(StarPoint(6, 3))].copy(
+                power = StarPower.ROW_CLEAR,
+            )
+        }
+        val state = fixtureState(board, randomState = 79L)
+
+        val result = StarstruckEngine.swap(state, StarPoint(2, 2), StarPoint(2, 3))
+
+        assertTrue(result.accepted)
+        assertTrue(result.powerupsActivated >= 2)
+        assertTrue(result.powerupsActivatedAtCreationAnchors >= 1)
+        assertTrue(result.powerupsCreated >= 1)
+        assertTrue(result.state.board.any { it.power == StarPower.COLOR_CLEAR })
+        assertFalse(StarstruckEngine.hasImmediateMatches(result.state.board))
     }
 
     @Test
@@ -133,6 +180,54 @@ class StarstruckEngineTest {
         assertTrue(result.accepted)
         assertTrue(result.resolutionWaves > 1)
         assertEquals(result.resolutionWaves - 1, result.state.cascadeWaves)
+        assertFalse(StarstruckEngine.hasImmediateMatches(result.state.board))
+        assertTrue(StarstruckEngine.hasLegalMove(result.state.board))
+    }
+
+    @Test
+    fun cascadeSafetyBoundaryRecoversToPlayableBoardInsteadOfThrowing() {
+        val state = StarstruckEngine.newGame(seed = 2L)
+
+        val result = StarstruckEngine.swap(
+            state = state,
+            first = StarPoint(2, 1),
+            second = StarPoint(3, 1),
+            cascadeWaveLimit = 1,
+        )
+
+        assertTrue(result.accepted)
+        assertEquals(1, result.resolutionWaves)
+        assertTrue(result.reshuffled)
+        assertEquals(1, result.state.reshuffles)
+        assertEquals(1, result.state.movesMade)
+        assertFalse(StarstruckEngine.hasImmediateMatches(result.state.board))
+        assertTrue(StarstruckEngine.hasLegalMove(result.state.board))
+    }
+
+    @Test
+    fun earnedPowerAtCascadeCreationAnchorFiresBeforeReplacement() {
+        val poweredPoint = StarPoint(2, 1)
+        val state = StarstruckEngine.newGame(seed = 2L).let { initial ->
+            initial.copy(
+                board = initial.board.toMutableList().apply {
+                    this[starIndex(poweredPoint)] = this[starIndex(poweredPoint)].copy(
+                        power = StarPower.ROW_CLEAR,
+                    )
+                },
+            )
+        }
+
+        val result = StarstruckEngine.swap(
+            state,
+            StarPoint(3, 3),
+            StarPoint(3, 4),
+        )
+
+        assertTrue(result.accepted)
+        assertTrue(result.resolutionWaves > 1)
+        assertTrue(result.cascadeAnchorPowerupsActivated >= 1)
+        assertTrue(result.powerupsCreated >= 1)
+        assertTrue(result.powerupsActivated >= 1)
         assertFalse(StarstruckEngine.hasImmediateMatches(result.state.board))
         assertTrue(StarstruckEngine.hasLegalMove(result.state.board))
     }

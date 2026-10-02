@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -131,6 +132,80 @@ class StarstruckComposeTest {
     }
 
     @Test
+    fun sameFrameManualPauseBlocksAlreadyCapturedTileCallbacks() {
+        val initial = StarstruckEngine.newGame(seed = 72L)
+        val move = StarstruckEngine.legalMoves(initial.board).first()
+        val store = FakeStarstruckStore(session = initial)
+        val sound = FakeStarstruckSoundPlayer()
+        setGame(store = store, sound = sound)
+        val pause = clickActionForDescription("Pause Starstruck")
+        val first = clickActionForTag("starstruck_tile_${move.first.x}_${move.first.y}")
+        val second = clickActionForTag("starstruck_tile_${move.second.x}_${move.second.y}")
+
+        composeRule.runOnIdle {
+            pause()
+            first()
+            second()
+        }
+
+        assertEquals(initial, store.savedSession)
+        assertTrue(sound.played.isEmpty())
+    }
+
+    @Test
+    fun sameFrameSettingsOpenBlocksAlreadyCapturedTileCallbacks() {
+        val initial = StarstruckEngine.newGame(seed = 73L)
+        val move = StarstruckEngine.legalMoves(initial.board).first()
+        val store = FakeStarstruckStore(session = initial)
+        val sound = FakeStarstruckSoundPlayer()
+        setGame(store = store, sound = sound)
+        val settings = clickActionForDescription("Open Starstruck settings")
+        val first = clickActionForTag("starstruck_tile_${move.first.x}_${move.first.y}")
+        val second = clickActionForTag("starstruck_tile_${move.second.x}_${move.second.y}")
+
+        composeRule.runOnIdle {
+            settings()
+            first()
+            second()
+        }
+
+        assertEquals(initial, store.savedSession)
+        assertTrue(sound.played.isEmpty())
+    }
+
+    @Test
+    fun sameFrameLifecyclePauseBlocksAlreadyCapturedTileCallbacks() {
+        val initial = StarstruckEngine.newGame(seed = 74L)
+        val move = StarstruckEngine.legalMoves(initial.board).first()
+        val store = FakeStarstruckStore(session = initial)
+        val sound = FakeStarstruckSoundPlayer()
+        val lifecycleOwner = MutableStarstruckLifecycleOwner()
+        composeRule.runOnIdle { lifecycleOwner.moveTo(Lifecycle.State.RESUMED) }
+        composeRule.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+                RivenTheme {
+                    StarstruckGame(
+                        externallyPaused = false,
+                        storeOverride = store,
+                        soundPlayerFactory = { sound },
+                    )
+                }
+            }
+        }
+        val first = clickActionForTag("starstruck_tile_${move.first.x}_${move.first.y}")
+        val second = clickActionForTag("starstruck_tile_${move.second.x}_${move.second.y}")
+
+        composeRule.runOnIdle {
+            lifecycleOwner.moveTo(Lifecycle.State.CREATED)
+            first()
+            second()
+        }
+
+        assertEquals(initial, store.savedSession)
+        assertTrue(sound.played.isEmpty())
+    }
+
+    @Test
     fun sameFrameMoveThenDisposeCannotOverwriteNewSession() {
         composeRule.mainClock.autoAdvance = false
         val initial = StarstruckEngine.newGame(seed = 66L)
@@ -181,13 +256,19 @@ class StarstruckComposeTest {
 
     @Test
     fun compactLayoutKeepsBoardAndBothControlsVisibleTogether() {
-        val store = FakeStarstruckStore(session = StarstruckEngine.newGame(seed = 68L))
+        val initial = StarstruckEngine.newGame(seed = 68L)
+        val move = StarstruckEngine.legalMoves(initial.board).first()
+        val store = FakeStarstruckStore(session = initial)
         setGame(store = store, compactLayout = true)
 
         composeRule.onNodeWithTag("starstruck_compact").assertIsDisplayed()
         composeRule.onNodeWithTag("starstruck_board").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Open Starstruck settings").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Pause Starstruck").assertIsDisplayed()
+        click(move.first)
+        click(move.second)
+        composeRule.runOnIdle { }
+        assertEquals(1, store.savedSession?.movesMade)
     }
 
     private fun setGame(
@@ -211,6 +292,20 @@ class StarstruckComposeTest {
     private fun click(point: StarPoint) {
         composeRule.onNodeWithTag("starstruck_tile_${point.x}_${point.y}").performClick()
     }
+
+    private fun clickActionForTag(tag: String): () -> Boolean = requireNotNull(
+        composeRule.onNodeWithTag(tag)
+            .fetchSemanticsNode()
+            .config[SemanticsActions.OnClick]
+            .action,
+    )
+
+    private fun clickActionForDescription(description: String): () -> Boolean = requireNotNull(
+        composeRule.onNodeWithContentDescription(description)
+            .fetchSemanticsNode()
+            .config[SemanticsActions.OnClick]
+            .action,
+    )
 
     private fun firstInvalidAdjacentSwap(board: List<StarTile>): Pair<StarPoint, StarPoint> {
         val legal = StarstruckEngine.legalMoves(board).toSet()
