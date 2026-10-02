@@ -4,12 +4,15 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -75,6 +78,8 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("CALL OUT").assertIsDisplayed()
         composeRule.onNodeWithText("Demo hand • no engine").assertIsDisplayed()
         composeRule.onNodeWithText("DEMO COMMENTARY").assertIsDisplayed()
+        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
+        composeRule.onAllNodesWithContentDescription("Face-down card").assertCountEquals(8)
     }
 
     @Test
@@ -199,6 +204,40 @@ class ArcadeActivityScreenshotTest {
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [35], qualifiers = "w393dp-h420dp-xxhdpi")
+class ArcadeCompactActivityScreenshotTest {
+    @get:Rule
+    val composeRule = createAndroidComposeRule<MainActivity>()
+
+    @Test
+    fun rendersCompactSharedCardTableToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
+        composeRule.onNodeWithText("Riven's Card Table").performClick()
+        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(2)
+        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
+
+        val output = File(
+            System.getProperty("user.dir"),
+            "build/reports/arcade-preview/shared-card-table-compact.png",
+        )
+        output.parentFile?.mkdirs()
+        composeRule.runOnIdle {
+            val view = composeRule.activity.window.decorView
+            assertTrue(view.width > 0)
+            assertTrue(view.height > 0)
+            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+            FileOutputStream(output).use { stream ->
+                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream))
+            }
+        }
+        assertTrue(output.isFile)
+        assertTrue(output.length() > 0L)
+    }
+}
+
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(sdk = [35], qualifiers = "w393dp-h420dp-xxhdpi")
 class ArcadeCompactLayoutTest {
     @get:Rule
     val composeRule = createComposeRule()
@@ -219,6 +258,7 @@ class ArcadeCompactLayoutTest {
         composeRule.onNodeWithTag("arcade_game_scroll").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Quiet commentary").assertIsDisplayed()
         composeRule.onNodeWithText("CALL OUT").performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
         composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(3)
         composeRule.onNodeWithText(
             "Preview only • Deck, penalties, challenges, trade protocol, and hidden-information engine remain pending.",

@@ -2,6 +2,7 @@ package com.shai.riven.ui.arcade
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -57,8 +58,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -73,6 +76,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.shai.riven.R
 import com.shai.riven.ui.theme.AquaHeart
 import com.shai.riven.ui.theme.CoralHeart
 import com.shai.riven.ui.theme.DeepInk
@@ -1128,15 +1132,15 @@ private fun PlayingCard(
         when {
             empty -> Text(suit, color = MistBlue.copy(alpha = 0.55f), fontSize = 16.sp)
             back -> {
-                Box(
+                Image(
+                    painter = painterResource(R.drawable.riven_card_back),
+                    contentDescription = "Face-down card",
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(5.dp)
-                        .border(1.dp, MutedGold.copy(alpha = 0.6f), RoundedCornerShape(5.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("R", color = MutedGold, fontWeight = FontWeight.Bold)
-                }
+                        .padding(2.dp)
+                        .testTag("riven_card_back_art"),
+                    contentScale = ContentScale.Fit,
+                )
             }
 
             else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
