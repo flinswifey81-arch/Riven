@@ -67,8 +67,8 @@ class RivenBackgroundWorkRuntime private constructor(
                         httpClient = HttpUrlConnectionOpenRouterHttpClient(),
                         lockedPersonalityCanon = LockedRivenPersonalityContextSource(context)::verifiedCanon,
                     ),
-                    scheduleShortWindowSweep = {
-                        scheduler.enqueueAutomaticMemoryShortWindowSweep()
+                    reconcileShortWindowSweep = { completedAt ->
+                        automaticMemoryQueue.reconcileShortWindowSchedule(completedAt)
                         Unit
                     },
                 )

@@ -8,6 +8,18 @@ import com.shai.riven.data.attention.PositiveAttentionSignal
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS
+import com.shai.riven.data.background.AttachmentCleanupNoOpReason
+import com.shai.riven.data.background.AttachmentMaintenanceOperations
+import com.shai.riven.data.background.AttachmentMaintenanceResult
+import com.shai.riven.data.background.RepairJobNoOpReason
+import com.shai.riven.data.background.RepairJobRunOperations
+import com.shai.riven.data.background.RepairJobRunResult
+import com.shai.riven.data.background.RepairSweepOperations
+import com.shai.riven.data.background.RepairSweepResult
+import com.shai.riven.data.background.RivenBackgroundExecutionOutcome
+import com.shai.riven.data.background.RivenBackgroundWorkExecutor
+import com.shai.riven.data.background.RivenBackgroundWorkKind
+import com.shai.riven.data.background.TargetedAttachmentCleanupResult
 import com.shai.riven.data.candidate.CandidateExtractionProposal
 import com.shai.riven.data.candidate.CandidateExtractionResult
 import com.shai.riven.data.candidate.CandidateExtractionService
@@ -31,6 +43,9 @@ import com.shai.riven.data.memory.intent.ManualMemoryIntentResult
 import com.shai.riven.data.memory.intent.ManualMemoryIntentService
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
+import com.shai.riven.data.persistence.entity.ExperienceEntity
+import com.shai.riven.data.persistence.entity.MemoryEntity
+import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.AutomaticMemoryJobStage
 import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
@@ -39,9 +54,14 @@ import com.shai.riven.data.persistence.model.ConversationRunState
 import com.shai.riven.data.persistence.model.ConversationRunTrigger
 import com.shai.riven.data.persistence.model.ConversationStatus
 import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.EvidenceRole
+import com.shai.riven.data.persistence.model.ExperienceActor
 import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.persistence.model.ExperienceType
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryLifecycleState
+import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.MessageDeliveryState
@@ -313,6 +333,7 @@ class AutomaticMemoryPipelineIntegrationTest {
         val deferredJob = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId))
         assertEquals(AutomaticMemoryJobState.SUCCEEDED, deferredJob.state)
         assertEquals(1, scheduler.shortWindowSweepCount)
+        assertEquals(AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS, scheduler.shortWindowDelays.single())
         val justBefore = queue.requeueDueShortWindow(
             deferredJob.updatedAt + AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS - 1,
             10,
@@ -326,6 +347,40 @@ class AutomaticMemoryPipelineIntegrationTest {
         )
         assertEquals(AutomaticMemoryJobState.PENDING, database.automaticMemoryDao().job(deferredJob.id)?.state)
         assertEquals(AutomaticMemoryJobStage.REFRESH_ATTENTION, database.automaticMemoryDao().job(deferredJob.id)?.nextStage)
+    }
+
+    @Test
+    fun startupSweepRecreatesDeadlineAfterDeathBetweenCompletionAndSchedulerCall() = runBlocking {
+        model.deferSardinesUntilKeepIt = true
+        val turn = appendSuccessfulTurn("I love sardines.", "Do you want that remembered?")
+        val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        val crashGapRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory { AutomaticMemoryModelFactoryResult.Ready(model) },
+            clock = ::now,
+            reconcileShortWindowSweep = { error("simulated process death before scheduling") },
+        )
+        queued.jobIds.forEach { jobId ->
+            assertTrue(crashGapRunner.run(jobId) is AutomaticMemoryJobRunResult.Succeeded)
+        }
+        assertEquals(0, scheduler.shortWindowSweepCount)
+        val deferredJob = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId))
+        val restartAt = deferredJob.updatedAt + 1_000L
+
+        reopenDatabase()
+        val result = AutomaticMemorySweepService(queue, clock = { restartAt }, limit = 10).runSweep()
+
+        assertTrue(result is AutomaticMemorySweepResult.Completed)
+        assertEquals(1, scheduler.shortWindowSweepCount)
+        assertEquals(
+            AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS - 1_000L,
+            scheduler.shortWindowDelays.single(),
+        )
+        assertEquals(
+            AutomaticMemoryJobState.SUCCEEDED,
+            database.automaticMemoryDao().job(deferredJob.id)?.state,
+        )
     }
 
     @Test
@@ -975,6 +1030,82 @@ class AutomaticMemoryPipelineIntegrationTest {
         }
     }
 
+    @Test
+    fun workerContinuationDrainsAllConsolidationPatternsAcrossRestarts() = runBlocking {
+        listOf("alpha", "beta", "gamma", "delta").forEachIndexed { index, suffix ->
+            insertConsolidationSource("drain-$suffix", 10_000L + index)
+        }
+        model.consolidationPairs = listOf(
+            listOf("drain-alpha", "drain-beta"),
+            listOf("drain-gamma", "drain-delta"),
+        )
+        val turn = appendSuccessfulTurn("No memory candidate in this turn.", "Acknowledged.")
+        val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+
+        fun continuationRunner() = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory { AutomaticMemoryModelFactoryResult.Ready(model) },
+            clock = ::now,
+            maxConsolidationPassesPerRun = 1,
+            reconcileShortWindowSweep = { completedAt ->
+                queue.reconcileShortWindowSchedule(completedAt)
+                Unit
+            },
+        )
+        fun worker(runner: AutomaticMemoryJobRunner) = RivenBackgroundWorkExecutor(
+            attachmentMaintenance = object : AttachmentMaintenanceOperations {
+                override suspend fun cleanupTarget(attachmentId: String) =
+                    TargetedAttachmentCleanupResult.NoOp(
+                        attachmentId,
+                        AttachmentCleanupNoOpReason.MISSING,
+                    )
+
+                override suspend fun runMaintenance() = AttachmentMaintenanceResult.Completed(
+                    emptyList(),
+                    emptyList(),
+                    emptyList(),
+                    moreWorkRemaining = false,
+                )
+            },
+            repairJobRunner = RepairJobRunOperations { id ->
+                RepairJobRunResult.NoOp(id, RepairJobNoOpReason.MISSING)
+            },
+            repairSweep = RepairSweepOperations {
+                RepairSweepResult.Completed(emptyList(), emptyList(), moreWorkRemaining = false)
+            },
+            automaticMemoryJobRunner = runner,
+        )
+
+        assertEquals(
+            RivenBackgroundExecutionOutcome.Retryable,
+            worker(continuationRunner()).execute(RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB, jobId),
+        )
+        assertEquals(0, database.automaticMemoryDao().job(jobId)?.attemptCount)
+        assertEquals(AutomaticMemoryJobStage.CONSOLIDATION, database.automaticMemoryDao().job(jobId)?.nextStage)
+        reopenDatabase()
+        assertEquals(
+            RivenBackgroundExecutionOutcome.Retryable,
+            worker(continuationRunner()).execute(RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB, jobId),
+        )
+        reopenDatabase()
+        assertEquals(
+            RivenBackgroundExecutionOutcome.Completed,
+            worker(continuationRunner()).execute(RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB, jobId),
+        )
+
+        assertEquals(AutomaticMemoryJobState.SUCCEEDED, database.automaticMemoryDao().job(jobId)?.state)
+        assertEquals(
+            2,
+            database.memoryDao().recentMemories(20).count { it.epistemicBasis == EpistemicBasis.CONSOLIDATION },
+        )
+        assertEquals(3L, rowCount("consolidation_checkpoints"))
+        queued.jobIds.filterNot { it == jobId }.forEach { otherJobId ->
+            assertEquals(AutomaticMemoryJobState.PENDING, database.automaticMemoryDao().job(otherJobId)?.state)
+        }
+    }
+
     private suspend fun enqueueAndRun(turn: Turn) {
         val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
             as AutomaticMemoryEnqueueResult.Enqueued
@@ -1090,6 +1221,52 @@ class AutomaticMemoryPipelineIntegrationTest {
     private fun experienceFor(messageId: String): String =
         database.memoryDao().canonicalConversationExperiencesForMessage(messageId).single().id
 
+    private fun insertConsolidationSource(memoryId: String, eventOrder: Long) {
+        val experienceId = "$memoryId-experience"
+        database.memoryDao().insertExperience(
+            ExperienceEntity(
+                id = experienceId,
+                eventOrder = eventOrder,
+                experienceType = ExperienceType.SHARED_EVENT,
+                actor = ExperienceActor.SHAI,
+                sourceContent = "$memoryId source",
+                occurredAt = eventOrder,
+                recordedAt = eventOrder,
+                sensitivity = SensitivityLevel.STANDARD,
+                availability = ExperienceAvailability.AVAILABLE,
+            ),
+        )
+        database.memoryDao().insertMemory(
+            MemoryEntity(
+                id = memoryId,
+                kind = MemoryKind.SEMANTIC,
+                scope = MemoryScope.SHAI,
+                meaning = "$memoryId meaning",
+                epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                certainty = MemoryCertainty.CERTAIN,
+                truthState = MemoryTruthState.SUPPORTED,
+                retentionState = MemoryRetentionState.ACTIVE,
+                lifecycleState = MemoryLifecycleState.VALIDATED,
+                temporalState = TemporalState.CURRENT,
+                learnedAt = eventOrder,
+                sensitivity = SensitivityLevel.STANDARD,
+                createdAt = eventOrder,
+                updatedAt = eventOrder,
+            ),
+        )
+        database.memoryDao().insertMemoryEvidence(
+            MemoryEvidenceEntity(
+                memoryId = memoryId,
+                experienceId = experienceId,
+                role = EvidenceRole.SUPPORTS,
+                epistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+                sourceCertainty = MemoryCertainty.CERTAIN,
+                lineageKey = "$memoryId-lineage",
+                createdAt = eventOrder,
+            ),
+        )
+    }
+
     private fun rowCount(table: String): Long = database.openHelper.readableDatabase
         .query("SELECT COUNT(*) FROM $table")
         .use { cursor -> cursor.moveToFirst(); cursor.getLong(0) }
@@ -1116,8 +1293,8 @@ class AutomaticMemoryPipelineIntegrationTest {
             database = database,
             modelFactory = AutomaticMemoryModelFactory { AutomaticMemoryModelFactoryResult.Ready(model) },
             clock = ::now,
-            scheduleShortWindowSweep = {
-                scheduler.enqueueAutomaticMemoryShortWindowSweep()
+            reconcileShortWindowSweep = { completedAt ->
+                queue.reconcileShortWindowSchedule(completedAt)
                 Unit
             },
         )
@@ -1135,6 +1312,7 @@ class AutomaticMemoryPipelineIntegrationTest {
     private class RecordingScheduler : RivenBackgroundWorkScheduler {
         val automaticMemoryJobIds = mutableListOf<String>()
         var shortWindowSweepCount = 0
+        val shortWindowDelays = mutableListOf<Long>()
 
         override fun enqueueAttachmentCleanup(attachmentId: String) = enqueued("attachment")
         override fun enqueueAttachmentMaintenanceSweep() = enqueued("attachment-sweep")
@@ -1145,8 +1323,11 @@ class AutomaticMemoryPipelineIntegrationTest {
             return enqueued(automaticMemoryJobId)
         }
         override fun enqueueAutomaticMemorySweep() = enqueued("memory-sweep")
-        override fun enqueueAutomaticMemoryShortWindowSweep(): RivenBackgroundScheduleResult {
+        override fun enqueueAutomaticMemoryShortWindowSweep(
+            initialDelayMs: Long,
+        ): RivenBackgroundScheduleResult {
             shortWindowSweepCount += 1
+            shortWindowDelays += initialDelayMs
             return enqueued("short-window")
         }
         override fun ensurePeriodicMaintenance() = enqueued("periodic")
@@ -1164,6 +1345,7 @@ class AutomaticMemoryPipelineIntegrationTest {
         var extractionOverride: ((CandidateExtractionSnapshot) -> CandidateExtractionProposal)? = null
         var cancelNextSardineAnalysis = false
         var cancelNextConsolidation = false
+        var consolidationPairs: List<List<String>> = emptyList()
         var sardineAnalysisCalls = 0
 
         override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal {
@@ -1351,6 +1533,21 @@ class AutomaticMemoryPipelineIntegrationTest {
             if (cancelNextConsolidation) {
                 cancelNextConsolidation = false
                 throw CancellationException("simulated consolidation interruption")
+            }
+            val availableIds = snapshot.sources.mapTo(hashSetOf()) { it.memoryId }
+            val processed = snapshot.processedSourceSets.mapTo(hashSetOf()) { it.toSet() }
+            val next = consolidationPairs.firstOrNull { pair ->
+                pair.all(availableIds::contains) && pair.toSet() !in processed
+            }
+            if (next != null) {
+                return com.shai.riven.data.memory.ConsolidationProposal.Create(
+                    sourceMemoryIds = next,
+                    meaning = "Consolidated ${next.joinToString(" and ")}",
+                    kind = MemoryKind.SEMANTIC,
+                    scope = MemoryScope.SHAI,
+                    certainty = MemoryCertainty.CERTAIN,
+                    sensitivity = SensitivityLevel.STANDARD,
+                )
             }
             return com.shai.riven.data.memory.ConsolidationProposal.NoConsolidation
         }

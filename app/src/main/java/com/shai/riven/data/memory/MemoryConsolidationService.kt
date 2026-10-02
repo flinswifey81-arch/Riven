@@ -6,7 +6,6 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ConsolidationCheckpointEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.model.EpistemicBasis
-import com.shai.riven.data.persistence.model.EvidenceRole
 import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.MemoryScope
@@ -137,13 +136,13 @@ class MemoryConsolidationService(
                     memoryId = checkpoint.resultMemoryId,
                 )
             }
-            return MemoryConsolidationResult.AlreadyProcessed(checkpoint.resultMemoryId)
+            return MemoryConsolidationResult.Reused(checkpoint.resultMemoryId)
         }
 
         val sourceMemories = sourceIds.map { checkNotNull(memoryDao.memory(it)) }
         val supportingEvidence = sourceIds.flatMap { sourceId ->
             currentEvidence(sourceId)
-                .filter { it.role == EvidenceRole.SUPPORTS }
+                .filter { it.role.isPositiveMemoryGrounding() }
         }.sortedWith(compareBy(MemoryEvidenceEntity::memoryId, MemoryEvidenceEntity::experienceId))
         val uniqueEvidence = supportingEvidence.distinctBy(MemoryEvidenceEntity::experienceId)
         check(uniqueEvidence.size >= MIN_INDEPENDENT_EXPERIENCES)
@@ -216,7 +215,7 @@ class MemoryConsolidationService(
         val sources = lifecycleDao.eligibleSourceMemories(MAX_SOURCE_MEMORIES).mapNotNull { memory ->
             val evidence = currentEvidence(memory.id)
             val supportingIds = evidence.asSequence()
-                .filter { it.role == EvidenceRole.SUPPORTS }
+                .filter { it.role.isPositiveMemoryGrounding() }
                 .map(MemoryEvidenceEntity::experienceId)
                 .distinct()
                 .sorted()

@@ -2,15 +2,16 @@ package com.shai.riven.data.background
 
 import androidx.room.withTransaction
 import com.shai.riven.data.memory.isEvidenceSuppressedInCurrentTransaction
+import com.shai.riven.data.memory.isPositiveMemoryGrounding
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
+import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.EpistemicBasis
-import com.shai.riven.data.persistence.model.EvidenceRole
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryAuditAction
@@ -22,6 +23,7 @@ import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobType
+import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.validationRecallCorpusFence
@@ -69,19 +71,36 @@ class ProvenanceRepairService(
     private fun reassessMemoryInCurrentTransaction(memoryId: String): ProvenanceMutation {
         val memory = memoryDao.memory(memoryId)
             ?: return ProvenanceMutation(RepairJobHandlerResult.Success)
+        if (memory.truthState == MemoryTruthState.CORRECTED_FALSE ||
+            memory.truthState == MemoryTruthState.UNSUPPORTED ||
+            memory.retentionState == MemoryRetentionState.FORGOTTEN ||
+            memory.lifecycleState == MemoryLifecycleState.SUPERSEDED ||
+            memory.lifecycleState == MemoryLifecycleState.RESOLVED
+        ) {
+            // Explicit user correction/forget and terminal repair outcomes are durable intent.
+            return ProvenanceMutation(RepairJobHandlerResult.Success)
+        }
+        val artifactIds = artifactIdsForMemoryLineage(memory.id)
         return if (memory.epistemicBasis == EpistemicBasis.CONSOLIDATION) {
-            reassessConsolidation(memory)
+            if (memory.lifecycleState != MemoryLifecycleState.REASSESSMENT_PENDING) {
+                return ProvenanceMutation(RepairJobHandlerResult.Success)
+            }
+            reassessConsolidation(memory, artifactIds)
         } else {
             val validSupport = safeSupportingEvidence(memory).isNotEmpty()
             if (!validSupport && memory.truthState != MemoryTruthState.UNSUPPORTED) {
-                finishMemoryState(memory, supported = false)
+                finishMemoryState(memory, supported = false, artifactIds = artifactIds)
             } else {
                 ProvenanceMutation(RepairJobHandlerResult.Success)
             }
         }
     }
 
-    private fun reassessConsolidation(memory: MemoryEntity): ProvenanceMutation {
+    private fun reassessConsolidation(
+        memory: MemoryEntity,
+        artifactIds: List<String>,
+    ): ProvenanceMutation {
+        val originalEvidence = memoryDao.evidenceForMemory(memory.id)
         val relationships = memoryDao.directRelationshipsForMemory(memory.id)
             .filter {
                 it.sourceMemoryId == memory.id &&
@@ -89,6 +108,7 @@ class ProvenanceRepairService(
             }
         val validSources = mutableListOf<MemoryEntity>()
         val validEvidenceIds = linkedSetOf<String>()
+        var provenanceReduced = false
         relationships.forEach { relationship ->
             val source = memoryDao.memory(relationship.targetMemoryId)
             val safeEvidence = source?.let(::safeSupportingEvidence).orEmpty()
@@ -103,6 +123,7 @@ class ProvenanceRepairService(
                 validSources += requireNotNull(source)
                 safeEvidence.mapTo(validEvidenceIds) { it.experienceId }
             } else {
+                provenanceReduced = true
                 memoryDao.deleteMemoryRelationship(
                     relationship.sourceMemoryId,
                     relationship.targetMemoryId,
@@ -110,19 +131,34 @@ class ProvenanceRepairService(
                 )
             }
         }
-        memoryDao.evidenceForMemory(memory.id)
+        originalEvidence
             .filter { it.experienceId !in validEvidenceIds }
-            .forEach { memoryDao.deleteMemoryEvidence(memory.id, it.experienceId) }
+            .forEach {
+                provenanceReduced = true
+                memoryDao.deleteMemoryEvidence(memory.id, it.experienceId)
+            }
+
+        val expectedSourceIds = lifecycleDao.consolidationCheckpointForResultMemory(memory.id)
+            ?.sourceMemoryIds
+            ?.let(::decodeSourceIds)
+        if (expectedSourceIds != null && expectedSourceIds.toSet() != validSources.mapTo(hashSetOf()) { it.id }) {
+            provenanceReduced = true
+        }
 
         val required = if (memory.kind == MemoryKind.SELF_DEVELOPMENT || memory.scope == MemoryScope.RIVEN) 3 else 2
-        val remainsSupported = validSources.size >= required && validEvidenceIds.size >= required
-        return finishMemoryState(memory, remainsSupported, validSources)
+        // Surviving source count cannot prove that the unchanged composite meaning is still true.
+        // Without a bounded semantic refinement pass, any lost source keeps the conclusion fenced.
+        val remainsSupported = !provenanceReduced &&
+            validSources.size >= required &&
+            validEvidenceIds.size >= required
+        return finishMemoryState(memory, remainsSupported, validSources, artifactIds)
     }
 
     private fun finishMemoryState(
         memory: MemoryEntity,
         supported: Boolean,
         sources: List<MemoryEntity> = emptyList(),
+        artifactIds: List<String>,
     ): ProvenanceMutation {
         val now = clock.now()
         val next = if (supported) {
@@ -188,6 +224,7 @@ class ProvenanceRepairService(
             now,
         )
         lifecycleDao.deleteDerivedPayloadsForMemories(listOf(memory.id))
+        queueArtifactRebuilds(artifactIds, now)
         return ProvenanceMutation(
             result = RepairJobHandlerResult.Success,
             affectedMemoryIds = setOf(memory.id),
@@ -195,7 +232,7 @@ class ProvenanceRepairService(
     }
 
     private fun safeSupportingEvidence(memory: MemoryEntity) = memoryDao.evidenceForMemory(memory.id)
-        .filter { it.role == EvidenceRole.SUPPORTS }
+        .filter { it.role.isPositiveMemoryGrounding() }
         .filter { evidence ->
             memoryDao.experience(evidence.experienceId)?.availability == ExperienceAvailability.AVAILABLE &&
                 !isEvidenceSuppressedInCurrentTransaction(
@@ -204,6 +241,52 @@ class ProvenanceRepairService(
                     evidence.lineageKey,
                 )
         }
+
+    private fun artifactIdsForMemoryLineage(memoryId: String): List<String> {
+        val experienceIds = memoryDao.evidenceForMemory(memoryId).map { it.experienceId }
+        val messageIds = if (experienceIds.isEmpty()) emptyList()
+        else memoryDao.messageIdsForExperiences(experienceIds)
+        val openLoopIds = memoryDao.openLoopIdsForMemories(listOf(memoryId))
+        return buildList {
+            addAll(lifecycleDao.artifactIdsForMemory(memoryId))
+            experienceIds.forEach { addAll(lifecycleDao.artifactIdsForExperience(it)) }
+            messageIds.forEach { addAll(lifecycleDao.artifactIdsForMessage(it)) }
+            openLoopIds.forEach { addAll(lifecycleDao.artifactIdsForOpenLoop(it)) }
+        }.distinct().sorted()
+    }
+
+    private fun queueArtifactRebuilds(artifactIds: List<String>, now: Long) {
+        artifactIds.forEach { artifactId ->
+            maintenanceDao.insertRepairJob(
+                RepairJobEntity(
+                    id = idGenerator(),
+                    jobType = RepairJobType.REBUILD_DERIVED,
+                    state = RepairJobState.PENDING,
+                    targetType = DerivedArtifactRepairService.TARGET_ARTIFACT,
+                    targetId = artifactId,
+                    attemptCount = 0,
+                    createdAt = now,
+                    updatedAt = now,
+                ),
+            )
+        }
+    }
+
+    private fun decodeSourceIds(value: String): List<String>? {
+        val ids = mutableListOf<String>()
+        var offset = 0
+        while (offset < value.length) {
+            val separator = value.indexOf(':', offset)
+            if (separator < 0) return null
+            val length = value.substring(offset, separator).toIntOrNull() ?: return null
+            val start = separator + 1
+            val end = start + length
+            if (length < 1 || end > value.length) return null
+            ids += value.substring(start, end)
+            offset = end
+        }
+        return ids
+    }
 
     private fun repairCandidate(candidateId: String): RepairJobHandlerResult {
         val candidate = memoryDao.candidateMemory(candidateId) ?: return RepairJobHandlerResult.Success

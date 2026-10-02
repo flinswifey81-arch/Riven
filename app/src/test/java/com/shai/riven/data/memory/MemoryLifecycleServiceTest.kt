@@ -4,12 +4,24 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.background.DerivedArtifactRepairService
+import com.shai.riven.data.background.ProvenanceRepairHandler
 import com.shai.riven.data.background.RepairJobHandlerResult
+import com.shai.riven.data.background.RepairJobHandlerRegistry
+import com.shai.riven.data.background.RepairJobRunResult
+import com.shai.riven.data.background.RepairJobRunner
 import com.shai.riven.data.background.RivenBackgroundClock
 import com.shai.riven.data.background.ProvenanceRepairService
+import com.shai.riven.data.background.derivedArtifactRepairHandlers
 import com.shai.riven.data.deletion.DeleteMemoryInput
 import com.shai.riven.data.deletion.MemoryDeleteResult
 import com.shai.riven.data.deletion.SafeDeleteService
+import com.shai.riven.data.conversation.AppendTimelineMessageInput
+import com.shai.riven.data.conversation.ConversationTimelineService
+import com.shai.riven.data.conversation.CreateTimelineConversationInput
+import com.shai.riven.data.conversation.NewTimelineMessageInput
+import com.shai.riven.data.conversation.TimelineWriteResult
+import com.shai.riven.data.experience.ConversationExperienceLookupResult
+import com.shai.riven.data.experience.ConversationExperienceService
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -417,42 +429,96 @@ class MemoryLifecycleServiceTest {
     }
 
     @Test
-    fun openLoopProcessingFindsRelevantOlderLoopAndExcludesUnrelatedSensitiveDetails() = runBlocking {
-        insertExperience(
-            "older-loop-source",
-            1,
-            content = "The ancient zebra draft is complete now.",
+    fun standardConversationCanTargetOlderSensitiveLoopWithoutExposingUnrelatedSensitiveDetails() = runBlocking {
+        val timeline = ConversationTimelineService(database)
+        assertTrue(
+            timeline.createConversationWithTimeline(
+                CreateTimelineConversationInput("loop-conversation", 0, 0, ConversationStatus.ACTIVE),
+            ) is TimelineWriteResult.ConversationCreated,
         )
-        insertForwardAttention("older-loop-source")
-        repeat(70) { index ->
-            val isRelevant = index == 0
-            val isSensitive = index == 1
+        assertTrue(
+            timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    "loop-conversation",
+                    NewTimelineMessageInput(
+                        "loop-create-message",
+                        MessageRole.USER,
+                        MessageDeliveryState.PERSISTED,
+                        "Create the private launch dossier follow-up.",
+                        1,
+                        1,
+                    ),
+                    expectedTimelineRevision = 0,
+                    occurredAt = 1,
+                ),
+            ) is TimelineWriteResult.MessageAppended,
+        )
+        assertTrue(
+            timeline.appendMessage(
+                AppendTimelineMessageInput(
+                    "loop-conversation",
+                    NewTimelineMessageInput(
+                        "loop-complete-message",
+                        MessageRole.USER,
+                        MessageDeliveryState.PERSISTED,
+                        "The private launch dossier is complete now.",
+                        2,
+                        2,
+                    ),
+                    expectedTimelineRevision = 1,
+                    occurredAt = 2,
+                ),
+            ) is TimelineWriteResult.MessageAppended,
+        )
+        val experiences = ConversationExperienceService(database)
+        val creationExperience = (
+            experiences.conversationExperienceForMessage("loop-create-message") as
+                ConversationExperienceLookupResult.Found
+            ).experience
+        val sourceExperience = (
+            experiences.conversationExperienceForMessage("loop-complete-message") as
+                ConversationExperienceLookupResult.Found
+            ).experience
+        assertEquals(SensitivityLevel.STANDARD, sourceExperience.sensitivity)
+        insertForwardAttention(sourceExperience.id)
+
+        repeat(530) { index ->
+            val isUnrelatedSensitive = index == 1
             database.openLoopDao().insertOpenLoop(
                 OpenLoopEntity(
-                    id = when {
-                        isRelevant -> "loop-ancient-zebra"
-                        isSensitive -> "loop-private-vault"
-                        else -> "loop-${index.toString().padStart(3, '0')}"
+                    id = "loop-${index.toString().padStart(4, '0')}",
+                    creationExperienceId = creationExperience.id,
+                    title = if (isUnrelatedSensitive) {
+                        "Private vault passphrase rotation"
+                    } else {
+                        "Unrelated task $index"
                     },
-                    creationExperienceId = "older-loop-source",
-                    title = when {
-                        isRelevant -> "Ancient zebra draft"
-                        isSensitive -> "Private vault passphrase rotation"
-                        else -> "Unrelated task $index"
-                    },
-                    description = if (isSensitive) "Unrelated highly sensitive loop detail" else null,
+                    description = if (isUnrelatedSensitive) "Unrelated highly sensitive loop detail" else null,
                     state = OpenLoopState.ACTIVE,
                     openedAt = index.toLong(),
-                    sensitivity = if (isSensitive) {
+                    sensitivity = if (isUnrelatedSensitive) {
                         SensitivityLevel.HIGHLY_SENSITIVE
                     } else {
                         SensitivityLevel.STANDARD
                     },
                     createdAt = index.toLong(),
-                    updatedAt = if (isRelevant) 1L else 100L + index,
+                    updatedAt = 100L + index,
                 ),
             )
         }
+        database.openLoopDao().insertOpenLoop(
+            OpenLoopEntity(
+                id = "zzzz-sensitive-launch-dossier",
+                creationExperienceId = creationExperience.id,
+                title = "Private launch dossier",
+                description = "Sensitive launch follow-up details",
+                state = OpenLoopState.ACTIVE,
+                openedAt = 1,
+                sensitivity = SensitivityLevel.SENSITIVE,
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
         var observed: OpenLoopLifecycleSnapshot? = null
         val service = OpenLoopLifecycleService(
             database = database,
@@ -460,7 +526,7 @@ class MemoryLifecycleServiceTest {
                 override suspend fun proposeOpenLoop(snapshot: OpenLoopLifecycleSnapshot): OpenLoopLifecycleProposal {
                     observed = snapshot
                     return OpenLoopLifecycleProposal.Transition(
-                        "loop-ancient-zebra",
+                        "zzzz-sensitive-launch-dossier",
                         OpenLoopState.COMPLETED,
                     )
                 }
@@ -469,14 +535,17 @@ class MemoryLifecycleServiceTest {
             clock = { 1_000L },
         )
 
-        assertEquals(OpenLoopLifecycleResult.Applied("loop-ancient-zebra"), service.process("older-loop-source"))
+        assertEquals(
+            OpenLoopLifecycleResult.Applied("zzzz-sensitive-launch-dossier"),
+            service.process(sourceExperience.id),
+        )
         val supplied = checkNotNull(observed).currentLoops
         assertEquals(64, supplied.size)
-        assertTrue(supplied.any { it.openLoopId == "loop-ancient-zebra" })
-        assertFalse(supplied.any { it.openLoopId == "loop-private-vault" })
+        assertTrue(supplied.any { it.openLoopId == "zzzz-sensitive-launch-dossier" })
+        assertFalse(supplied.any { it.openLoopId == "loop-0001" })
         assertEquals(
-            SensitivityLevel.STANDARD,
-            supplied.single { it.openLoopId == "loop-ancient-zebra" }.sensitivity,
+            SensitivityLevel.SENSITIVE,
+            supplied.single { it.openLoopId == "zzzz-sensitive-launch-dossier" }.sensitivity,
         )
     }
 
@@ -582,13 +651,113 @@ class MemoryLifecycleServiceTest {
             RepairJobHandlerResult.Success,
             repair.repair("MEMORY", "survivor-conclusion"),
         )
-        assertEquals(MemoryTruthState.SUPPORTED, database.memoryDao().memory("survivor-conclusion")?.truthState)
+        assertEquals(MemoryTruthState.UNSUPPORTED, database.memoryDao().memory("survivor-conclusion")?.truthState)
         assertEquals(
-            MemoryLifecycleState.VALIDATED,
+            MemoryLifecycleState.RESOLVED,
             database.memoryDao().memory("survivor-conclusion")?.lifecycleState,
         )
         assertEquals(2, database.memoryDao().evidenceForMemory("survivor-conclusion").size)
         assertEquals(2, database.memoryDao().directRelationshipsForMemory("survivor-conclusion").size)
+    }
+
+    @Test
+    fun correctedConsolidatedConclusionIsNotResurrectedWhenReplacementIsDeleted() = runBlocking {
+        insertExperience("corrected-conclusion-a-e", 1)
+        insertExperience("corrected-conclusion-b-e", 2)
+        insertMemory("corrected-conclusion-a", "corrected-conclusion-a-e", "Alpha source")
+        insertMemory("corrected-conclusion-b", "corrected-conclusion-b-e", "Beta source")
+        insertConsolidatedMemory(
+            "corrected-conclusion",
+            "The old composite conclusion is false.",
+            listOf("corrected-conclusion-a", "corrected-conclusion-b"),
+            listOf("corrected-conclusion-a-e", "corrected-conclusion-b-e"),
+        )
+        insertExperience("corrected-conclusion-replacement-e", 3)
+        assertTrue(
+            MemoryTransactionService(database).correct(
+                CorrectMemoryInput(
+                    inaccurateMemoryId = "corrected-conclusion",
+                    replacement = ValidatedMemoryInput(
+                        memoryId = "corrected-conclusion-replacement",
+                        kind = MemoryKind.SEMANTIC,
+                        scope = MemoryScope.SHAI,
+                        meaning = "The corrected composite conclusion.",
+                        epistemicBasis = EpistemicBasis.EXPLICIT_CORRECTION,
+                        certainty = MemoryCertainty.CERTAIN,
+                        learnedAt = 3,
+                        sensitivity = SensitivityLevel.STANDARD,
+                        evidence = listOf(
+                            MemoryEvidenceInput(
+                                experienceId = "corrected-conclusion-replacement-e",
+                                role = EvidenceRole.CORRECTS,
+                                epistemicBasis = EpistemicBasis.EXPLICIT_CORRECTION,
+                                sourceCertainty = MemoryCertainty.CERTAIN,
+                                lineageKey = "corrected-conclusion-replacement-lineage",
+                            ),
+                        ),
+                    ),
+                    occurredAt = 3,
+                    triggeringExperienceId = "corrected-conclusion-replacement-e",
+                ),
+            ) is MemoryWriteResult.Success,
+        )
+        assertTrue(
+            SafeDeleteService(database).deleteMemory(
+                DeleteMemoryInput("corrected-conclusion-replacement", 4),
+            ) is MemoryDeleteResult.Deleted,
+        )
+
+        assertEquals(
+            RepairJobHandlerResult.Success,
+            ProvenanceRepairService(database, RivenBackgroundClock { 5L }).repair(
+                "MEMORY",
+                "corrected-conclusion",
+            ),
+        )
+        val conclusion = checkNotNull(database.memoryDao().memory("corrected-conclusion"))
+        assertEquals(MemoryTruthState.CORRECTED_FALSE, conclusion.truthState)
+        val recall = TargetedConversationalMemoryRetriever(database)
+        val context = recall.retrieve(
+            ConversationalMemoryQuery("old composite conclusion false", 6L),
+        )
+        recall.close()
+        assertFalse(context.memories.any { it.memoryId == "corrected-conclusion" })
+    }
+
+    @Test
+    fun compositeConclusionStaysIneligibleWhenOneUniqueSourceIsLost() = runBlocking {
+        listOf("alpha", "beta", "gamma").forEachIndexed { index, id ->
+            insertExperience("composite-$id-e", index.toLong() + 1L)
+            insertMemory("composite-$id", "composite-$id-e", "$id uniquely grounds one clause")
+        }
+        insertConsolidatedMemory(
+            "composite-conclusion",
+            "Alpha, beta, and gamma clauses all hold.",
+            listOf("composite-alpha", "composite-beta", "composite-gamma"),
+            listOf("composite-alpha-e", "composite-beta-e", "composite-gamma-e"),
+        )
+        assertTrue(
+            SafeDeleteService(database).deleteMemory(DeleteMemoryInput("composite-alpha", 10)) is
+                MemoryDeleteResult.Deleted,
+        )
+        assertEquals(
+            MemoryLifecycleState.REASSESSMENT_PENDING,
+            database.memoryDao().memory("composite-conclusion")?.lifecycleState,
+        )
+
+        assertEquals(
+            RepairJobHandlerResult.Success,
+            ProvenanceRepairService(database, RivenBackgroundClock { 11L }).repair(
+                "MEMORY",
+                "composite-conclusion",
+            ),
+        )
+        val conclusion = checkNotNull(database.memoryDao().memory("composite-conclusion"))
+        assertEquals(MemoryTruthState.UNSUPPORTED, conclusion.truthState)
+        assertEquals(MemoryLifecycleState.RESOLVED, conclusion.lifecycleState)
+        assertEquals(2, database.memoryDao().directRelationshipsForMemory(conclusion.id).size)
+        assertEquals(2, database.memoryDao().evidenceForMemory(conclusion.id).size)
+        assertTrue(database.memoryDao().conversationalRecallMemoryRows(listOf(conclusion.id), 12).isEmpty())
     }
 
     @Test
@@ -728,6 +897,83 @@ class MemoryLifecycleServiceTest {
         val context = recall.retrieve(ConversationalMemoryQuery("comet aurora preference", 12L))
         recall.close()
         assertEquals(listOf("repair-sibling"), context.memories.map { it.memoryId })
+    }
+
+    @Test
+    fun artifactAndProvenanceJobsConvergeInEitherOrderAcrossRunnerRestart() = runBlocking {
+        suspend fun exercise(prefix: String, artifactFirst: Boolean) {
+            val eventOrderBase = if (artifactFirst) 1L else 101L
+            insertExperience("$prefix-a-e", eventOrderBase)
+            insertExperience("$prefix-b-e", eventOrderBase + 1L)
+            insertExperience("$prefix-sibling-e", eventOrderBase + 2L)
+            insertMemory("$prefix-a", "$prefix-a-e", "$prefix alpha source")
+            insertMemory("$prefix-b", "$prefix-b-e", "$prefix beta source")
+            insertMemory("$prefix-sibling", "$prefix-sibling-e", "$prefix durable sibling")
+            insertConsolidatedMemory(
+                "$prefix-conclusion",
+                "$prefix composite conclusion",
+                listOf("$prefix-a", "$prefix-b"),
+                listOf("$prefix-a-e", "$prefix-b-e"),
+            )
+            insertSearchArtifact(
+                "$prefix-artifact",
+                listOf("$prefix-conclusion", "$prefix-sibling"),
+            )
+            assertEquals(
+                RepairJobHandlerResult.Success,
+                DerivedArtifactRepairService(database, RivenBackgroundClock { 4L }).repair(
+                    "DERIVED_ARTIFACT",
+                    "$prefix-artifact",
+                ),
+            )
+            assertTrue(
+                MemoryTransactionService(database).forget(
+                    MemoryStateTransitionInput("$prefix-a", 5),
+                ) is MemoryWriteResult.Success,
+            )
+
+            val artifactJob = database.maintenanceDao()
+                .repairJobs("DERIVED_ARTIFACT", "$prefix-artifact")
+                .first { it.jobType == com.shai.riven.data.persistence.model.RepairJobType.REBUILD_DERIVED }
+            val provenanceJob = database.maintenanceDao()
+                .repairJobs("MEMORY", "$prefix-conclusion")
+                .first { it.jobType == com.shai.riven.data.persistence.model.RepairJobType.REASSESS_PROVENANCE }
+            fun runner() = RepairJobRunner(
+                database,
+                RepairJobHandlerRegistry(
+                    derivedArtifactRepairHandlers(DerivedArtifactRepairService(database)) +
+                        ProvenanceRepairHandler(
+                            ProvenanceRepairService(database, RivenBackgroundClock { 10L }),
+                        ),
+                ),
+                clock = RivenBackgroundClock { 10L },
+            )
+
+            if (artifactFirst) {
+                val blocked = runner().run(artifactJob.id)
+                assertTrue(blocked is RepairJobRunResult.RetryableFailure)
+                assertEquals("WAITING_FOR_PROVENANCE", (blocked as RepairJobRunResult.RetryableFailure).errorCode)
+                assertTrue(runner().run(provenanceJob.id) is RepairJobRunResult.Succeeded)
+                // Reconstructing the runner models a process restart between the dependency jobs.
+                assertTrue(runner().run(artifactJob.id) is RepairJobRunResult.Succeeded)
+            } else {
+                assertTrue(runner().run(provenanceJob.id) is RepairJobRunResult.Succeeded)
+                assertTrue(runner().run(artifactJob.id) is RepairJobRunResult.Succeeded)
+            }
+
+            val artifact = checkNotNull(database.maintenanceDao().derivedArtifact("$prefix-artifact"))
+            assertEquals(DerivedArtifactState.CURRENT, artifact.state)
+            val payload = checkNotNull(database.memoryLifecycleDao().derivedPayload(artifact.id)).content
+            assertFalse(payload.contains("$prefix composite conclusion"))
+            assertTrue(payload.contains("$prefix durable sibling"))
+            assertTrue(
+                database.maintenanceDao().repairJobs("DERIVED_ARTIFACT", artifact.id)
+                    .any { it.createdAt == 10L },
+            )
+        }
+
+        exercise("artifact-first", artifactFirst = true)
+        exercise("provenance-first", artifactFirst = false)
     }
 
     @Test
@@ -887,6 +1133,25 @@ class MemoryLifecycleServiceTest {
                     createdByExperienceId = null,
                     createdAt = 10,
                 ),
+            )
+        }
+    }
+
+    private fun insertSearchArtifact(artifactId: String, memoryIds: List<String>) {
+        database.maintenanceDao().insertDerivedArtifact(
+            DerivedArtifactEntity(
+                id = artifactId,
+                artifactType = DerivedArtifactType.SEARCH_DOCUMENT,
+                state = DerivedArtifactState.INVALIDATED,
+                producerVersion = "test",
+                sourceRevision = 0,
+                createdAt = 1,
+                invalidatedAt = 1,
+            ),
+        )
+        memoryIds.forEach { memoryId ->
+            database.maintenanceDao().insertDerivedArtifactMemoryDependency(
+                DerivedArtifactMemoryDependencyEntity(artifactId, memoryId, 1),
             )
         }
     }

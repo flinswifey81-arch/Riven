@@ -192,6 +192,20 @@ class AutomaticMemoryQueueService(
         )
     }
 
+    /** Recreates the replaceable wake from the earliest durable successful completion. */
+    fun reconcileShortWindowSchedule(occurredAt: Long): RivenBackgroundScheduleResult? {
+        val completedAt = automaticMemoryDao.earliestShortWindowEligibleCompletion(
+            succeededState = AutomaticMemoryJobState.SUCCEEDED,
+            maxAttempts = MAX_AUTOMATIC_MEMORY_ATTEMPTS,
+        ) ?: return null
+        val dueAt = completedAt.saturatingAdd(
+            com.shai.riven.data.background.AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+        )
+        return scheduler.enqueueAutomaticMemoryShortWindowSweep(
+            initialDelayMs = if (dueAt <= occurredAt) 0L else dueAt - occurredAt,
+        )
+    }
+
     fun status(): AutomaticMemoryStatusSnapshot = AutomaticMemoryStatusSnapshot(
         pending = automaticMemoryDao.countInState(AutomaticMemoryJobState.PENDING),
         running = automaticMemoryDao.countInState(AutomaticMemoryJobState.RUNNING),
@@ -313,6 +327,9 @@ class AutomaticMemoryQueueService(
 
     private fun String.safeCodeFragment(): String =
         filter { it.isLetterOrDigit() || it == '_' }.ifBlank { "Exception" }.take(40)
+
+    private fun Long.saturatingAdd(increment: Long): Long =
+        if (this > Long.MAX_VALUE - increment) Long.MAX_VALUE else this + increment
 
     companion object {
         const val DISCARDED_BRANCH_CODE = "DISCARDED_REGENERATED_BRANCH"

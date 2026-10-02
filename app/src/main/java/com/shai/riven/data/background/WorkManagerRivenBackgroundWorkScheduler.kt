@@ -56,18 +56,30 @@ class WorkManagerRivenBackgroundWorkScheduler(
             uniqueWorkName = RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SWEEP,
         )
 
-    override fun enqueueAutomaticMemoryShortWindowSweep(): RivenBackgroundScheduleResult = try {
+    override fun enqueueAutomaticMemoryShortWindowSweep(
+        initialDelayMs: Long,
+    ): RivenBackgroundScheduleResult = try {
+        if (initialDelayMs < 0L) {
+            throw InvalidBackgroundWorkRequest(
+                RivenBackgroundScheduleError.InvalidWorkRequest(
+                    RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
+                    NEGATIVE_DELAY_REASON,
+                ),
+            )
+        }
         workManager.enqueueUniqueWork(
             RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SHORT_WINDOW,
             ExistingWorkPolicy.REPLACE,
             createOneTimeRequest(
                 kind = RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
-                initialDelayMs = AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+                initialDelayMs = initialDelayMs,
             ),
         )
         RivenBackgroundScheduleResult.Enqueued(
             listOf(RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SHORT_WINDOW),
         )
+    } catch (invalid: InvalidBackgroundWorkRequest) {
+        RivenBackgroundScheduleResult.Failure(invalid.error)
     } catch (failure: Exception) {
         RivenBackgroundScheduleResult.Failure(
             RivenBackgroundScheduleError.SchedulerFailure(
@@ -270,5 +282,6 @@ class WorkManagerRivenBackgroundWorkScheduler(
         const val ENSURE_PERIODIC_OPERATION = "ENSURE_PERIODIC_WORK"
         const val MISSING_TARGET_REASON = "MISSING_TARGET"
         const val UNEXPECTED_TARGET_REASON = "UNEXPECTED_TARGET"
+        const val NEGATIVE_DELAY_REASON = "NEGATIVE_INITIAL_DELAY"
     }
 }

@@ -84,8 +84,9 @@ class AutomaticMemoryJobRunner(
     private val clock: () -> Long = System::currentTimeMillis,
     private val maxAttempts: Int = com.shai.riven.data.background.MAX_AUTOMATIC_MEMORY_ATTEMPTS,
     private val runningLeaseMs: Long = com.shai.riven.data.background.AUTOMATIC_MEMORY_RUNNING_LEASE_MS,
-    /** Rearms the replaceable five-minute wake from the same completion timestamp used by due checks. */
-    private val scheduleShortWindowSweep: () -> Unit = {},
+    private val maxConsolidationPassesPerRun: Int = DEFAULT_CONSOLIDATION_PASSES_PER_RUN,
+    /** Reconciles the earliest durable five-minute wake after the completion commit. */
+    private val reconcileShortWindowSweep: (Long) -> Unit = {},
 ) : AutomaticMemoryJobOperations {
     private val dao = database.automaticMemoryDao()
     private val memoryDao = database.memoryDao()
@@ -96,6 +97,7 @@ class AutomaticMemoryJobRunner(
     init {
         require(maxAttempts > 0)
         require(runningLeaseMs > 0L)
+        require(maxConsolidationPassesPerRun > 0)
     }
 
     override suspend fun run(jobId: String): AutomaticMemoryJobRunResult {
@@ -194,21 +196,8 @@ class AutomaticMemoryJobRunner(
                 stage = AutomaticMemoryJobStage.CONSOLIDATION
             }
             if (stage == AutomaticMemoryJobStage.CONSOLIDATION) {
-                when (
-                    val result = MemoryConsolidationService(
-                        database = database,
-                        decider = model,
-                        profileId = run.profileId,
-                        clock = clock,
-                    ).consolidate()
-                ) {
-                    is MemoryConsolidationResult.Failure ->
-                        return finishStageFailure(
-                            claimed,
-                            if (result.retryable) StageFailure.Retryable(result.errorCode)
-                            else StageFailure.Permanent(result.errorCode),
-                        )
-                    else -> Unit
+                ensureConsolidation(model, run.profileId)?.let { failure ->
+                    return finishStageFailure(claimed, failure)
                 }
                 if (!advance(claimed, stage, AutomaticMemoryJobStage.COMPLETE)) {
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
@@ -320,6 +309,34 @@ class AutomaticMemoryJobRunner(
                 }
             }
         return null
+    }
+
+    private suspend fun ensureConsolidation(
+        model: AutomaticMemoryModel,
+        profileId: String,
+    ): StageFailure? {
+        val service = MemoryConsolidationService(
+            database = database,
+            decider = model,
+            profileId = profileId,
+            clock = clock,
+        )
+        repeat(maxConsolidationPassesPerRun) {
+            when (val result = service.consolidate()) {
+                is MemoryConsolidationResult.Created,
+                is MemoryConsolidationResult.Reused,
+                -> Unit
+                is MemoryConsolidationResult.NoConsolidation,
+                is MemoryConsolidationResult.AlreadyProcessed,
+                -> return null
+                is MemoryConsolidationResult.Failure -> return if (result.retryable) {
+                    StageFailure.Retryable(result.errorCode)
+                } else {
+                    StageFailure.Permanent(result.errorCode)
+                }
+            }
+        }
+        return StageFailure.Continuation(CONSOLIDATION_CONTINUATION_CODE)
     }
 
     private suspend fun sourceEligibility(job: AutomaticMemoryJobEntity): SourceEligibility {
@@ -456,8 +473,13 @@ class AutomaticMemoryJobRunner(
                 null,
             ) == 1
         ) {
-            if (dao.shortWindowEligibleJobCount(job.id, AutomaticMemoryJobState.SUCCEEDED) != 0) {
-                runCatching(scheduleShortWindowSweep)
+            if (dao.shortWindowEligibleCompletion(
+                    jobId = job.id,
+                    succeededState = AutomaticMemoryJobState.SUCCEEDED,
+                    maxAttempts = maxAttempts,
+                ) != null
+            ) {
+                runCatching { reconcileShortWindowSweep(completedAt) }
             }
             AutomaticMemoryJobRunResult.Succeeded(job.id)
         } else {
@@ -506,8 +528,30 @@ class AutomaticMemoryJobRunner(
         failure: StageFailure,
     ): AutomaticMemoryJobRunResult = when (failure) {
         is StageFailure.Excluded -> exclude(job, failure.errorCode)
+        is StageFailure.Continuation -> continueConsolidation(job, failure.errorCode)
         is StageFailure.Retryable -> fail(job, failure.errorCode, retryable = true)
         is StageFailure.Permanent -> fail(job, failure.errorCode, retryable = false)
+    }
+
+    private fun continueConsolidation(
+        job: AutomaticMemoryJobEntity,
+        reasonCode: String,
+    ): AutomaticMemoryJobRunResult {
+        val code = reasonCode.safeErrorCode()
+        val changed = dao.releaseConsolidationContinuation(
+            jobId = job.id,
+            runningState = AutomaticMemoryJobState.RUNNING,
+            pendingState = AutomaticMemoryJobState.PENDING,
+            consolidationStage = AutomaticMemoryJobStage.CONSOLIDATION,
+            expectedAttemptCount = job.attemptCount,
+            updatedAt = clock(),
+            reasonCode = code,
+        )
+        return if (changed == 1) {
+            AutomaticMemoryJobRunResult.RetryableFailure(job.id, code)
+        } else {
+            AutomaticMemoryJobRunResult.LeaseLost(job.id)
+        }
     }
 
     private fun fail(
@@ -613,11 +657,14 @@ class AutomaticMemoryJobRunner(
 
     private sealed interface StageFailure {
         data class Excluded(val errorCode: String) : StageFailure
+        data class Continuation(val errorCode: String) : StageFailure
         data class Retryable(val errorCode: String) : StageFailure
         data class Permanent(val errorCode: String) : StageFailure
     }
 
     private companion object {
         const val ATTEMPT_BUDGET_EXHAUSTED = "ATTEMPT_BUDGET_EXHAUSTED"
+        const val CONSOLIDATION_CONTINUATION_CODE = "CONSOLIDATION_CONTINUATION"
+        const val DEFAULT_CONSOLIDATION_PASSES_PER_RUN = 8
     }
 }

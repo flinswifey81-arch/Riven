@@ -64,7 +64,9 @@ interface RivenBackgroundWorkScheduler {
             ),
         )
 
-    fun enqueueAutomaticMemoryShortWindowSweep(): RivenBackgroundScheduleResult =
+    fun enqueueAutomaticMemoryShortWindowSweep(
+        initialDelayMs: Long = AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+    ): RivenBackgroundScheduleResult =
         RivenBackgroundScheduleResult.Failure(
             RivenBackgroundScheduleError.UnsupportedWorkKind(
                 RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP.name,

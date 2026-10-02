@@ -54,7 +54,7 @@ data class ConsolidationSourceMemory(
     val meaning: String,
     val certainty: MemoryCertainty,
     val sensitivity: SensitivityLevel,
-    /** AVAILABLE SUPPORTS evidence only; contradictory/qualifying rows are never promoted. */
+    /** AVAILABLE positive grounding (SUPPORTS/CORRECTS) only; negative/qualifying rows never count. */
     val sourceExperienceIds: List<String>,
     /** Exact role/basis/certainty/lineage revision of all AVAILABLE source evidence. */
     val evidenceFingerprint: String,
@@ -100,6 +100,7 @@ sealed interface OpenLoopLifecycleResult {
 
 sealed interface MemoryConsolidationResult {
     data class Created(val memoryId: String) : MemoryConsolidationResult
+    data class Reused(val memoryId: String?) : MemoryConsolidationResult
     data object NoConsolidation : MemoryConsolidationResult
     data class AlreadyProcessed(val resultMemoryId: String?) : MemoryConsolidationResult
     data class Failure(val errorCode: String, val retryable: Boolean) : MemoryConsolidationResult

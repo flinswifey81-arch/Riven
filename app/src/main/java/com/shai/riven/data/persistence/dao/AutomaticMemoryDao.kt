@@ -104,9 +104,9 @@ interface AutomaticMemoryDao {
 
     @Query(
         """
-        SELECT COUNT(*) FROM automatic_memory_jobs
-        WHERE automatic_memory_job_id = :jobId
-          AND state = :succeededState
+        SELECT MIN(updated_at) FROM automatic_memory_jobs
+        WHERE state = :succeededState
+          AND attempt_count < :maxAttempts
           AND (
               EXISTS (
                   SELECT 1 FROM experience_attention_assessments
@@ -127,10 +127,43 @@ interface AutomaticMemoryDao {
           )
         """,
     )
-    fun shortWindowEligibleJobCount(
+    fun earliestShortWindowEligibleCompletion(
+        succeededState: AutomaticMemoryJobState,
+        maxAttempts: Int,
+    ): Long?
+
+    @Query(
+        """
+        SELECT updated_at FROM automatic_memory_jobs
+        WHERE automatic_memory_job_id = :jobId
+          AND state = :succeededState
+          AND attempt_count < :maxAttempts
+          AND (
+              EXISTS (
+                  SELECT 1 FROM experience_attention_assessments
+                  WHERE experience_attention_assessments.experience_id =
+                      automatic_memory_jobs.source_experience_id
+                    AND experience_attention_assessments.outcome = 'DEFER_FOR_CONTEXT'
+              )
+              OR EXISTS (
+                  SELECT 1 FROM candidate_memory_evidence
+                  INNER JOIN candidate_memories
+                      ON candidate_memories.candidate_memory_id =
+                          candidate_memory_evidence.candidate_memory_id
+                  WHERE candidate_memory_evidence.experience_id =
+                      automatic_memory_jobs.source_experience_id
+                    AND candidate_memory_evidence.role = 'SEED'
+                    AND candidate_memories.state IN ('PENDING_CONTEXT', 'TENTATIVE')
+              )
+          )
+        LIMIT 1
+        """,
+    )
+    fun shortWindowEligibleCompletion(
         jobId: String,
         succeededState: AutomaticMemoryJobState,
-    ): Int
+        maxAttempts: Int,
+    ): Long?
 
     @Query(
         """
@@ -218,6 +251,30 @@ interface AutomaticMemoryDao {
         nextStage: AutomaticMemoryJobStage,
         expectedAttemptCount: Int,
         updatedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE automatic_memory_jobs
+        SET state = :pendingState,
+            attempt_count = attempt_count - 1,
+            updated_at = :updatedAt,
+            last_error_code = :reasonCode
+        WHERE automatic_memory_job_id = :jobId
+          AND state = :runningState
+          AND next_stage = :consolidationStage
+          AND attempt_count = :expectedAttemptCount
+          AND attempt_count > 0
+        """,
+    )
+    fun releaseConsolidationContinuation(
+        jobId: String,
+        runningState: AutomaticMemoryJobState,
+        pendingState: AutomaticMemoryJobState,
+        consolidationStage: AutomaticMemoryJobStage,
+        expectedAttemptCount: Int,
+        updatedAt: Long,
+        reasonCode: String,
     ): Int
 
     @Query(

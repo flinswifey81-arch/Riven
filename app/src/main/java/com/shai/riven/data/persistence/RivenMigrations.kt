@@ -446,6 +446,8 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
     }
 }
 
+// Schema 11 is still an unreleased feature-branch schema authored atomically from Foundation v10.
+// Databases created by intermediate v11 development builds are intentionally unsupported.
 val MIGRATION_10_11 = object : Migration(10, 11) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL(

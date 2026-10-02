@@ -2,12 +2,12 @@ package com.shai.riven.data.background
 
 import androidx.room.withTransaction
 import com.shai.riven.data.memory.isEvidenceSuppressedInCurrentTransaction
+import com.shai.riven.data.memory.isPositiveMemoryGrounding
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactPayloadEntity
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.DerivedArtifactType
-import com.shai.riven.data.persistence.model.EvidenceRole
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryTruthState
@@ -17,9 +17,10 @@ import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 
 /**
- * Rebuilds the one materialization with a truthful local producer: SEARCH_DOCUMENT. Other artifact
- * kinds require producer-specific implementations and fail explicitly instead of being marked
- * current with a generic raw-source projection.
+ * Rebuilds the one materialization with a truthful local producer: SEARCH_DOCUMENT. Conversational
+ * recall currently reads canonical Memory rows directly and does not consume this payload. SUMMARY,
+ * EMBEDDING, INDEX, and CACHE still require real producer/consumer integrations and fail explicitly
+ * instead of being marked current with a generic raw-source projection.
  */
 class DerivedArtifactRepairService(
     private val database: RivenDatabase,
@@ -100,6 +101,11 @@ class DerivedArtifactRepairService(
                             "UNSUPPORTED_ARTIFACT_TYPE_${artifact.artifactType.name}",
                         )
                     }
+                    if (hasPendingProvenance(artifact)) {
+                        return@withTransaction RepairJobHandlerResult.RetryableFailure(
+                            "WAITING_FOR_PROVENANCE",
+                        )
+                    }
                     val projection = buildSearchDocument(artifact)
                         ?: return@withTransaction RepairJobHandlerResult.PermanentFailure(
                             "NO_CURRENT_VALID_SOURCES",
@@ -147,7 +153,7 @@ class DerivedArtifactRepairService(
             ) return@mapNotNull null
             val hasSafeSupport = lifecycleDao.availableEvidence(listOf(memory.id), MAX_EVIDENCE_SCAN)
                 .asSequence()
-                .filter { it.role == EvidenceRole.SUPPORTS }
+                .filter { it.role.isPositiveMemoryGrounding() }
                 .any { evidence ->
                     !isEvidenceSuppressedInCurrentTransaction(
                         maintenanceDao,
@@ -167,6 +173,12 @@ class DerivedArtifactRepairService(
             }
         }
     }
+
+    private fun hasPendingProvenance(artifact: DerivedArtifactEntity): Boolean =
+        lifecycleDao.artifactMemoryDependencies(artifact.id).any { dependency ->
+            memoryDao.memory(dependency.memoryId)?.lifecycleState ==
+                MemoryLifecycleState.REASSESSMENT_PENDING
+        }
 
     private fun escaped(value: String): String = value
         .replace("\\", "\\\\")

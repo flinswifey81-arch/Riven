@@ -44,7 +44,7 @@ interface MemoryLifecycleDao {
           AND memories.lifecycle_state = 'VALIDATED'
           AND memories.temporal_state IN ('CURRENT', 'ATEMPORAL', 'UNKNOWN')
           AND memories.epistemic_basis != 'CONSOLIDATION'
-          AND memory_evidence.role = 'SUPPORTS'
+          AND memory_evidence.role IN ('SUPPORTS', 'CORRECTS')
           AND experiences.availability = 'AVAILABLE'
         ORDER BY memories.updated_at DESC, memories.memory_id
         LIMIT :limit
@@ -139,6 +139,13 @@ interface MemoryLifecycleDao {
     )
     fun consolidationCheckpointForSourceSet(sourceSetHash: String): ConsolidationCheckpointEntity?
 
+    @Query(
+        "SELECT * FROM consolidation_checkpoints " +
+            "WHERE result_memory_id = :memoryId AND source_set_hash IS NOT NULL " +
+            "ORDER BY created_at, checkpoint_id LIMIT 1",
+    )
+    fun consolidationCheckpointForResultMemory(memoryId: String): ConsolidationCheckpointEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsertOpenLoopCheckpoint(value: OpenLoopPassCheckpointEntity)
 
@@ -171,6 +178,62 @@ interface MemoryLifecycleDao {
     fun unresolvedOpenLoopPage(
         states: List<OpenLoopState>,
         afterOpenLoopId: String,
+        limit: Int,
+    ): List<OpenLoopEntity>
+
+    @Query(
+        """
+        SELECT open_loops.* FROM open_loops
+        INNER JOIN experiences ON experiences.experience_id = open_loops.creation_experience_id
+        WHERE open_loops.state IN (:states)
+          AND experiences.availability = 'AVAILABLE'
+          AND instr(
+              lower(open_loops.title || ' ' || ifnull(open_loops.description, '')),
+              lower(:term)
+          ) > 0
+        ORDER BY open_loops.updated_at DESC, open_loops.open_loop_id
+        LIMIT :limit
+        """,
+    )
+    fun unresolvedOpenLoopsMatchingTerm(
+        states: List<OpenLoopState>,
+        term: String,
+        limit: Int,
+    ): List<OpenLoopEntity>
+
+    @Query(
+        """
+        SELECT DISTINCT open_loops.* FROM open_loops
+        INNER JOIN experiences ON experiences.experience_id = open_loops.creation_experience_id
+        INNER JOIN open_loop_entity_links
+            ON open_loop_entity_links.open_loop_id = open_loops.open_loop_id
+        WHERE open_loops.state IN (:states)
+          AND experiences.availability = 'AVAILABLE'
+          AND open_loop_entity_links.entity_id IN (:entityIds)
+        ORDER BY open_loops.updated_at DESC, open_loops.open_loop_id
+        LIMIT :limit
+        """,
+    )
+    fun unresolvedOpenLoopsForEntities(
+        states: List<OpenLoopState>,
+        entityIds: List<String>,
+        limit: Int,
+    ): List<OpenLoopEntity>
+
+    @Query(
+        """
+        SELECT open_loops.* FROM open_loops
+        INNER JOIN experiences ON experiences.experience_id = open_loops.creation_experience_id
+        WHERE open_loops.state IN (:states)
+          AND experiences.availability = 'AVAILABLE'
+          AND open_loops.open_loop_id IN (:openLoopIds)
+        ORDER BY open_loops.updated_at DESC, open_loops.open_loop_id
+        LIMIT :limit
+        """,
+    )
+    fun unresolvedOpenLoopsByIds(
+        states: List<OpenLoopState>,
+        openLoopIds: List<String>,
         limit: Int,
     ): List<OpenLoopEntity>
 
