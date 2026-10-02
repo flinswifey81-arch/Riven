@@ -308,14 +308,32 @@ private fun PermissionPanel(
 ) {
     GatsbyCard {
         Text("ANDROID DELIVERY STATUS", color = MutedGold, fontWeight = FontWeight.Bold)
+        val notificationsAvailable = permissions.notificationPermissionGranted &&
+            permissions.notificationsEnabled
         PermissionRow(
-            label = "Notifications",
-            allowed = permissions.notificationPermissionGranted && permissions.notificationsEnabled,
-            deniedText = if (!permissions.notificationPermissionGranted) "Permission required" else "Disabled in settings",
+            label = "Reminder notifications",
+            allowed = notificationsAvailable && permissions.reminderChannelEnabled,
+            deniedText = when {
+                !permissions.notificationPermissionGranted -> "Permission required"
+                !permissions.notificationsEnabled -> "App notifications disabled"
+                else -> "Reminder channel disabled"
+            },
+        )
+        PermissionRow(
+            label = "Alarm controls",
+            allowed = notificationsAvailable && permissions.alarmChannelEnabled,
+            deniedText = when {
+                !permissions.notificationPermissionGranted -> "Permission required"
+                !permissions.notificationsEnabled -> "App notifications disabled"
+                else -> "Alarm channel disabled"
+            },
         )
         if (!permissions.notificationPermissionGranted) {
             OutlinedButton(onClick = onRequestNotifications) { Text("Request notification permission") }
-        } else if (!permissions.notificationsEnabled) {
+        } else if (!permissions.notificationsEnabled ||
+            !permissions.reminderChannelEnabled ||
+            !permissions.alarmChannelEnabled
+        ) {
             OutlinedButton(onClick = onOpenNotificationSettings) { Text("Open notification settings") }
         }
         PermissionRow(

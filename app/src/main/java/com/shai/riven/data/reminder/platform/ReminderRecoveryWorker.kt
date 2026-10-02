@@ -7,7 +7,6 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
-import com.shai.riven.data.reminder.ReminderDeliveryMode
 
 class ReminderRecoveryWorker(
     appContext: Context,
@@ -26,20 +25,12 @@ class ReminderRecoveryWorker(
                 val token = reminder.deliveryToken ?: return@forEach
                 val ringUntilAt = reminder.ringUntilAt ?: 0L
                 if (ringUntilAt <= System.currentTimeMillis()) {
-                    val delivered = runtime.repository.markRingingAudioStopped(
+                    val delivering = runtime.repository.prepareRingingTimeoutNotification(
                         reminder.id,
                         reminder.scheduleRevision,
                         token,
                     ) ?: return@forEach
-                    val permissions = ReminderPermissionInspector(applicationContext).snapshot()
-                    if (permissions.notificationPermissionGranted &&
-                        permissions.notificationsEnabled &&
-                        permissions.channelEnabled(ReminderDeliveryMode.NOTIFICATION)
-                    ) {
-                        runtime.notifier.postReminder(delivered, token)
-                    } else {
-                        runtime.notifier.cancel(reminder.id)
-                    }
+                    dispatcher.recoverPending(delivering)
                 } else {
                     dispatcher.recoverPending(reminder)
                 }

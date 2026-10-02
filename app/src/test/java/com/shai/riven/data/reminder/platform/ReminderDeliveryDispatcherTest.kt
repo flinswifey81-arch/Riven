@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.reminder.ReminderDeliveryMode
+import com.shai.riven.data.reminder.ReminderDeliveryClaim
 import com.shai.riven.data.reminder.ReminderDraft
 import com.shai.riven.data.reminder.ReminderFailureCode
 import com.shai.riven.data.reminder.ReminderOperationResult
@@ -132,6 +133,55 @@ class ReminderDeliveryDispatcherTest {
         assertNotEquals(0, notification.flags and Notification.FLAG_ONLY_ALERT_ONCE)
     }
 
+    @Test
+    fun deathDuringAlarmTimeoutHandoffRecoversDurableNotificationOutbox() = runBlocking {
+        val created = createAlarm("timeout handoff")
+        val claim = repository.claimDelivery(
+            created.id,
+            created.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+        val delivering = checkNotNull(repository.prepareRingingTimeoutNotification(
+            created.id,
+            created.scheduleRevision,
+            claim.deliveryToken,
+        ))
+        val interrupted = dispatcher().apply {
+            hooks = ReminderDeliveryDispatchHooks(
+                afterNotificationPostedBeforeAck = { throw SimulatedDeath() },
+            )
+        }
+
+        assertEquals(ReminderStatus.DELIVERING, delivering.status)
+        assertSimulatedDeath { interrupted.recoverPending(delivering) }
+        assertEquals(ReminderStatus.DELIVERING, current(created.id).status)
+        assertEquals(1, sink.reminderPosts)
+
+        dispatcher().recoverPending(repository.pendingNotificationDeliveries().single())
+
+        assertEquals(2, sink.reminderPosts)
+        assertEquals(ReminderStatus.DELIVERED, current(created.id).status)
+    }
+
+    @Test
+    fun failedAlarmTimeoutNotificationIsNotSilentlyAcknowledged() = runBlocking {
+        val created = createAlarm("failed timeout handoff")
+        val claim = repository.claimDelivery(
+            created.id,
+            created.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+        val delivering = checkNotNull(repository.prepareRingingTimeoutNotification(
+            created.id,
+            created.scheduleRevision,
+            claim.deliveryToken,
+        ))
+        sink.reminderPostSucceeds = false
+
+        dispatcher().recoverPending(delivering)
+
+        assertEquals(ReminderStatus.FAILED, current(created.id).status)
+        assertEquals(1, sink.reminderPosts)
+    }
+
     private suspend fun createNotification(title: String): ReminderSnapshot =
         (repository.create(
             ReminderDraft(
@@ -140,6 +190,17 @@ class ReminderDeliveryDispatcherTest {
                 zoneId = ZoneOffset.UTC,
                 timeZonePolicy = ReminderTimeZonePolicy.FIXED_ZONE,
                 deliveryMode = ReminderDeliveryMode.NOTIFICATION,
+            ),
+        ) as ReminderOperationResult.Success).reminder
+
+    private suspend fun createAlarm(title: String): ReminderSnapshot =
+        (repository.create(
+            ReminderDraft(
+                title = title,
+                localDateTime = LocalDateTime.parse("2026-10-04T09:00:00"),
+                zoneId = ZoneOffset.UTC,
+                timeZonePolicy = ReminderTimeZonePolicy.FIXED_ZONE,
+                deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM,
             ),
         ) as ReminderOperationResult.Success).reminder
 
@@ -168,12 +229,13 @@ class ReminderDeliveryDispatcherTest {
 
     private class RecordingNotificationSink : ReminderNotificationSink {
         var reminderPosts = 0
+        var reminderPostSucceeds = true
         val postedIds = mutableListOf<String>()
 
         override fun postReminder(reminder: ReminderSnapshot, deliveryToken: String): Boolean {
             reminderPosts++
             postedIds += reminder.id
-            return true
+            return reminderPostSucceeds
         }
 
         override fun postAlarm(reminder: ReminderSnapshot, deliveryToken: String): Boolean = true

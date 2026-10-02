@@ -105,15 +105,42 @@ interface ReminderDao {
             updated_at = :finishedAt
         WHERE reminder_id = :reminderId
           AND schedule_revision = :expectedRevision
+          AND status = :expectedStatus
+          AND delivery_token IS :expectedDeliveryToken
           AND status IN ('SCHEDULED', 'SNOOZED', 'DELIVERING', 'RINGING', 'DELIVERED', 'FAILED')
         """,
     )
-    suspend fun finishActive(
+    suspend fun finishActiveRow(
         reminderId: String,
         expectedRevision: Long,
+        expectedStatus: String,
+        expectedDeliveryToken: String?,
         newStatus: String,
         finishedAt: Long,
     ): Int
+
+    @Transaction
+    suspend fun finishActiveIfCurrent(
+        expected: LocalReminderEntity,
+        newStatus: String,
+        finishedAt: Long,
+    ): LocalReminderEntity? {
+        val current = reminder(expected.id) ?: return null
+        if (!current.sameMutationVersion(expected)) return null
+        return if (finishActiveRow(
+                reminderId = current.id,
+                expectedRevision = current.scheduleRevision,
+                expectedStatus = current.status,
+                expectedDeliveryToken = current.deliveryToken,
+                newStatus = newStatus,
+                finishedAt = finishedAt,
+            ) == 1
+        ) {
+            current
+        } else {
+            null
+        }
+    }
 
     @Query(
         """
@@ -239,7 +266,7 @@ interface ReminderDao {
     @Query(
         """
         UPDATE local_reminders
-        SET status = 'DELIVERED',
+        SET status = 'DELIVERING',
             ring_until_at = NULL,
             updated_at = :now
         WHERE reminder_id = :reminderId
@@ -248,7 +275,7 @@ interface ReminderDao {
           AND status = 'RINGING'
         """,
     )
-    suspend fun markRingingDelivered(
+    suspend fun markRingingReadyForNotification(
         reminderId: String,
         scheduleRevision: Long,
         deliveryToken: String,
@@ -292,11 +319,11 @@ interface ReminderDao {
 
     @Transaction
     suspend fun replaceActiveIfCurrent(
-        expectedRevision: Long,
+        expected: LocalReminderEntity,
         replacement: LocalReminderEntity,
-    ): Boolean {
-        val current = reminder(replacement.id) ?: return false
-        if (current.scheduleRevision != expectedRevision ||
+    ): LocalReminderEntity? {
+        val current = reminder(replacement.id) ?: return null
+        if (!current.sameMutationVersion(expected) ||
             current.status !in setOf(
                 "SCHEDULED",
                 "SNOOZED",
@@ -305,12 +332,18 @@ interface ReminderDao {
                 "DELIVERED",
                 "FAILED",
             ) ||
-            replacement.scheduleRevision != expectedRevision + 1
+            replacement.scheduleRevision != current.scheduleRevision + 1
         ) {
-            return false
+            return null
         }
-        return updateReminder(replacement) == 1
+        return if (updateReminder(replacement) == 1) current else null
     }
+
+    private fun LocalReminderEntity.sameMutationVersion(expected: LocalReminderEntity): Boolean =
+        id == expected.id &&
+            scheduleRevision == expected.scheduleRevision &&
+            status == expected.status &&
+            deliveryToken == expected.deliveryToken
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertFeatureControl(control: ReminderFeatureControlEntity)

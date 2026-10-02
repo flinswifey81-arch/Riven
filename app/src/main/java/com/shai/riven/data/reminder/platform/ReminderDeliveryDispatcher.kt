@@ -41,7 +41,12 @@ internal class ReminderDeliveryDispatcher(
     }
 
     private suspend fun dispatchClaimed(reminder: ReminderSnapshot, deliveryToken: String) {
-        permissionFailure(reminder.deliveryMode, permissions.snapshot())?.let { (code, detail) ->
+        val dispatchMode = if (reminder.status == ReminderStatus.DELIVERING) {
+            ReminderDeliveryMode.NOTIFICATION
+        } else {
+            reminder.deliveryMode
+        }
+        permissionFailure(dispatchMode, permissions.snapshot())?.let { (code, detail) ->
             repository.failClaimedDelivery(
                 reminder.id,
                 reminder.scheduleRevision,
@@ -56,9 +61,8 @@ internal class ReminderDeliveryDispatcher(
             reminder.scheduleRevision,
             deliveryToken,
         ) ?: return
-        when (reminder.deliveryMode) {
-            ReminderDeliveryMode.NOTIFICATION -> {
-                if (current.status != ReminderStatus.DELIVERING) return
+        when (current.status) {
+            ReminderStatus.DELIVERING -> {
                 if (!notifier.postReminder(current, deliveryToken)) {
                     repository.failClaimedDelivery(
                         current.id,
@@ -88,8 +92,7 @@ internal class ReminderDeliveryDispatcher(
                     notifier.cancel(current.id)
                 }
             }
-            ReminderDeliveryMode.AUDIBLE_ALARM -> {
-                if (current.status != ReminderStatus.RINGING) return
+            ReminderStatus.RINGING -> {
                 if (!notifier.postAlarm(current, deliveryToken)) {
                     repository.failClaimedDelivery(
                         current.id,
@@ -132,6 +135,7 @@ internal class ReminderDeliveryDispatcher(
                     stopAlarmSession(current.id, deliveryToken)
                 }
             }
+            else -> Unit
         }
     }
 

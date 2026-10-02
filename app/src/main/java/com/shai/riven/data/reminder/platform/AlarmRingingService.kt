@@ -4,7 +4,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
-import com.shai.riven.data.reminder.ReminderDeliveryMode
+import com.shai.riven.data.reminder.ReminderFailureCode
 import com.shai.riven.data.reminder.ReminderSnapshot
 import com.shai.riven.data.reminder.ReminderSoundKind
 import com.shai.riven.data.reminder.ReminderStatus
@@ -13,10 +13,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal data class AlarmDeliveryKey(val reminderId: String, val deliveryToken: String)
 
@@ -64,6 +66,54 @@ internal class AlarmSessionArbiter<K, V> {
     fun isEmpty(): Boolean = queued.isEmpty()
 }
 
+/** Service-level ownership for async validation, foreground startup, and queued sessions. */
+internal class AlarmServiceLifecycle<K, V>(private val keyOf: (V) -> K) {
+    private val sessions = AlarmSessionArbiter<K, V>()
+    private var pendingOperations = 0
+
+    val activeKey: K?
+        get() = sessions.activeKey
+
+    fun operationStarted() {
+        pendingOperations++
+    }
+
+    fun operationFinished(): Boolean {
+        check(pendingOperations > 0)
+        pendingOperations--
+        return shouldStop()
+    }
+
+    fun enqueue(key: K, value: V): Boolean = sessions.enqueue(key, value)
+
+    fun startNext(
+        startForeground: (V) -> Unit,
+        onForegroundFailure: (V, RuntimeException) -> Unit,
+    ): V? {
+        if (sessions.activeKey != null) return null
+        while (true) {
+            val next = sessions.activateNext() ?: return null
+            try {
+                startForeground(next)
+                return next
+            } catch (failure: RuntimeException) {
+                sessions.complete(keyOf(next))
+                onForegroundFailure(next, failure)
+            }
+        }
+    }
+
+    fun isActive(key: K): Boolean = sessions.isActive(key)
+
+    fun removeQueued(key: K): V? = sessions.removeQueued(key)
+
+    fun complete(key: K): Boolean = sessions.complete(key)
+
+    fun clear() = sessions.clear()
+
+    fun shouldStop(): Boolean = pendingOperations == 0 && sessions.isEmpty()
+}
+
 /** Process-local targeted control. If the process is gone, no audio can be active. */
 internal object AlarmPlaybackControl {
     @Volatile
@@ -85,7 +135,7 @@ internal object AlarmPlaybackControl {
 class AlarmRingingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessionGuard = Any()
-    private val sessions = AlarmSessionArbiter<AlarmDeliveryKey, AlarmSession>()
+    private val lifecycle = AlarmServiceLifecycle<AlarmDeliveryKey, AlarmSession>(AlarmSession::key)
     private lateinit var runtime: ReminderRuntime
     private lateinit var audio: AlarmAudioLifecycle
     private var activeJob: Job? = null
@@ -100,56 +150,88 @@ class AlarmRingingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val start = intent?.toAlarmStart() ?: return stopInvalid(startId)
+        val start = intent?.toAlarmStart() ?: return stopInvalid()
+        synchronized(sessionGuard) { lifecycle.operationStarted() }
         scope.launch {
-            val current = runtime.repository.isCurrentDelivery(
-                start.key.reminderId,
-                start.scheduleRevision,
-                start.key.deliveryToken,
-            )
-            if (current?.status != ReminderStatus.RINGING ||
-                current.ringUntilAt != start.ringUntilAt
-            ) {
-                runtime.notifier.cancel(start.key.reminderId)
-                stopSelf(startId)
-                return@launch
+            try {
+                val current = runtime.repository.isCurrentDelivery(
+                    start.key.reminderId,
+                    start.scheduleRevision,
+                    start.key.deliveryToken,
+                )
+                if (current?.status != ReminderStatus.RINGING ||
+                    current.ringUntilAt != start.ringUntilAt
+                ) {
+                    dropInvalidStart(start.key)
+                    return@launch
+                }
+                enqueue(
+                    AlarmSession(
+                        key = start.key,
+                        scheduleRevision = start.scheduleRevision,
+                        ringUntilAt = start.ringUntilAt,
+                        reminder = current,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: RuntimeException) {
+                terminalizeStartFailure(start, failure)
+            } finally {
+                synchronized(sessionGuard) {
+                    lifecycle.operationFinished()
+                    stopIfIdleLocked()
+                }
             }
-            enqueue(
-                AlarmSession(
-                    key = start.key,
-                    scheduleRevision = start.scheduleRevision,
-                    ringUntilAt = start.ringUntilAt,
-                    reminder = current,
-                ),
-            )
         }
         return START_NOT_STICKY
     }
 
     private fun enqueue(session: AlarmSession) {
         synchronized(sessionGuard) {
-            if (!sessions.enqueue(session.key, session)) return
+            if (!lifecycle.enqueue(session.key, session)) return
             runtime.notifier.postAlarm(session.reminder, session.key.deliveryToken)
             launchNextLocked()
         }
     }
 
     private fun launchNextLocked() {
-        if (sessions.activeKey != null) return
-        val next = sessions.activateNext()
+        if (lifecycle.activeKey != null) return
+        val next = lifecycle.startNext(
+            startForeground = { session ->
+                startForeground(
+                    runtime.notifier.notificationId(session.key.reminderId),
+                    runtime.notifier.alarmNotification(session.reminder, session.key.deliveryToken),
+                )
+                foregroundStarted = true
+            },
+            onForegroundFailure = { session, failure ->
+                lifecycle.operationStarted()
+                scope.launch {
+                    try {
+                        withContext(NonCancellable) {
+                            runtime.repository.failClaimedDelivery(
+                                reminderId = session.key.reminderId,
+                                scheduleRevision = session.scheduleRevision,
+                                deliveryToken = session.key.deliveryToken,
+                                code = ReminderFailureCode.SCHEDULER_FAILURE,
+                                detail = "Android could not enter foreground alarm playback: " +
+                                    "${failure::class.java.simpleName}.",
+                            )
+                        }
+                    } finally {
+                        synchronized(sessionGuard) {
+                            lifecycle.operationFinished()
+                            stopIfIdleLocked()
+                        }
+                    }
+                }
+            },
+        )
         if (next == null) {
-            if (foregroundStarted) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                foregroundStarted = false
-            }
-            stopSelf()
+            stopIfIdleLocked()
             return
         }
-        startForeground(
-            runtime.notifier.notificationId(next.key.reminderId),
-            runtime.notifier.alarmNotification(next.reminder, next.key.deliveryToken),
-        )
-        foregroundStarted = true
         activeJob = scope.launch { runSession(next) }
     }
 
@@ -179,8 +261,13 @@ class AlarmRingingService : Service() {
         } finally {
             audio.stop()
             wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
-            if (expired) finishExpiredSession(session)
-            finishSession(session.key)
+            try {
+                if (expired) {
+                    withContext(NonCancellable) { finishExpiredSession(session) }
+                }
+            } finally {
+                finishSession(session.key)
+            }
         }
     }
 
@@ -210,25 +297,17 @@ class AlarmRingingService : Service() {
     }
 
     private suspend fun finishExpiredSession(session: AlarmSession) {
-        val delivered = runtime.repository.markRingingAudioStopped(
+        val delivering = runtime.repository.prepareRingingTimeoutNotification(
             session.key.reminderId,
             session.scheduleRevision,
             session.key.deliveryToken,
         ) ?: return
-        val permissions = ReminderPermissionInspector(this).snapshot()
-        if (permissions.notificationPermissionGranted &&
-            permissions.notificationsEnabled &&
-            permissions.channelEnabled(ReminderDeliveryMode.NOTIFICATION)
-        ) {
-            runtime.notifier.postReminder(delivered, session.key.deliveryToken)
-        } else {
-            runtime.notifier.cancel(delivered.id)
-        }
+        ReminderDeliveryDispatcher.create(this, runtime).recoverPending(delivering)
     }
 
     private fun finishSession(key: AlarmDeliveryKey) {
         synchronized(sessionGuard) {
-            if (sessions.complete(key)) {
+            if (lifecycle.complete(key)) {
                 activeJob = null
             }
             launchNextLocked()
@@ -239,11 +318,11 @@ class AlarmRingingService : Service() {
         val key = AlarmDeliveryKey(reminderId, deliveryToken)
         val job = synchronized(sessionGuard) {
             when {
-                sessions.isActive(key) -> {
+                lifecycle.isActive(key) -> {
                     runtime.notifier.cancel(reminderId)
                     activeJob
                 }
-                sessions.removeQueued(key) != null -> {
+                lifecycle.removeQueued(key) != null -> {
                     runtime.notifier.cancel(reminderId)
                     null
                 }
@@ -256,7 +335,7 @@ class AlarmRingingService : Service() {
 
     override fun onDestroy() {
         AlarmPlaybackControl.unregister(stopHandler)
-        synchronized(sessionGuard) { sessions.clear() }
+        synchronized(sessionGuard) { lifecycle.clear() }
         activeJob?.cancel()
         scope.cancel()
         audio.stop()
@@ -272,9 +351,32 @@ class AlarmRingingService : Service() {
         .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:RivenAlarm:${key.reminderId}")
         .apply { acquire(remaining + WAKE_LOCK_MARGIN_MILLIS) }
 
-    private fun stopInvalid(startId: Int): Int {
-        stopSelf(startId)
+    private fun stopInvalid(): Int {
+        synchronized(sessionGuard) { stopIfIdleLocked() }
         return START_NOT_STICKY
+    }
+
+    private fun dropInvalidStart(key: AlarmDeliveryKey) {
+        stopSession(key.reminderId, key.deliveryToken)
+    }
+
+    private suspend fun terminalizeStartFailure(start: AlarmStart, failure: RuntimeException) {
+        runtime.repository.failClaimedDelivery(
+            reminderId = start.key.reminderId,
+            scheduleRevision = start.scheduleRevision,
+            deliveryToken = start.key.deliveryToken,
+            code = ReminderFailureCode.SCHEDULER_FAILURE,
+            detail = "Alarm playback validation failed with ${failure::class.java.simpleName}.",
+        )
+    }
+
+    private fun stopIfIdleLocked() {
+        if (!lifecycle.shouldStop()) return
+        if (foregroundStarted) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            foregroundStarted = false
+        }
+        stopSelf()
     }
 
     private fun Intent.toAlarmStart(): AlarmStart? {

@@ -1,7 +1,11 @@
 package com.shai.riven.data.archive
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import androidx.room.testing.MigrationTestHelper
+import androidx.sqlite.driver.AndroidSQLiteDriver
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.work.ListenableWorker
 import androidx.work.testing.TestListenableWorkerBuilder
 import com.shai.riven.RivenApplication
@@ -63,8 +67,21 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = android.app.Application::class)
 class RivenRestoreBootstrapTest {
+    private companion object {
+        const val V1_REMINDER_FIXTURE_DATABASE = "restore-bootstrap-reminder-v1.db"
+    }
+
     @get:Rule
     val temporaryFolder = TemporaryFolder()
+
+    @get:Rule
+    val reminderMigrationHelper = MigrationTestHelper(
+        instrumentation = InstrumentationRegistry.getInstrumentation(),
+        file = InstrumentationRegistry.getInstrumentation().targetContext
+            .getDatabasePath(V1_REMINDER_FIXTURE_DATABASE),
+        driver = AndroidSQLiteDriver(),
+        databaseClass = ReminderDatabase::class,
+    )
 
     private lateinit var context: Context
     private lateinit var root: File
@@ -159,6 +176,54 @@ class RivenRestoreBootstrapTest {
 
         assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
         assertEquals("SCHEDULED", canonicalReminderStatus("local-reminder"))
+    }
+
+    @Test
+    fun stagedJournalMigratesVersionOnePendingReminderDatabaseBeforeInstall() {
+        stageValidArchive()
+        replaceWithVersionOneReminderDatabase(paths.pendingReminderDatabase, "v1-staged")
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertEquals(2, reminderDatabaseVersion(paths.canonicalReminderDatabase))
+        assertEquals("SCHEDULED", canonicalReminderStatus("v1-staged"))
+    }
+
+    @Test
+    fun currentMovedAsideFreshInstallMigratesVersionOnePendingReminderDatabase() {
+        stageValidArchive()
+        replaceWithVersionOneReminderDatabase(paths.pendingReminderDatabase, "v1-current-moved")
+        val record = checkNotNull(journal().read())
+        journal().write(record.copy(stage = RivenRestoreJournalStage.CURRENT_MOVED_ASIDE))
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertEquals(2, reminderDatabaseVersion(paths.canonicalReminderDatabase))
+        assertEquals("SCHEDULED", canonicalReminderStatus("v1-current-moved"))
+    }
+
+    @Test
+    fun rollingBackJournalMigratesVersionOneRollbackReminderDatabase() {
+        prepareOldState()
+        replaceWithVersionOneReminderDatabase(paths.canonicalReminderDatabase, "v1-rollback")
+        stageValidArchive()
+        val record = checkNotNull(journal().read())
+        moveOldStateToRollback()
+        journal().write(
+            record.copy(
+                stage = RivenRestoreJournalStage.ROLLING_BACK,
+                hadDatabase = true,
+                hadReminderDatabase = true,
+            ),
+        )
+
+        val result = bootstrap().recoverAndApply()
+
+        assertTrue(result is RivenRestoreBootstrapResult.PreviousStateRestored)
+        assertEquals(2, reminderDatabaseVersion(paths.canonicalReminderDatabase))
+        assertEquals("SCHEDULED", canonicalReminderStatus("v1-rollback"))
     }
 
     @Test
@@ -814,6 +879,44 @@ class RivenRestoreBootstrapTest {
 
     private fun insertSourceReminder(id: String, status: String, deliveryToken: String?) {
         insertReminder(sourceReminderDatabase, id, status, deliveryToken)
+    }
+
+    private fun replaceWithVersionOneReminderDatabase(target: File, reminderId: String) {
+        context.deleteDatabase(V1_REMINDER_FIXTURE_DATABASE)
+        reminderMigrationHelper.createDatabase(1).apply {
+            prepare(
+                "INSERT INTO local_reminders (reminder_id, title, note, feature_key, " +
+                    "delivery_mode, sound_kind, custom_sound_uri, requested_local_date_time, " +
+                    "time_zone_id, time_zone_policy, requested_trigger_at, scheduled_trigger_at, " +
+                    "status, schedule_revision, delivery_token, last_failure_code, " +
+                    "last_failure_detail, created_at, updated_at, finished_at) " +
+                    "VALUES (?, ?, NULL, 'REMINDERS', 'NOTIFICATION', 'SYSTEM_DEFAULT', NULL, " +
+                    "'2026-10-04T09:00', 'UTC', 'FIXED_ZONE', 1000, 1000, 'SCHEDULED', " +
+                    "1, NULL, NULL, NULL, 1, 1, NULL)",
+            ).use { statement ->
+                statement.bindText(1, reminderId)
+                statement.bindText(2, reminderId)
+                statement.step()
+            }
+            close()
+        }
+        val fixture = context.getDatabasePath(V1_REMINDER_FIXTURE_DATABASE)
+        target.parentFile?.mkdirs()
+        check(fixture.copyTo(target, overwrite = true).isFile)
+        File(target.path + "-wal").delete()
+        File(target.path + "-shm").delete()
+        context.deleteDatabase(V1_REMINDER_FIXTURE_DATABASE)
+    }
+
+    private fun reminderDatabaseVersion(database: File): Int = SQLiteDatabase.openDatabase(
+        database.absolutePath,
+        null,
+        SQLiteDatabase.OPEN_READONLY,
+    ).use { sqlite ->
+        sqlite.rawQuery("PRAGMA user_version", null).use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getInt(0)
+        }
     }
 
     private fun insertCanonicalReminder(id: String, status: String, deliveryToken: String?) {
