@@ -8,6 +8,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.shai.riven.data.reminder.ReminderRepository
+import com.shai.riven.data.reset.RivenStartupMutationGate
 
 internal class ReminderRecoveryCoordinator(
     private val repository: ReminderRepository,
@@ -40,12 +41,17 @@ class ReminderRecoveryWorker(
     appContext: Context,
     workerParams: WorkerParameters,
 ) : CoroutineWorker(appContext, workerParams) {
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = runRecovery {
         val reason = inputData.getString(INPUT_REASON) ?: "unspecified"
+        val runtime = ReminderRuntime.from(applicationContext)
+        val dispatcher = ReminderDeliveryDispatcher.create(applicationContext, runtime)
+        ReminderRecoveryCoordinator(runtime.repository, dispatcher).recover(reason)
+    }
+
+    internal suspend fun runRecovery(recover: suspend () -> Unit): Result {
+        if (RivenStartupMutationGate.isPending(applicationContext)) return Result.retry()
         return try {
-            val runtime = ReminderRuntime.from(applicationContext)
-            val dispatcher = ReminderDeliveryDispatcher.create(applicationContext, runtime)
-            ReminderRecoveryCoordinator(runtime.repository, dispatcher).recover(reason)
+            recover()
             Result.success()
         } catch (_: Exception) {
             Result.retry()

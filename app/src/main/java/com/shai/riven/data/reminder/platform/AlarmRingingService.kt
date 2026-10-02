@@ -8,6 +8,7 @@ import com.shai.riven.data.reminder.ReminderFailureCode
 import com.shai.riven.data.reminder.ReminderSnapshot
 import com.shai.riven.data.reminder.ReminderSoundKind
 import com.shai.riven.data.reminder.ReminderStatus
+import com.shai.riven.data.reset.RivenStartupMutationGate
 import java.util.LinkedHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -140,16 +141,26 @@ class AlarmRingingService : Service() {
     private lateinit var audio: AlarmAudioLifecycle
     private var activeJob: Job? = null
     private var foregroundStarted = false
+    private var startupMutationBlocked = false
     private val stopHandler: (String, String) -> Unit = ::stopSession
 
     override fun onCreate() {
         super.onCreate()
+        if (RivenStartupMutationGate.isPending(this)) {
+            startupMutationBlocked = true
+            stopSelf()
+            return
+        }
         runtime = ReminderRuntime.from(this)
         audio = AlarmAudioLifecycle(AlarmAudioEngineProvider.factory(this))
         AlarmPlaybackControl.register(stopHandler)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (startupMutationBlocked || RivenStartupMutationGate.isPending(this)) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val start = intent?.toAlarmStart() ?: return stopInvalid()
         synchronized(sessionGuard) { lifecycle.operationStarted() }
         scope.launch {
@@ -338,7 +349,7 @@ class AlarmRingingService : Service() {
         synchronized(sessionGuard) { lifecycle.clear() }
         activeJob?.cancel()
         scope.cancel()
-        audio.stop()
+        if (::audio.isInitialized) audio.stop()
         super.onDestroy()
     }
 

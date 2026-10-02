@@ -3,6 +3,7 @@ package com.shai.riven.data.reminder.platform
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.shai.riven.data.reset.RivenStartupMutationGate
 import java.time.Duration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,12 +13,14 @@ import kotlinx.coroutines.launch
 class ReminderDeliveryReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ReminderIntents.ACTION_DELIVER) return
+        if (RivenStartupMutationGate.isPending(context)) return
         val reminderId = intent.getStringExtra(ReminderIntents.EXTRA_REMINDER_ID) ?: return
         val revision = intent.getLongExtra(ReminderIntents.EXTRA_SCHEDULE_REVISION, -1)
         if (revision < 0) return
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
+                if (RivenStartupMutationGate.isPending(context)) return@launch
                 val runtime = ReminderRuntime.from(context)
                 ReminderDeliveryDispatcher.create(context, runtime)
                     .dispatchScheduled(reminderId, revision)
@@ -30,6 +33,7 @@ class ReminderDeliveryReceiver : BroadcastReceiver() {
 
 class ReminderActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (RivenStartupMutationGate.isPending(context)) return
         val reminderId = intent.getStringExtra(ReminderIntents.EXTRA_REMINDER_ID) ?: return
         val deliveryToken = intent.getStringExtra(ReminderIntents.EXTRA_DELIVERY_TOKEN) ?: return
         val scheduleRevision = intent.getLongExtra(ReminderIntents.EXTRA_SCHEDULE_REVISION, -1)
@@ -37,6 +41,7 @@ class ReminderActionReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
+                if (RivenStartupMutationGate.isPending(context)) return@launch
                 val runtime = ReminderRuntime.from(context)
                 // Repository CAS commits first; targeted effects cancel only this token.
                 when (intent.action) {
@@ -69,6 +74,7 @@ class ReminderActionReceiver : BroadcastReceiver() {
 
 class ReminderRecoveryReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (RivenStartupMutationGate.isPending(context)) return
         ReminderRecoveryScheduler.enqueue(context, intent.action ?: "system_broadcast")
     }
 }
