@@ -35,6 +35,20 @@ class ArcadeModelsTest {
     }
 
     @Test
+    fun stackerCatalogCopyDoesNotSelectAnUnconfirmedRuleset() {
+        val stackerCopy = listOf(
+            ArcadeGame.STACKER.eyebrow,
+            ArcadeGame.STACKER.description,
+            ArcadeGame.STACKER.commentary,
+        ).joinToString(" ").lowercase()
+
+        assertTrue(stackerCopy.contains("confirmed stacker ruleset"))
+        listOf("tower", "line clear", "falling", "drop block", "timing", "physics").forEach { claim ->
+            assertFalse(stackerCopy.contains(claim))
+        }
+    }
+
+    @Test
     fun openingConversationPausesSoloAndWaitsSharedTable() {
         val solo = reduceArcadeState(
             ArcadeUiState(selectedGameId = ArcadeGame.HEART_MATCH.gameId),

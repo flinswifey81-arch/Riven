@@ -6,8 +6,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,13 +19,17 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,13 +58,18 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -122,6 +134,7 @@ fun ArcadeExperience(
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val lobbyListState = rememberLazyListState()
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -133,7 +146,7 @@ fun ArcadeExperience(
     ) {
         val selectedGame = state.selectedGame
         if (selectedGame == null) {
-            ArcadeLobby(state = state, onAction = onAction)
+            ArcadeLobby(state = state, listState = lobbyListState, onAction = onAction)
         } else {
             ArcadeGameScreen(game = selectedGame, state = state, onAction = onAction)
         }
@@ -147,9 +160,11 @@ fun ArcadeExperience(
 @Composable
 private fun ArcadeLobby(
     state: ArcadeUiState,
+    listState: LazyListState,
     onAction: (ArcadeAction) -> Unit,
 ) {
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .testTag("arcade_catalog")
@@ -304,55 +319,141 @@ private fun ArcadeGameScreen(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
 ) {
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .navigationBarsPadding(),
     ) {
-        GameTopBar(
-            game = game,
-            quiet = state.quietMode,
-            onBack = { onAction(ArcadeAction.ExitGame) },
-            onQuietToggle = { onAction(ArcadeAction.ToggleQuietMode) },
-        )
-        RivenCompanionBar(
-            game = game,
-            quiet = state.quietMode,
-            hold = state.interactionHold,
-            onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
-        )
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            shape = RoundedCornerShape(26.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0D2633)),
-            border = androidx.compose.foundation.BorderStroke(1.dp, MutedGold.copy(alpha = 0.42f)),
-        ) {
-            when (game) {
-                ArcadeGame.STACKER -> StackerPreview(onAction)
-                ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
-                ArcadeGame.HEART_MATCH -> HeartMatchPreview(onAction)
-                ArcadeGame.WRAPPING_SNAKE -> SnakePreview(onAction)
-                ArcadeGame.RIVEN_CARD_TABLE -> SharedCardTablePreview(onAction)
+        val useScrollableLayout = maxHeight < 700.dp || LocalDensity.current.fontScale >= 1.3f
+        if (useScrollableLayout) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("arcade_game_scroll"),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 14.dp,
+                    vertical = 10.dp,
+                ),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    GameTopBar(
+                        game = game,
+                        quiet = state.quietMode,
+                        onBack = { onAction(ArcadeAction.ExitGame) },
+                        onQuietToggle = { onAction(ArcadeAction.ToggleQuietMode) },
+                    )
+                }
+                item {
+                    RivenCompanionBar(
+                        game = game,
+                        quiet = state.quietMode,
+                        hold = state.interactionHold,
+                        onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
+                    )
+                }
+                item {
+                    GameBoardCard(
+                        game = game,
+                        onAction = onAction,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(compactBoardHeight(game)),
+                    )
+                }
+                state.demoNotice?.let { notice ->
+                    item {
+                        PreviewNotice(
+                            notice = notice,
+                            onDismiss = { onAction(ArcadeAction.DismissDemoNotice) },
+                        )
+                    }
+                }
+                item { PendingRulesLabel(game = game, expanded = true) }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                GameTopBar(
+                    game = game,
+                    quiet = state.quietMode,
+                    onBack = { onAction(ArcadeAction.ExitGame) },
+                    onQuietToggle = { onAction(ArcadeAction.ToggleQuietMode) },
+                )
+                RivenCompanionBar(
+                    game = game,
+                    quiet = state.quietMode,
+                    hold = state.interactionHold,
+                    onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
+                )
+                GameBoardCard(
+                    game = game,
+                    onAction = onAction,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+                state.demoNotice?.let { notice ->
+                    PreviewNotice(
+                        notice = notice,
+                        onDismiss = { onAction(ArcadeAction.DismissDemoNotice) },
+                    )
+                }
+                PendingRulesLabel(game = game, expanded = false)
             }
         }
-        state.demoNotice?.let { notice ->
-            PreviewNotice(notice = notice, onDismiss = { onAction(ArcadeAction.DismissDemoNotice) })
-        }
-        Text(
-            text = pendingRulesText(game),
-            modifier = Modifier.fillMaxWidth(),
-            color = MistBlue.copy(alpha = 0.8f),
-            style = MaterialTheme.typography.bodySmall,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
+}
+
+@Composable
+private fun GameBoardCard(
+    game: ArcadeGame,
+    onAction: (ArcadeAction) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(26.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0D2633)),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MutedGold.copy(alpha = 0.42f)),
+    ) {
+        when (game) {
+            ArcadeGame.STACKER -> StackerPreview(onAction)
+            ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
+            ArcadeGame.HEART_MATCH -> HeartMatchPreview(onAction)
+            ArcadeGame.WRAPPING_SNAKE -> SnakePreview(onAction)
+            ArcadeGame.RIVEN_CARD_TABLE -> SharedCardTablePreview(onAction)
+        }
+    }
+}
+
+@Composable
+private fun PendingRulesLabel(
+    game: ArcadeGame,
+    expanded: Boolean,
+) {
+    Text(
+        text = pendingRulesText(game),
+        modifier = Modifier.fillMaxWidth(),
+        color = MistBlue.copy(alpha = 0.8f),
+        style = MaterialTheme.typography.bodySmall,
+        textAlign = TextAlign.Center,
+        maxLines = if (expanded) Int.MAX_VALUE else 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
+    ArcadeGame.STACKER -> 460.dp
+    ArcadeGame.KLONDIKE -> 520.dp
+    ArcadeGame.HEART_MATCH -> 520.dp
+    ArcadeGame.WRAPPING_SNAKE -> 500.dp
+    ArcadeGame.RIVEN_CARD_TABLE -> 640.dp
 }
 
 @Composable
@@ -484,6 +585,16 @@ private fun QuietControl(
     compact: Boolean = false,
 ) {
     Row(
+        modifier = Modifier
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Quiet commentary"
+                stateDescription = if (quiet) "On" else "Off"
+            }
+            .toggleable(
+                value = quiet,
+                role = Role.Switch,
+                onValueChange = { onToggle() },
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 7.dp),
     ) {
@@ -492,7 +603,11 @@ private fun QuietControl(
             color = MistBlue,
             style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
         )
-        Switch(checked = quiet, onCheckedChange = { onToggle() })
+        Switch(
+            checked = quiet,
+            onCheckedChange = null,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
 }
 
@@ -518,10 +633,11 @@ private fun ConversationOverlay(
         onDismissRequest = { onAction(ArcadeAction.DismissConversation) },
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .background(DeepInk.copy(alpha = 0.72f))
+                .imePadding()
                 .padding(horizontal = 16.dp, vertical = 24.dp),
             contentAlignment = Alignment.BottomCenter,
         ) {
@@ -529,6 +645,7 @@ private fun ConversationOverlay(
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = 560.dp)
+                    .heightIn(max = maxHeight * 0.94f)
                     .navigationBarsPadding(),
                 shape = RoundedCornerShape(28.dp),
                 color = TableNavyRaised,
@@ -536,7 +653,10 @@ private fun ConversationOverlay(
                 shadowElevation = 18.dp,
             ) {
                 Column(
-                    modifier = Modifier.padding(20.dp),
+                    modifier = Modifier
+                        .testTag("arcade_conversation_scroll")
+                        .verticalScroll(rememberScrollState())
+                        .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Row(
@@ -633,44 +753,70 @@ private fun PreviewNotice(notice: String, onDismiss: () -> Unit) {
 
 @Composable
 private fun StackerPreview(onAction: (ArcadeAction) -> Unit) {
-    PreviewBoard(title = "TOWER PREVIEW", status = "Engine not connected") {
-        Box(
+    PreviewBoard(title = "BLOCK BOARD", status = "Ruleset awaiting confirmation") {
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 12.dp),
-            contentAlignment = Alignment.BottomCenter,
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-                modifier = Modifier.padding(bottom = 54.dp),
+            Canvas(
+                modifier = Modifier
+                    .weight(1f)
+                    .aspectRatio(0.72f)
+                    .background(PenthouseNavy, RoundedCornerShape(16.dp))
+                    .border(1.dp, MutedGold.copy(alpha = 0.45f), RoundedCornerShape(16.dp)),
             ) {
-                StackerBlock(96, VioletHeart)
-                StackerBlock(126, AquaHeart)
-                StackerBlock(150, CoralHeart)
-                StackerBlock(178, MutedGold)
-                StackerBlock(204, RubyHeart)
+                val columns = 8
+                val rows = 12
+                val cell = min(size.width / columns, size.height / rows)
+                val left = (size.width - columns * cell) / 2f
+                val top = (size.height - rows * cell) / 2f
+                for (column in 1 until columns) {
+                    drawLine(
+                        color = MistBlue.copy(alpha = 0.08f),
+                        start = Offset(left + column * cell, top),
+                        end = Offset(left + column * cell, top + rows * cell),
+                    )
+                }
+                for (row in 1 until rows) {
+                    drawLine(
+                        color = MistBlue.copy(alpha = 0.08f),
+                        start = Offset(left, top + row * cell),
+                        end = Offset(left + columns * cell, top + row * cell),
+                    )
+                }
+                val blocks = listOf(
+                    Triple(1, 9, RubyHeart),
+                    Triple(2, 9, RubyHeart),
+                    Triple(2, 10, AquaHeart),
+                    Triple(3, 10, AquaHeart),
+                    Triple(4, 8, VioletHeart),
+                    Triple(4, 9, VioletHeart),
+                    Triple(5, 9, MutedGold),
+                    Triple(6, 10, CoralHeart),
+                    Triple(6, 7, LimeHeart),
+                    Triple(7, 7, LimeHeart),
+                )
+                blocks.forEach { (column, row, color) ->
+                    drawRoundRect(
+                        color = color,
+                        topLeft = Offset(left + column * cell + 2f, top + row * cell + 2f),
+                        size = androidx.compose.ui.geometry.Size(cell - 4f, cell - 4f),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cell * 0.18f),
+                    )
+                }
             }
             Button(
-                onClick = { onAction(ArcadeAction.PreviewControl("Drop block")) },
+                onClick = { onAction(ArcadeAction.PreviewControl("Stacker board control")) },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = MutedGold),
             ) {
-                Text("DROP BLOCK", color = DeepInk)
+                Text("CONTROL LAYOUT PREVIEW", color = DeepInk)
             }
         }
     }
-}
-
-@Composable
-private fun StackerBlock(width: Int, color: Color) {
-    Box(
-        modifier = Modifier
-            .width(width.dp)
-            .height(24.dp)
-            .background(color, RoundedCornerShape(7.dp))
-            .border(1.dp, WarmIvory.copy(alpha = 0.45f), RoundedCornerShape(7.dp)),
-    )
 }
 
 @Composable
@@ -1016,7 +1162,7 @@ private fun PlayingCard(
 }
 
 private fun pendingRulesText(game: ArcadeGame): String = when (game) {
-    ArcadeGame.STACKER -> "Preview only • Timing, physics, score, and failure rules are not implemented."
+    ArcadeGame.STACKER -> "Preview only • Board actions and scoring await the confirmed Stacker ruleset."
     ArcadeGame.KLONDIKE -> "Preview only • Draw-one Klondike engine and legal move handling are not implemented."
     ArcadeGame.HEART_MATCH -> "Preview only • Cascade, sound, and power-up thresholds/effects remain to be finalized."
     ArcadeGame.WRAPPING_SNAKE -> "Preview only • Edge wrapping is intended; self-collision behavior remains undecided."

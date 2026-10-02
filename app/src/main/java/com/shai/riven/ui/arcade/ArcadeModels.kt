@@ -18,10 +18,10 @@ enum class ArcadeGame(
     STACKER(
         gameId = "stacker",
         title = "Stacker",
-        eyebrow = "STEADY HANDS",
-        description = "Place bright moving blocks and keep the tower balanced.",
+        eyebrow = "BLOCK BOARD",
+        description = "A bright block-board preview reserved for the confirmed Stacker ruleset.",
         mode = ArcadeGameMode.SOLO,
-        commentary = "No rush. A clean landing matters more than a tall tower.",
+        commentary = "Let's read the board before choosing a move.",
     ),
     KLONDIKE(
         gameId = "klondike",
