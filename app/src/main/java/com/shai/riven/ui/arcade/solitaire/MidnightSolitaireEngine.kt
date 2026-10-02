@@ -92,9 +92,13 @@ data class MidnightSolitaireSession(
 
 sealed interface SolitaireMove {
     data object DrawOrRecycle : SolitaireMove
-    data object WasteToFoundation : SolitaireMove
+    data class WasteToFoundation(val targetSuit: SolitaireSuit) : SolitaireMove
     data class WasteToTableau(val toColumn: Int) : SolitaireMove
-    data class TableauToFoundation(val fromColumn: Int) : SolitaireMove
+    data class TableauToFoundation(
+        val fromColumn: Int,
+        val fromIndex: Int,
+        val targetSuit: SolitaireSuit,
+    ) : SolitaireMove
     data class TableauToTableau(
         val fromColumn: Int,
         val fromIndex: Int,
@@ -161,9 +165,14 @@ object MidnightSolitaireEngine {
         }
         val moved = when (move) {
             SolitaireMove.DrawOrRecycle -> drawOrRecycle(before)
-            SolitaireMove.WasteToFoundation -> wasteToFoundation(before)
+            is SolitaireMove.WasteToFoundation -> wasteToFoundation(before, move.targetSuit)
             is SolitaireMove.WasteToTableau -> wasteToTableau(before, move.toColumn)
-            is SolitaireMove.TableauToFoundation -> tableauToFoundation(before, move.fromColumn)
+            is SolitaireMove.TableauToFoundation -> tableauToFoundation(
+                before,
+                move.fromColumn,
+                move.fromIndex,
+                move.targetSuit,
+            )
             is SolitaireMove.TableauToTableau -> tableauToTableau(
                 before,
                 move.fromColumn,
@@ -228,13 +237,30 @@ object MidnightSolitaireEngine {
         if (state.status == SolitaireStatus.WON) return emptySet()
         return buildSet {
             if (state.stock.isNotEmpty() || state.waste.isNotEmpty()) add(SolitaireMove.DrawOrRecycle)
-            if (wasteToFoundation(state) != null) add(SolitaireMove.WasteToFoundation)
+            state.waste.lastOrNull()?.let { card ->
+                val move = SolitaireMove.WasteToFoundation(card.suit)
+                if (wasteToFoundation(state, move.targetSuit) != null) add(move)
+            }
             for (toColumn in 0 until SOLITAIRE_TABLEAU_COUNT) {
                 if (wasteToTableau(state, toColumn) != null) add(SolitaireMove.WasteToTableau(toColumn))
             }
             for (fromColumn in 0 until SOLITAIRE_TABLEAU_COUNT) {
-                if (tableauToFoundation(state, fromColumn) != null) {
-                    add(SolitaireMove.TableauToFoundation(fromColumn))
+                state.tableau[fromColumn].lastOrNull()?.takeIf(SolitaireTableauCard::faceUp)?.let { top ->
+                    val move = SolitaireMove.TableauToFoundation(
+                        fromColumn = fromColumn,
+                        fromIndex = state.tableau[fromColumn].lastIndex,
+                        targetSuit = top.card.suit,
+                    )
+                    if (
+                        tableauToFoundation(
+                            state,
+                            move.fromColumn,
+                            move.fromIndex,
+                            move.targetSuit,
+                        ) != null
+                    ) {
+                        add(move)
+                    }
                 }
                 state.tableau[fromColumn].indices.forEach { fromIndex ->
                     for (toColumn in 0 until SOLITAIRE_TABLEAU_COUNT) {
@@ -300,9 +326,13 @@ object MidnightSolitaireEngine {
         else -> null
     }
 
-    private fun wasteToFoundation(state: MidnightSolitaireState): MidnightSolitaireState? {
+    private fun wasteToFoundation(
+        state: MidnightSolitaireState,
+        targetSuit: SolitaireSuit,
+    ): MidnightSolitaireState? {
         val card = state.waste.lastOrNull() ?: return null
-        val foundationIndex = card.suit.ordinal
+        if (card.suit != targetSuit) return null
+        val foundationIndex = targetSuit.ordinal
         val foundation = state.foundations[foundationIndex]
         if (!canMoveToFoundation(card, foundation)) return null
         return state.copy(
@@ -330,11 +360,15 @@ object MidnightSolitaireEngine {
     private fun tableauToFoundation(
         state: MidnightSolitaireState,
         fromColumn: Int,
+        fromIndex: Int,
+        targetSuit: SolitaireSuit,
     ): MidnightSolitaireState? {
         if (fromColumn !in state.tableau.indices) return null
         val source = state.tableau[fromColumn]
-        val card = source.lastOrNull()?.takeIf(SolitaireTableauCard::faceUp)?.card ?: return null
-        val foundationIndex = card.suit.ordinal
+        if (fromIndex != source.lastIndex) return null
+        val card = source.getOrNull(fromIndex)?.takeIf(SolitaireTableauCard::faceUp)?.card ?: return null
+        if (card.suit != targetSuit) return null
+        val foundationIndex = targetSuit.ordinal
         val foundation = state.foundations[foundationIndex]
         if (!canMoveToFoundation(card, foundation)) return null
         return state.copy(

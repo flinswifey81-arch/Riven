@@ -31,7 +31,16 @@ import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.MainActivity
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireEngine
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireSession
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireSettings
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireState
+import com.shai.riven.ui.arcade.solitaire.SharedPreferencesMidnightSolitaireStore
+import com.shai.riven.ui.arcade.solitaire.SolitaireCard
+import com.shai.riven.ui.arcade.solitaire.SolitaireSuit
+import com.shai.riven.ui.arcade.solitaire.SolitaireTableauCard
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
@@ -434,6 +443,41 @@ class ArcadeCompactLayoutTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun shortLargeTextMidnightSolitaireCanReachTheLastCardInALongTableau() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesMidnightSolitaireStore(
+            context = context,
+            preferenceName = "arcade-compact-solitaire-${System.nanoTime()}",
+        )
+        store.saveSession(longSolitaireSession())
+        store.saveSettings(MidnightSolitaireSettings(largeCardText = true))
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(
+                        state = ArcadeUiState(selectedGameId = ArcadeGame.KLONDIKE.gameId),
+                        onAction = {},
+                        solitaireStoreOverride = store,
+                    )
+                }
+            }
+        }
+
+        composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("midnight_solitaire_compact_scroll").assertIsDisplayed()
+        repeat(4) {
+            composeRule.onNodeWithTag("midnight_solitaire_compact_scroll")
+                .performTouchInput { swipeUp() }
+            composeRule.waitForIdle()
+        }
+        composeRule.onNodeWithTag("solitaire_tableau_0_18")
+            .assertIsDisplayed()
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(64.dp)
+    }
+
+    @Test
     fun shortLargeTextCelestialSpireKeepsTheFullBoardAndPlayControlsTogether() {
         composeRule.setContent {
             RivenTheme {
@@ -625,4 +669,31 @@ private fun WithFontScale(
         ),
         content = content,
     )
+}
+
+private fun longSolitaireSession(): MidnightSolitaireSession {
+    val faceUp = (13 downTo 1).mapIndexed { index, rank ->
+        SolitaireCard(
+            suit = if (index % 2 == 0) SolitaireSuit.SPADES else SolitaireSuit.HEARTS,
+            rank = rank,
+        )
+    }
+    val deck = SolitaireSuit.entries.flatMap { suit ->
+        (1..13).map { rank -> SolitaireCard(suit, rank) }
+    }
+    val remaining = deck.filterNot(faceUp.toSet()::contains)
+    val longPile = remaining.take(6).map { card ->
+        SolitaireTableauCard(card, faceUp = false)
+    } + faceUp.map { card ->
+        SolitaireTableauCard(card, faceUp = true)
+    }
+    val state = MidnightSolitaireState(
+        stock = remaining.drop(6),
+        waste = emptyList(),
+        foundations = List(4) { emptyList() },
+        tableau = listOf(longPile) + List(6) { emptyList() },
+        dealSeed = 420L,
+    )
+    check(MidnightSolitaireEngine.isValid(state))
+    return MidnightSolitaireSession(state)
 }

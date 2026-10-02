@@ -79,6 +79,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
 import com.shai.riven.ui.arcade.comet.CometTrailGame
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireGame
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireStore
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
 import com.shai.riven.ui.arcade.starstruck.StarstruckGame
 import com.shai.riven.ui.theme.AquaHeart
@@ -143,6 +144,7 @@ fun ArcadeExperience(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
+    solitaireStoreOverride: MidnightSolitaireStore? = null,
 ) {
     val lobbyListState = rememberLazyListState()
     Box(
@@ -158,7 +160,12 @@ fun ArcadeExperience(
         if (selectedGame == null) {
             ArcadeLobby(state = state, listState = lobbyListState, onAction = onAction)
         } else {
-            ArcadeGameScreen(game = selectedGame, state = state, onAction = onAction)
+            ArcadeGameScreen(
+                game = selectedGame,
+                state = state,
+                onAction = onAction,
+                solitaireStoreOverride = solitaireStoreOverride,
+            )
         }
 
         if (state.conversationOpen) {
@@ -328,6 +335,7 @@ private fun ArcadeGameScreen(
     game: ArcadeGame,
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
+    solitaireStoreOverride: MidnightSolitaireStore?,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -341,6 +349,7 @@ private fun ArcadeGameScreen(
                 game = game,
                 state = state,
                 onAction = onAction,
+                solitaireStoreOverride = solitaireStoreOverride,
             )
         } else if (useScrollableLayout) {
             LazyColumn(
@@ -374,6 +383,7 @@ private fun ArcadeGameScreen(
                         game = game,
                         externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                         onAction = onAction,
+                        solitaireStoreOverride = solitaireStoreOverride,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(compactBoardHeight(game)),
@@ -412,6 +422,7 @@ private fun ArcadeGameScreen(
                     game = game,
                     externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                     onAction = onAction,
+                    solitaireStoreOverride = solitaireStoreOverride,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -433,6 +444,7 @@ private fun CompactPlayableGameScreen(
     game: ArcadeGame,
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
+    solitaireStoreOverride: MidnightSolitaireStore?,
 ) {
     Column(
         modifier = Modifier
@@ -477,6 +489,7 @@ private fun CompactPlayableGameScreen(
             externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
             onAction = onAction,
             compactGameLayout = true,
+            solitaireStoreOverride = solitaireStoreOverride,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -491,6 +504,7 @@ private fun GameBoardCard(
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
     compactGameLayout: Boolean = false,
+    solitaireStoreOverride: MidnightSolitaireStore? = null,
 ) {
     Card(
         modifier = modifier,
@@ -506,6 +520,7 @@ private fun GameBoardCard(
             ArcadeGame.KLONDIKE -> MidnightSolitaireGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
+                storeOverride = solitaireStoreOverride,
             )
             ArcadeGame.HEART_MATCH -> StarstruckGame(
                 externallyPaused = externallyPaused,

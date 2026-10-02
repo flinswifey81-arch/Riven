@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -44,8 +46,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -164,12 +170,20 @@ fun MidnightSolitaireGame(
         }
         if (move != null) performMove(move)
     }
-    val moveSelectionToFoundation: () -> Unit = {
-        val move = when (val selected = selection) {
-            null -> null
+    val moveSelectionToFoundation: (SolitaireSuit?) -> Unit = { requestedSuit ->
+        val selected = selection
+        val selectedCard = selected?.let { selectedCard(it, sessionHolder.value.game) }
+        val targetSuit = requestedSuit ?: selectedCard?.suit
+        val move = when {
+            selected == null || targetSuit == null -> null
             else -> when (selected.zone) {
-                SolitaireSelectionZone.WASTE -> SolitaireMove.WasteToFoundation
-                SolitaireSelectionZone.TABLEAU -> SolitaireMove.TableauToFoundation(selected.column)
+                SolitaireSelectionZone.WASTE -> SolitaireMove.WasteToFoundation(targetSuit)
+                SolitaireSelectionZone.TABLEAU -> SolitaireMove.TableauToFoundation(
+                    fromColumn = selected.column,
+                    fromIndex = selected.cardIndex,
+                    targetSuit = targetSuit,
+                )
+
                 SolitaireSelectionZone.FOUNDATION -> null
             }
         }
@@ -206,10 +220,16 @@ fun MidnightSolitaireGame(
                     if (session.game.foundations[suit.ordinal].isNotEmpty()) {
                         selection = SolitaireSelection(SolitaireSelectionZone.FOUNDATION, suit = suit)
                     }
-                } else if (selection?.zone == SolitaireSelectionZone.FOUNDATION && selection?.suit == suit) {
-                    selection = null
+                } else if (selection?.zone == SolitaireSelectionZone.FOUNDATION) {
+                    selection = if (selection?.suit == suit) {
+                        null
+                    } else if (session.game.foundations[suit.ordinal].isNotEmpty()) {
+                        SolitaireSelection(SolitaireSelectionZone.FOUNDATION, suit = suit)
+                    } else {
+                        selection
+                    }
                 } else {
-                    moveSelectionToFoundation()
+                    moveSelectionToFoundation(suit)
                 }
             }
         },
@@ -245,7 +265,7 @@ fun MidnightSolitaireGame(
             }
         },
         onTableauTargetTap = moveSelectionToTableau,
-        onSendHome = moveSelectionToFoundation,
+        onSendHome = { moveSelectionToFoundation(null) },
         onUndo = {
             if (!paused) {
                 val result = MidnightSolitaireEngine.undo(sessionHolder.value)
@@ -323,12 +343,25 @@ private fun MidnightSolitaireLayout(
     onToggleLargeText: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(HunterGreen)
             .testTag("midnight_solitaire_board"),
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (compactLayout) {
+                        Modifier
+                            .testTag("midnight_solitaire_compact_scroll")
+                            .verticalScroll(rememberScrollState())
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -386,7 +419,7 @@ private fun MidnightSolitaireLayout(
             )
             SolitaireToolbarButton(
                 text = "HOME",
-                description = "Move selected card to its foundation",
+                description = "Move selected card to its matching foundation",
                 enabled = selected != null && selected.zone != SolitaireSelectionZone.FOUNDATION && !paused,
                 onClick = onSendHome,
             )
@@ -417,12 +450,18 @@ private fun MidnightSolitaireLayout(
             onFoundationTap = onFoundationTap,
         )
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 5.dp, vertical = 4.dp),
-        ) {
+            val tableauModifier = if (compactLayout) {
+                Modifier
+                    .fillMaxWidth()
+                    .height(if (settings.largeCardText) 680.dp else 540.dp)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            }
+            Box(
+                modifier = tableauModifier.padding(horizontal = 5.dp, vertical = 4.dp),
+            ) {
             SolitaireTableau(
                 state = state,
                 settings = settings,
@@ -432,27 +471,31 @@ private fun MidnightSolitaireLayout(
                 onCardTap = onTableauCardTap,
                 onTargetTap = onTableauTargetTap,
             )
-        }
+            }
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = TableNavy.copy(alpha = 0.94f),
-        ) {
-            Text(
-                text = when {
-                    state.status == SolitaireStatus.WON ->
-                        "You won. There is no timer or loss; undo, restart, or choose another deal."
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("solitaire_notice")
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+                color = TableNavy.copy(alpha = 0.94f),
+            ) {
+                Text(
+                    text = when {
+                        state.status == SolitaireStatus.WON ->
+                            "You won. There is no timer or loss; undo, restart, or choose another deal."
 
-                    selected != null -> "Selected: ${selectionDescription(selected, state)}. Choose a target."
-                    else -> notice
-                },
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                color = if (state.status == SolitaireStatus.WON) MutedGold else WarmIvory,
-                fontSize = if (settings.largeCardText) 14.sp else 11.sp,
-                textAlign = TextAlign.Center,
-                maxLines = if (compactLayout) 2 else 3,
-                overflow = TextOverflow.Ellipsis,
-            )
+                        selected != null -> "Selected: ${selectionDescription(selected, state)}. Choose a target."
+                        else -> notice
+                    },
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                    color = if (state.status == SolitaireStatus.WON) MutedGold else WarmIvory,
+                    fontSize = if (settings.largeCardText) 14.sp else 11.sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = if (compactLayout) 2 else 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -512,6 +555,7 @@ private fun SolitaireTopPiles(
             },
             enabled = enabled && (state.stock.isNotEmpty() || state.waste.isNotEmpty()),
             selected = false,
+            cardStateDescription = if (state.stock.isNotEmpty()) "Face down, draw available" else "Empty",
             largeText = settings.largeCardText,
             width = pileWidth,
             tag = "solitaire_stock",
@@ -525,6 +569,7 @@ private fun SolitaireTopPiles(
                 ?: "Waste empty.",
             enabled = enabled && state.waste.isNotEmpty(),
             selected = selected?.zone == SolitaireSelectionZone.WASTE,
+            cardStateDescription = if (state.waste.isNotEmpty()) "Face up" else "Empty",
             largeText = settings.largeCardText,
             width = pileWidth,
             tag = "solitaire_waste",
@@ -541,6 +586,7 @@ private fun SolitaireTopPiles(
                     ?: "${suit.name.lowercase()} foundation empty.",
                 enabled = enabled,
                 selected = selected?.zone == SolitaireSelectionZone.FOUNDATION && selected.suit == suit,
+                cardStateDescription = if (card == null) "Empty target" else "Face up foundation card",
                 largeText = settings.largeCardText,
                 width = pileWidth,
                 tag = "solitaire_foundation_${suit.name.lowercase()}",
@@ -573,51 +619,79 @@ private fun SolitaireTableau(
             compactLayout -> (-43).dp
             else -> (-45).dp
         }
-        Row(
+        val cardHeight = columnWidth / 0.70f
+        val cardStep = cardHeight + overlap
+        val longestPile = state.tableau.maxOfOrNull { it.size } ?: 0
+        val requiredHeight = if (longestPile <= 1) {
+            cardHeight
+        } else {
+            cardHeight + cardStep * (longestPile - 1)
+        }
+        val contentHeight = if (requiredHeight > maxHeight) requiredHeight else maxHeight
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.Top,
+                .testTag("solitaire_tableau_vertical_scroll")
+                .verticalScroll(rememberScrollState()),
         ) {
-            state.tableau.forEachIndexed { column, pile ->
-                Box(
-                    modifier = Modifier
-                        .width(columnWidth)
-                        .fillMaxHeight()
-                        .semantics {
-                            contentDescription = "Tableau column ${column + 1} target"
-                        }
-                        .clickable(enabled = enabled && selected != null) { onTargetTap(column) },
-                    contentAlignment = Alignment.TopCenter,
-                ) {
-                    if (pile.isEmpty()) {
-                        EmptyTableauTarget(
-                            width = columnWidth,
-                            enabled = enabled && selected != null,
-                            onClick = { onTargetTap(column) },
-                        )
-                    } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(overlap)) {
-                            pile.forEachIndexed { index, tableauCard ->
-                                SolitaireCardView(
-                                    card = tableauCard.card,
-                                    faceDown = !tableauCard.faceUp,
-                                    emptyLabel = "",
-                                    description = if (tableauCard.faceUp) {
-                                        "Tableau ${column + 1}, ${tableauCard.card.spokenName}. " +
-                                            if (index == pile.lastIndex) "Top card." else "Move this face-up sequence."
-                                    } else {
-                                        "Tableau ${column + 1}, face-down card."
-                                    },
-                                    enabled = enabled && (tableauCard.faceUp || selected != null),
-                                    selected = selected?.zone == SolitaireSelectionZone.TABLEAU &&
-                                        selected.column == column && selected.cardIndex == index,
-                                    largeText = settings.largeCardText,
-                                    width = columnWidth,
-                                    tag = "solitaire_tableau_${column}_$index",
-                                    onClick = { onCardTap(column, index) },
-                                )
+            Row(
+                modifier = Modifier
+                    .height(contentHeight)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                state.tableau.forEachIndexed { column, pile ->
+                    Box(
+                        modifier = Modifier
+                            .width(columnWidth)
+                            .fillMaxHeight()
+                            .semantics {
+                                contentDescription = "Tableau column ${column + 1} target"
+                            }
+                            .clickable(enabled = enabled && selected != null) { onTargetTap(column) },
+                        contentAlignment = Alignment.TopCenter,
+                    ) {
+                        if (pile.isEmpty()) {
+                            EmptyTableauTarget(
+                                width = columnWidth,
+                                enabled = enabled && selected != null,
+                                onClick = { onTargetTap(column) },
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(overlap)) {
+                                pile.forEachIndexed { index, tableauCard ->
+                                    val sequenceSize = pile.size - index
+                                    SolitaireCardView(
+                                        card = tableauCard.card,
+                                        faceDown = !tableauCard.faceUp,
+                                        emptyLabel = "",
+                                        description = if (tableauCard.faceUp) {
+                                            "Tableau ${column + 1}, ${tableauCard.card.spokenName}. " +
+                                                if (index == pile.lastIndex) {
+                                                    "Top card."
+                                                } else {
+                                                    "Move this face-up sequence."
+                                                }
+                                        } else {
+                                            "Tableau ${column + 1}, face-down card."
+                                        },
+                                        enabled = enabled && (tableauCard.faceUp || selected != null),
+                                        selected = selected?.zone == SolitaireSelectionZone.TABLEAU &&
+                                            selected.column == column && selected.cardIndex == index,
+                                        cardStateDescription = if (tableauCard.faceUp) {
+                                            if (sequenceSize == 1) "Face up, single card" else {
+                                                "Face up, $sequenceSize card sequence"
+                                            }
+                                        } else {
+                                            "Face down"
+                                        },
+                                        largeText = settings.largeCardText,
+                                        width = columnWidth,
+                                        tag = "solitaire_tableau_${column}_$index",
+                                        onClick = { onCardTap(column, index) },
+                                    )
+                                }
                             }
                         }
                     }
@@ -657,6 +731,7 @@ private fun SolitaireCardView(
     description: String,
     enabled: Boolean,
     selected: Boolean,
+    cardStateDescription: String,
     largeText: Boolean,
     width: Dp,
     tag: String,
@@ -669,7 +744,15 @@ private fun SolitaireCardView(
             .aspectRatio(0.70f)
             .defaultMinSize(minWidth = 48.dp, minHeight = 64.dp)
             .testTag(tag)
-            .semantics { contentDescription = description }
+            .semantics {
+                contentDescription = description
+                this.selected = selected
+                stateDescription = if (selected) {
+                    "Selected. $cardStateDescription"
+                } else {
+                    cardStateDescription
+                }
+            }
             .clickable(enabled = enabled, onClick = onClick)
             .then(
                 if (selected) Modifier.border(3.dp, MutedGold, shape) else Modifier,
@@ -760,16 +843,19 @@ private fun SolitaireResetDialog(
 private fun selectionDescription(
     selection: SolitaireSelection,
     state: MidnightSolitaireState,
-): String = when (selection.zone) {
-    SolitaireSelectionZone.WASTE -> state.waste.lastOrNull()?.spokenName ?: "empty waste"
+): String = selectedCard(selection, state)?.spokenName ?: "card"
+
+private fun selectedCard(
+    selection: SolitaireSelection,
+    state: MidnightSolitaireState,
+): SolitaireCard? = when (selection.zone) {
+    SolitaireSelectionZone.WASTE -> state.waste.lastOrNull()
     SolitaireSelectionZone.TABLEAU -> state.tableau
         .getOrNull(selection.column)
         ?.getOrNull(selection.cardIndex)
         ?.card
-        ?.spokenName
-        ?: "tableau card"
 
     SolitaireSelectionZone.FOUNDATION -> selection.suit?.let { suit ->
-        state.foundations[suit.ordinal].lastOrNull()?.spokenName
-    } ?: "foundation card"
+        state.foundations[suit.ordinal].lastOrNull()
+    }
 }

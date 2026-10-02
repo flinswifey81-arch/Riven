@@ -2,16 +2,22 @@ package com.shai.riven.ui.arcade.solitaire
 
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.shai.riven.ui.theme.RivenTheme
@@ -58,6 +64,56 @@ class MidnightSolitaireComposeTest {
 
         assertEquals(23, store.savedSession?.game?.stock?.size)
         assertEquals(1, store.savedSession?.game?.waste?.size)
+    }
+
+    @Test
+    fun selectedSequenceIdentityTargetSuitAndLiveNoticeAreExplicit() {
+        val original = selectionFixtureSession()
+        val store = FakeMidnightSolitaireStore(session = original)
+        composeRule.setContent {
+            RivenTheme {
+                MidnightSolitaireGame(
+                    externallyPaused = false,
+                    storeOverride = store,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("solitaire_tableau_0_0")
+            .assertIsNotSelected()
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("solitaire_tableau_0_0").assertIsSelected()
+        assertEquals(
+            "Selected. Face up, 2 card sequence",
+            composeRule.onNodeWithTag("solitaire_tableau_0_0")
+                .fetchSemanticsNode().config[SemanticsProperties.StateDescription],
+        )
+        assertEquals(
+            LiveRegionMode.Polite,
+            composeRule.onNodeWithTag("solitaire_notice")
+                .fetchSemanticsNode().config[SemanticsProperties.LiveRegion],
+        )
+
+        composeRule.onNodeWithContentDescription("Move selected card to its matching foundation")
+            .performClick()
+        composeRule.waitForIdle()
+        assertEquals(original.game, store.savedSession?.game)
+        composeRule.onNodeWithTag("solitaire_tableau_0_0").assertIsSelected()
+
+        composeRule.onNodeWithTag("solitaire_tableau_0_1").performClick().assertIsSelected()
+        composeRule.onNodeWithContentDescription("hearts foundation empty.").performClick()
+        composeRule.waitForIdle()
+        assertEquals(original.game, store.savedSession?.game)
+        composeRule.onNodeWithTag("solitaire_tableau_0_1").assertIsSelected()
+
+        composeRule.onNodeWithContentDescription("clubs foundation empty.").performClick()
+        composeRule.waitForIdle()
+        assertEquals(
+            listOf(SolitaireCard(SolitaireSuit.CLUBS, 1)),
+            store.savedSession?.game?.foundations?.get(SolitaireSuit.CLUBS.ordinal),
+        )
+        assertEquals(1, store.savedSession?.game?.tableau?.first()?.size)
     }
 
     @Test
@@ -154,4 +210,26 @@ private class FakeMidnightSolitaireStore(
     override fun saveSettings(settings: MidnightSolitaireSettings) {
         savedSettings = settings
     }
+}
+
+private fun selectionFixtureSession(): MidnightSolitaireSession {
+    val buriedHeartTwo = SolitaireCard(SolitaireSuit.HEARTS, 2)
+    val topClubAce = SolitaireCard(SolitaireSuit.CLUBS, 1)
+    val tableauCards = listOf(
+        SolitaireTableauCard(buriedHeartTwo, faceUp = true),
+        SolitaireTableauCard(topClubAce, faceUp = true),
+    )
+    val placed = tableauCards.map(SolitaireTableauCard::card).toSet()
+    val stock = SolitaireSuit.entries.flatMap { suit ->
+        (1..13).map { rank -> SolitaireCard(suit, rank) }
+    }.filterNot(placed::contains)
+    val state = MidnightSolitaireState(
+        stock = stock,
+        waste = emptyList(),
+        foundations = List(4) { emptyList() },
+        tableau = listOf(tableauCards) + List(6) { emptyList() },
+        dealSeed = 88L,
+    )
+    check(MidnightSolitaireEngine.isValid(state))
+    return MidnightSolitaireSession(state)
 }

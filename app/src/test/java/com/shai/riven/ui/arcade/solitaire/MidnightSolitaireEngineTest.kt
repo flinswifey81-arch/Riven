@@ -40,12 +40,12 @@ class MidnightSolitaireEngineTest {
 
         val legal = MidnightSolitaireEngine.legalMoves(state)
 
-        assertTrue(SolitaireMove.WasteToFoundation in legal)
+        assertTrue(SolitaireMove.WasteToFoundation(SolitaireSuit.HEARTS) in legal)
         assertTrue(SolitaireMove.WasteToTableau(0) in legal)
         assertFalse(SolitaireMove.WasteToTableau(1) in legal)
         val foundationMove = MidnightSolitaireEngine.apply(
             MidnightSolitaireSession(state),
-            SolitaireMove.WasteToFoundation,
+            SolitaireMove.WasteToFoundation(SolitaireSuit.HEARTS),
         )
         assertTrue(foundationMove.changed)
         assertEquals(listOf(heartAce, heartTwo), foundationMove.session.game.foundations[SolitaireSuit.HEARTS.ordinal])
@@ -78,6 +78,52 @@ class MidnightSolitaireEngineTest {
         assertEquals(listOf(up(hidden)), result.session.game.tableau[0])
         assertEquals(listOf(up(blackKing), up(redQueen), up(blackJack)), result.session.game.tableau[1])
         assertConserved(result.session.game)
+    }
+
+    @Test
+    fun foundationMoveRequiresTheSelectedTopCardAndMatchingTargetPile() {
+        val buriedHeartTwo = card(SolitaireSuit.HEARTS, 2)
+        val topClubAce = card(SolitaireSuit.CLUBS, 1)
+        val state = fixture(
+            tableau = tableau(
+                listOf(up(buriedHeartTwo), up(topClubAce)),
+            ),
+        )
+        val session = MidnightSolitaireSession(state)
+
+        val buried = MidnightSolitaireEngine.apply(
+            session,
+            SolitaireMove.TableauToFoundation(
+                fromColumn = 0,
+                fromIndex = 0,
+                targetSuit = SolitaireSuit.HEARTS,
+            ),
+        )
+        val wrongSuit = MidnightSolitaireEngine.apply(
+            session,
+            SolitaireMove.TableauToFoundation(
+                fromColumn = 0,
+                fromIndex = 1,
+                targetSuit = SolitaireSuit.HEARTS,
+            ),
+        )
+        val valid = MidnightSolitaireEngine.apply(
+            session,
+            SolitaireMove.TableauToFoundation(
+                fromColumn = 0,
+                fromIndex = 1,
+                targetSuit = SolitaireSuit.CLUBS,
+            ),
+        )
+
+        assertFalse(buried.changed)
+        assertEquals(state, buried.session.game)
+        assertFalse(wrongSuit.changed)
+        assertEquals(state, wrongSuit.session.game)
+        assertTrue(valid.changed)
+        assertEquals(listOf(topClubAce), valid.session.game.foundations[SolitaireSuit.CLUBS.ordinal])
+        assertEquals(listOf(up(buriedHeartTwo)), valid.session.game.tableau[0])
+        assertConserved(valid.session.game)
     }
 
     @Test
@@ -129,7 +175,11 @@ class MidnightSolitaireEngineTest {
 
         val result = MidnightSolitaireEngine.apply(
             MidnightSolitaireSession(state),
-            SolitaireMove.TableauToFoundation(0),
+            SolitaireMove.TableauToFoundation(
+                fromColumn = 0,
+                fromIndex = 0,
+                targetSuit = SolitaireSuit.SPADES,
+            ),
         )
 
         assertEquals(SolitaireStatus.WON, result.session.game.status)
