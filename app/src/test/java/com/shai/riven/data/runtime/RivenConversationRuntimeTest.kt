@@ -398,6 +398,81 @@ class RivenConversationRuntimeTest {
     }
 
     @Test
+    fun imageMutationFailuresStillPersistTheLatestSameFrameCaption() = runBlocking {
+        val runtime = runtime(QueueHttpClient())
+        runtime.initialize()
+        runtime.saveDraft("older persisted caption")
+
+        val failedImport = runtime.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = 3,
+                openStream = { ByteArrayInputStream(byteArrayOf(1, 2, 3)) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = "fresh caption despite failed import",
+        ) as RivenRuntimeResult.Failure
+        assertEquals("fresh caption despite failed import", checkNotNull(failedImport.snapshot).draft)
+
+        val added = runtime.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = pngBytes().size.toLong(),
+                openStream = { ByteArrayInputStream(pngBytes()) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = "caption with image",
+        ) as RivenRuntimeResult.Success
+        val attachmentId = added.snapshot.draftImages.single().attachmentId
+
+        val duplicate = runtime.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = pngBytes().size.toLong(),
+                openStream = { ByteArrayInputStream(pngBytes()) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = "fresh caption despite duplicate",
+        ) as RivenRuntimeResult.Failure
+        assertEquals("fresh caption despite duplicate", checkNotNull(duplicate.snapshot).draft)
+
+        val failedRemove = runtime.removeDraftImage(
+            attachmentId = "not-the-current-image",
+            content = "fresh caption despite failed remove",
+        ) as RivenRuntimeResult.Failure
+        assertEquals("fresh caption despite failed remove", checkNotNull(failedRemove.snapshot).draft)
+        assertEquals(attachmentId, failedRemove.snapshot.draftImages.single().attachmentId)
+    }
+
+    @Test
+    fun imageDraftLinkSaveFailureRetainsTheCaptionFlushedBeforeImport() = runBlocking {
+        val runtime = runtime(
+            QueueHttpClient(),
+            afterImageImportedBeforeDraftLink = { attachmentId ->
+                AttachmentService(database, attachmentBlobStore).discardUnreferencedAvailable(
+                    attachmentId,
+                    clock.incrementAndGet(),
+                )
+            },
+        )
+        runtime.initialize()
+        runtime.saveDraft("older persisted caption")
+
+        val failedSave = runtime.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = pngBytes().size.toLong(),
+                openStream = { ByteArrayInputStream(pngBytes()) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = "fresh caption despite link failure",
+        ) as RivenRuntimeResult.Failure
+
+        assertEquals("fresh caption despite link failure", checkNotNull(failedSave.snapshot).draft)
+        assertTrue(failedSave.snapshot.draftImages.isEmpty())
+    }
+
+    @Test
     fun imageDraftRelaunchFollowupRegenerateAndContinueUseOnlyBoundedCanonicalImage() = runBlocking {
         val http = QueueHttpClient(
             success("I can see it."),
@@ -443,6 +518,60 @@ class RivenConversationRuntimeTest {
         assertEquals(1, imagePartCount(checkNotNull(http.requests[2].body)))
         assertTrue(reopened.send("Now unrelated") is RivenRuntimeResult.Success)
         assertEquals(0, imagePartCount(checkNotNull(http.requests[3].body)))
+    }
+
+    @Test
+    fun failedTextFollowupRetryReusesTheSameBoundedCanonicalImage() = runBlocking {
+        val http = QueueHttpClient(
+            success("Initial image answer."),
+            providerFailure(),
+            success("Recovered follow-up."),
+        )
+        val runtime = runtime(http)
+        runtime.initialize()
+        val profile = runtime.saveProfile(null, "Vision", "vision/model", "fake-key")
+            as RivenProfileSaveResult.Success
+        imageCapabilities.write(
+            profile.profile.profileId,
+            profile.profile.modelId,
+            OpenRouterImageInputCapability.SUPPORTED,
+        )
+        attachImageDraft("What is here?")
+
+        assertTrue(runtime.send("What is here?") is RivenRuntimeResult.Success)
+        assertTrue(runtime.send("Look more closely") is RivenRuntimeResult.Failure)
+        val retried = runtime.retry()
+
+        assertTrue("Expected image follow-up retry success, got $retried", retried is RivenRuntimeResult.Success)
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[1].body)))
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[2].body)))
+    }
+
+    @Test
+    fun regeneratedTextFollowupReusesTheSameBoundedCanonicalImage() = runBlocking {
+        val http = QueueHttpClient(
+            success("Initial image answer."),
+            success("First follow-up."),
+            success("Regenerated follow-up."),
+        )
+        val runtime = runtime(http)
+        runtime.initialize()
+        val profile = runtime.saveProfile(null, "Vision", "vision/model", "fake-key")
+            as RivenProfileSaveResult.Success
+        imageCapabilities.write(
+            profile.profile.profileId,
+            profile.profile.modelId,
+            OpenRouterImageInputCapability.SUPPORTED,
+        )
+        attachImageDraft("What is here?")
+
+        assertTrue(runtime.send("What is here?") is RivenRuntimeResult.Success)
+        assertTrue(runtime.send("Describe the background") is RivenRuntimeResult.Success)
+        val regenerated = runtime.regenerate()
+
+        assertTrue("Expected regenerated follow-up success, got $regenerated", regenerated is RivenRuntimeResult.Success)
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[1].body)))
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[2].body)))
     }
 
     @Test
@@ -532,23 +661,27 @@ class RivenConversationRuntimeTest {
     }
 
     @Test
-    fun longImageHistoryUsesBoundedThumbnailsWithoutOpeningProviderOriginals() = runBlocking {
-        val runtime = runtime(QueueHttpClient())
+    fun oldImageHistoryLoadsPerVisibleImageWithoutFalseUnavailableState() = runBlocking {
+        val fullThumbnail = ByteArray(com.shai.riven.data.attachment.MAX_ATTACHMENT_THUMBNAIL_BYTES) { 7 }
+        val runtime = runtime(
+            QueueHttpClient(),
+            thumbnailGenerator = ImageThumbnailGenerator { fullThumbnail },
+        )
         runtime.initialize()
         val timeline = ConversationTimelineService(database)
         val attachments = AttachmentService(database, attachmentBlobStore)
         var revision = 0L
-        val fullThumbnail = ByteArray(com.shai.riven.data.attachment.MAX_ATTACHMENT_THUMBNAIL_BYTES) { 7 }
+        val attachmentIds = mutableListOf<String>()
         repeat(20) { index ->
             val created = attachments.createImportedAttachment(
                 ImportedAttachmentInput(
                     kind = AttachmentKind.IMAGE,
                     mimeType = "image/png",
                     occurredAt = clock.incrementAndGet(),
-                    bytes = AttachmentByteSource.fromBytes(byteArrayOf(1, 2, index.toByte())),
+                    bytes = AttachmentByteSource.fromBytes(pngBytes()),
                 ),
             ) as AttachmentCreateResult.Success
-            thumbnailStore.write(created.attachment.attachmentId, fullThumbnail)
+            attachmentIds += created.attachment.attachmentId
             val appended = timeline.appendMessage(
                 AppendTimelineMessageInput(
                     conversationId = RivenConversationRuntime.CONVERSATION_ID,
@@ -569,18 +702,79 @@ class RivenConversationRuntimeTest {
         }
         attachmentBlobStore.openCount = 0
 
-        val first = (runtime.snapshot() as RivenRuntimeResult.Success).snapshot
-        val second = (runtime.snapshot() as RivenRuntimeResult.Success).snapshot
-
-        val previews = first.messages.flatMap(RivenChatMessage::images).map { it.previewBytes }
-        assertEquals(20, previews.size)
-        assertTrue(previews.sumOf(ByteArray::size) <= MAX_RUNTIME_THUMBNAIL_CACHE_BYTES)
-        assertTrue(previews.any(ByteArray::isEmpty))
+        val initial = (runtime.snapshot() as RivenRuntimeResult.Success).snapshot
+        assertEquals(20, initial.messages.flatMap(RivenChatMessage::images).size)
+        assertTrue(
+            initial.messages.flatMap(RivenChatMessage::images)
+                .all { it.previewState == RivenImagePreviewState.DEFERRED },
+        )
         assertEquals(0, attachmentBlobStore.openCount)
-        assertTrue(second.messages.flatMap(RivenChatMessage::images).isNotEmpty())
+
+        attachmentIds.forEach { attachmentId ->
+            assertTrue(runtime.loadImagePreview(attachmentId) is RivenRuntimeResult.Success)
+        }
+        val loaded = (runtime.snapshot() as RivenRuntimeResult.Success).snapshot
+        val images = loaded.messages.flatMap(RivenChatMessage::images)
+
+        assertEquals(20, images.size)
+        assertEquals(16, images.count { it.previewState == RivenImagePreviewState.READY })
+        assertEquals(4, images.count { it.previewState == RivenImagePreviewState.DEFERRED })
+        assertFalse(images.any { it.previewState == RivenImagePreviewState.UNAVAILABLE })
+        assertTrue(images.sumOf { it.previewBytes.size } <= MAX_RUNTIME_THUMBNAIL_CACHE_BYTES)
+        assertEquals(20, attachmentBlobStore.openCount)
+
+        val reloadedOldest = runtime.loadImagePreview(attachmentIds.first()) as RivenRuntimeResult.Success
+        val oldest = reloadedOldest.snapshot.messages.flatMap(RivenChatMessage::images)
+            .single { it.attachmentId == attachmentIds.first() }
+        assertEquals(RivenImagePreviewState.READY, oldest.previewState)
+        assertEquals(21, attachmentBlobStore.openCount)
     }
 
-    private fun runtime(http: OpenRouterHttpClient) = RivenConversationRuntime(
+    @Test
+    fun restoredOriginalRegeneratesThumbnailAndMissingOriginalIsExplicitlyUnavailable() = runBlocking {
+        val first = runtime(QueueHttpClient())
+        first.initialize()
+        val attachmentId = attachImageDraft("Restored image")
+        first.close()
+        runtimes.remove(first)
+        thumbnailStore.delete(attachmentId)
+
+        val restored = runtime(QueueHttpClient())
+        val beforeLoad = (restored.initialize() as RivenRuntimeResult.Success).snapshot
+        assertEquals(RivenImagePreviewState.DEFERRED, beforeLoad.draftImages.single().previewState)
+        attachmentBlobStore.openCount = 0
+        val regenerated = restored.loadImagePreview(attachmentId) as RivenRuntimeResult.Success
+
+        assertEquals(RivenImagePreviewState.READY, regenerated.snapshot.draftImages.single().previewState)
+        assertTrue(regenerated.snapshot.draftImages.single().previewBytes.isNotEmpty())
+        assertTrue(thumbnailStore.read(attachmentId)?.isNotEmpty() == true)
+        assertEquals(1, attachmentBlobStore.openCount)
+        restored.close()
+        runtimes.remove(restored)
+
+        thumbnailStore.delete(attachmentId)
+        val storageKey = (
+            AttachmentService(database, attachmentBlobStore).attachmentMetadata(attachmentId) as
+                com.shai.riven.data.attachment.AttachmentMetadataResult.Success
+            ).attachment.storageKey
+        attachmentBlobStore.delete(storageKey)
+        assertFalse(attachmentBlobStore.exists(storageKey))
+        val missing = runtime(QueueHttpClient())
+        val missingInitial = (missing.initialize() as RivenRuntimeResult.Success).snapshot
+        assertEquals(RivenImagePreviewState.DEFERRED, missingInitial.draftImages.single().previewState)
+        val unavailable = missing.loadImagePreview(attachmentId) as RivenRuntimeResult.Success
+
+        assertEquals(RivenImagePreviewState.UNAVAILABLE, unavailable.snapshot.draftImages.single().previewState)
+        assertTrue(unavailable.snapshot.draftImages.single().previewBytes.isEmpty())
+    }
+
+    private fun runtime(
+        http: OpenRouterHttpClient,
+        thumbnailGenerator: ImageThumbnailGenerator = ImageThumbnailGenerator { bytes ->
+            bytes.take(64).toByteArray()
+        },
+        afterImageImportedBeforeDraftLink: suspend (String) -> Unit = {},
+    ) = RivenConversationRuntime(
         database = database,
         credentialStore = credentials,
         selectedProfileStore = selection,
@@ -590,10 +784,11 @@ class RivenConversationRuntimeTest {
         attachmentBlobStore = attachmentBlobStore,
         attachmentThumbnailStore = thumbnailStore,
         imageMetadataDecoder = TEST_IMAGE_DECODER,
-        imageThumbnailGenerator = ImageThumbnailGenerator { bytes -> bytes.take(64).toByteArray() },
+        imageThumbnailGenerator = thumbnailGenerator,
         imageCapabilityStore = imageCapabilities,
         ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
         clock = { clock.incrementAndGet() },
+        afterImageImportedBeforeDraftLink = afterImageImportedBeforeDraftLink,
     ).also(runtimes::add)
 
     private suspend fun attachImageDraft(caption: String): String {
@@ -663,6 +858,11 @@ class RivenConversationRuntimeTest {
         "data: {\"id\":\"request-ok\",\"choices\":[{\"delta\":{\"content\":\"$content\"}}]}",
         "",
         "data: [DONE]",
+        "",
+    )
+
+    private fun providerFailure() = listOf(
+        "data: {\"id\":\"request-failed\",\"error\":{\"code\":429}}",
         "",
     )
 

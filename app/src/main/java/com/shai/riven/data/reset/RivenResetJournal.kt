@@ -5,6 +5,7 @@ import com.shai.riven.data.archive.RivenRestorePaths
 import com.shai.riven.data.archive.RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME
 import com.shai.riven.data.archive.writeAtomically
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
 import com.shai.riven.data.credential.FileProviderCredentialStore
 import com.shai.riven.data.persistence.RivenDatabase
 import java.io.File
@@ -37,6 +38,7 @@ internal class RivenResetPaths(
     val canonicalWal = File(canonicalDatabase.parentFile, canonicalDatabase.name + "-wal")
     val canonicalShm = File(canonicalDatabase.parentFile, canonicalDatabase.name + "-shm")
     val canonicalAttachments = FileAttachmentBlobStore.rootForContext(appContext)
+    val canonicalAttachmentThumbnails = FileAttachmentThumbnailStore.rootForContext(appContext)
     val canonicalCredentials = FileProviderCredentialStore.rootForContext(appContext)
     val archiveStaging = File(
         appContext.noBackupFilesDir,

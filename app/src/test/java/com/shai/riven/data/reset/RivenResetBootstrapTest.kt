@@ -7,6 +7,7 @@ import com.shai.riven.data.archive.RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME
 import com.shai.riven.data.archive.RivenRestorePaths
 import com.shai.riven.data.attachment.AttachmentService
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
 import com.shai.riven.data.background.AttachmentCleanupNoOpReason
 import com.shai.riven.data.background.AttachmentMaintenanceService
 import com.shai.riven.data.background.RepairJobHandlerRegistry
@@ -177,11 +178,16 @@ class RivenResetBootstrapTest {
             parentFile?.mkdirs()
             writeText("blob")
         }
+        FileAttachmentThumbnailStore.rootForContext(context).resolve("old.thumb").apply {
+            parentFile?.mkdirs()
+            writeText("derived preview")
+        }
         stageReset()
 
         assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
 
         assertFalse(FileAttachmentBlobStore.rootForContext(context).exists())
+        assertFalse(FileAttachmentThumbnailStore.rootForContext(context).exists())
     }
 
     @Test
@@ -611,6 +617,7 @@ class RivenResetBootstrapTest {
 
         assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
         assertTrue(RivenEmptyDatabaseVerifier.verify(context, context.getDatabasePath(RivenDatabase.DATABASE_NAME)))
+        assertFalse(FileAttachmentThumbnailStore.rootForContext(context).exists())
         assertFalse(RivenResetGate.isPending(context, resetRoot))
     }
 
@@ -627,6 +634,10 @@ class RivenResetBootstrapTest {
         File(context.filesDir, "riven_attachments/nested/blob.bin").apply {
             parentFile?.mkdirs()
             writeText("blob")
+        }
+        FileAttachmentThumbnailStore.rootForContext(context).resolve("interrupted.thumb").apply {
+            parentFile?.mkdirs()
+            writeText("derived preview")
         }
         File(context.noBackupFilesDir, "riven_provider_credentials/slot.cred").apply {
             parentFile?.mkdirs()

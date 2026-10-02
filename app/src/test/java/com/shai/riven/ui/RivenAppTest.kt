@@ -41,6 +41,7 @@ import com.shai.riven.data.reminder.ReminderSnapshot
 import com.shai.riven.data.runtime.RivenChatMessage
 import com.shai.riven.data.runtime.RivenMemoryItem
 import com.shai.riven.data.runtime.RivenImageAttachment
+import com.shai.riven.data.runtime.RivenImagePreviewState
 import com.shai.riven.data.runtime.RivenProfileSaveResult
 import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
@@ -117,6 +118,18 @@ class RivenAppNormalTest {
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.removeImageCalls == 1 }
         composeRule.onAllNodesWithTag("draft_image_preview").assertCountEquals(0)
         assertTrue(runtime.currentDraft == "Fresh caption before debounce")
+    }
+
+    @Test
+    fun visibleDeferredImageLoadsBeforeItIsReportedUnavailable() {
+        val runtime = FakeRivenRuntime(configuredSnapshot().withDeferredImageDraft())
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+
+        composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.loadPreviewCalls >= 1 }
+        composeRule.onNodeWithContentDescription("Selected image preview").assertIsDisplayed()
     }
 
     @Test
@@ -519,6 +532,8 @@ private class FakeRivenRuntime(
     val savedApiKeys = mutableListOf<String>()
     var removeImageCalls = 0
         private set
+    var loadPreviewCalls = 0
+        private set
 
     override suspend fun initialize() = success()
     override suspend fun snapshot() = success()
@@ -539,6 +554,23 @@ private class FakeRivenRuntime(
         current = current.copy(
             draft = content,
             draftImages = current.draftImages.filterNot { it.attachmentId == attachmentId },
+        )
+        return success()
+    }
+
+    override suspend fun loadImagePreview(attachmentId: String): RivenRuntimeResult {
+        loadPreviewCalls += 1
+        current = current.copy(
+            draftImages = current.draftImages.map { image ->
+                if (image.attachmentId == attachmentId) {
+                    image.copy(
+                        previewBytes = TEST_PNG_BYTES,
+                        previewState = RivenImagePreviewState.READY,
+                    )
+                } else {
+                    image
+                }
+            },
         )
         return success()
     }
@@ -757,6 +789,18 @@ private fun RivenRuntimeSnapshot.withImageDraft() = copy(
             mimeType = "image/png",
             byteSize = TEST_PNG_BYTES.size.toLong(),
             previewBytes = TEST_PNG_BYTES,
+        ),
+    ),
+)
+
+private fun RivenRuntimeSnapshot.withDeferredImageDraft() = copy(
+    draftImages = listOf(
+        RivenImageAttachment(
+            attachmentId = "deferred-draft-image",
+            mimeType = "image/png",
+            byteSize = TEST_PNG_BYTES.size.toLong(),
+            previewBytes = ByteArray(0),
+            previewState = RivenImagePreviewState.DEFERRED,
         ),
     ),
 )

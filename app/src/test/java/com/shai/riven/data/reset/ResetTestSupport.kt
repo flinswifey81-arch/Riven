@@ -4,6 +4,7 @@ import android.content.Context
 import com.shai.riven.data.archive.RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME
 import com.shai.riven.data.archive.RivenRestorePaths
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
 import com.shai.riven.data.credential.ClearProviderCredentialsResult as StoreClearResult
 import com.shai.riven.data.credential.DeleteProviderCredentialResult
 import com.shai.riven.data.credential.FileProviderCredentialStore
@@ -126,6 +127,7 @@ internal fun clearResetTestState(context: Context) {
     context.deleteDatabase(RivenDatabase.DATABASE_NAME)
     context.deleteDatabase(ReminderDatabase.DATABASE_NAME)
     FileAttachmentBlobStore.rootForContext(context).deleteRecursively()
+    FileAttachmentThumbnailStore.rootForContext(context).deleteRecursively()
     FileProviderCredentialStore.rootForContext(context).deleteRecursively()
     File(context.noBackupFilesDir, RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME).deleteRecursively()
     File(context.noBackupFilesDir, RivenRestorePaths.RESTORE_DIRECTORY).deleteRecursively()

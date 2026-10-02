@@ -108,7 +108,14 @@ class FileAttachmentThumbnailStore(rootDirectory: File) : AttachmentThumbnailSto
 
     companion object {
         fun fromContext(context: Context) = FileAttachmentThumbnailStore(
-            File(context.applicationContext.filesDir, "riven_attachment_thumbnails"),
+            rootForContext(context),
+        )
+
+        internal fun rootForContext(context: Context): File = File(
+            context.applicationContext.filesDir,
+            RIVEN_ATTACHMENT_THUMBNAIL_DIRECTORY_NAME,
         )
     }
 }
+
+internal const val RIVEN_ATTACHMENT_THUMBNAIL_DIRECTORY_NAME = "riven_attachment_thumbnails"

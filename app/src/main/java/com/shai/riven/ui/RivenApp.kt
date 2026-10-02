@@ -80,6 +80,7 @@ import com.shai.riven.data.runtime.RivenConversationRuntime
 import com.shai.riven.data.runtime.RivenMemoryItem
 import com.shai.riven.data.runtime.RivenChatMessage
 import com.shai.riven.data.runtime.RivenImageAttachment
+import com.shai.riven.data.runtime.RivenImagePreviewState
 import com.shai.riven.data.runtime.RivenProfileSaveResult
 import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
@@ -435,6 +436,20 @@ private fun ChatScreen(
             }
         }
     }
+    fun loadImagePreview(attachmentId: String) {
+        scope.launch {
+            when (val result = runtimeIo { runtime.loadImagePreview(attachmentId) }) {
+                is RivenRuntimeResult.Success -> {
+                    snapshot = result.snapshot
+                    onSnapshot(result.snapshot)
+                }
+                is RivenRuntimeResult.Failure -> result.snapshot?.let {
+                    snapshot = it
+                    onSnapshot(it)
+                }
+            }
+        }
+    }
 
     fun runConversation(
         preserveDraft: Boolean,
@@ -535,7 +550,9 @@ private fun ChatScreen(
                         )
                     }
                 }
-                items(messages, key = { it.id }) { message -> MessageBubble(message) }
+                items(messages, key = { it.id }) { message ->
+                    MessageBubble(message, onLoadImagePreview = ::loadImagePreview)
+                }
                 if (streamedReply.isNotBlank()) {
                     item(key = "streaming") {
                         MessageBubble(
@@ -547,6 +564,7 @@ private fun ChatScreen(
                                 providerModel = null,
                             ),
                             streaming = true,
+                            onLoadImagePreview = {},
                         )
                     }
                 }
@@ -636,6 +654,7 @@ private fun ChatScreen(
                 DraftImagePreview(
                     image = image,
                     pending = sending || cancelling,
+                    onLoadImagePreview = { loadImagePreview(image.attachmentId) },
                     onRemove = {
                         if (!sending && !cancelling) {
                             scope.launch {
@@ -740,7 +759,11 @@ private fun StatusBanner(message: String) {
 }
 
 @Composable
-private fun MessageBubble(message: RivenChatMessage, streaming: Boolean = false) {
+private fun MessageBubble(
+    message: RivenChatMessage,
+    streaming: Boolean = false,
+    onLoadImagePreview: (String) -> Unit,
+) {
     val isRiven = message.role == MessageRole.ASSISTANT
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -763,6 +786,7 @@ private fun MessageBubble(message: RivenChatMessage, streaming: Boolean = false)
                         description = if (isRiven) "Image from Riven" else "Image sent by Shai",
                         modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp)
                             .testTag("message_image_${image.attachmentId}"),
+                        onLoadPreview = { onLoadImagePreview(image.attachmentId) },
                     )
                     Spacer(Modifier.height(8.dp))
                 }
@@ -782,6 +806,7 @@ private fun MessageBubble(message: RivenChatMessage, streaming: Boolean = false)
 private fun DraftImagePreview(
     image: RivenImageAttachment,
     pending: Boolean,
+    onLoadImagePreview: () -> Unit,
     onRemove: () -> Unit,
 ) {
     Card(
@@ -799,6 +824,7 @@ private fun DraftImagePreview(
                 image = image,
                 description = if (pending) "Image pending send" else "Selected image preview",
                 modifier = Modifier.size(72.dp),
+                onLoadPreview = onLoadImagePreview,
             )
             Column(Modifier.weight(1f)) {
                 Text(if (pending) "Sending image" else "Image ready", color = WarmIvory)
@@ -826,18 +852,22 @@ private fun AttachmentThumbnail(
     image: RivenImageAttachment,
     description: String,
     modifier: Modifier,
+    onLoadPreview: () -> Unit,
 ) {
+    LaunchedEffect(image.attachmentId, image.previewState) {
+        if (image.previewState == RivenImagePreviewState.DEFERRED) onLoadPreview()
+    }
     val bitmap = remember(image.attachmentId, image.previewBytes) {
         decodePreviewBitmap(image.previewBytes)
     }
-    if (bitmap != null) {
+    if (image.previewState == RivenImagePreviewState.READY && bitmap != null) {
         Image(
             bitmap = bitmap.asImageBitmap(),
             contentDescription = description,
             contentScale = ContentScale.Crop,
             modifier = modifier.background(DeepInk, RoundedCornerShape(10.dp)),
         )
-    } else {
+    } else if (image.previewState == RivenImagePreviewState.UNAVAILABLE) {
         Box(
             modifier = modifier.background(DeepInk, RoundedCornerShape(10.dp)).semantics {
                 contentDescription = "$description unavailable"
@@ -845,6 +875,15 @@ private fun AttachmentThumbnail(
             contentAlignment = Alignment.Center,
         ) {
             Text("Image unavailable", color = MistBlue, style = MaterialTheme.typography.labelSmall)
+        }
+    } else {
+        Box(
+            modifier = modifier.background(DeepInk, RoundedCornerShape(10.dp)).semantics {
+                contentDescription = "$description loading"
+            },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Loading image", color = MistBlue, style = MaterialTheme.typography.labelSmall)
         }
     }
 }

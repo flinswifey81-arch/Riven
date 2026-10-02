@@ -89,6 +89,7 @@ class RivenResetBootstrap(
 
         runStep(RivenResetError::AttachmentDeleteFailure) {
             deleteDirectory(paths.canonicalAttachments)
+            deleteDirectory(paths.canonicalAttachmentThumbnails)
             hooks.afterAttachmentsDeleted()
         }?.let(::failure)?.let { return it }
 

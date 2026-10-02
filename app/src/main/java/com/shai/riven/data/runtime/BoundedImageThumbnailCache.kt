@@ -14,34 +14,33 @@ internal class BoundedImageThumbnailCache(
     private var totalBytes = 0
 
     @Synchronized
+    fun peek(attachmentId: String): ByteArray? = entries[attachmentId]
+
+    @Synchronized
     fun read(attachmentId: String): ByteArray? {
         entries[attachmentId]?.let { return it }
         val loaded = store?.read(attachmentId)
             ?.takeIf { it.size in 1..MAX_ATTACHMENT_THUMBNAIL_BYTES }
             ?: return null
-        while (entries.isNotEmpty() && totalBytes + loaded.size > maximumBytes) {
+        put(attachmentId, loaded)
+        return loaded
+    }
+
+    @Synchronized
+    fun put(attachmentId: String, bytes: ByteArray) {
+        if (bytes.size !in 1..MAX_ATTACHMENT_THUMBNAIL_BYTES || bytes.size > maximumBytes) return
+        entries.remove(attachmentId)?.let { totalBytes -= it.size }
+        while (entries.isNotEmpty() && totalBytes + bytes.size > maximumBytes) {
             val eldest = entries.entries.first()
             entries.remove(eldest.key)
             totalBytes -= eldest.value.size
         }
-        if (loaded.size > maximumBytes) return null
-        entries[attachmentId] = loaded
-        totalBytes += loaded.size
-        return loaded
+        entries[attachmentId] = bytes
+        totalBytes += bytes.size
     }
 
     @Synchronized
     fun remove(attachmentId: String) {
         entries.remove(attachmentId)?.let { totalBytes -= it.size }
-    }
-}
-
-internal class SnapshotThumbnailBudget(
-    private var remainingBytes: Int = MAX_RUNTIME_THUMBNAIL_CACHE_BYTES,
-) {
-    fun accept(bytes: ByteArray?): ByteArray {
-        if (bytes == null || bytes.size > remainingBytes) return ByteArray(0)
-        remainingBytes -= bytes.size
-        return bytes
     }
 }

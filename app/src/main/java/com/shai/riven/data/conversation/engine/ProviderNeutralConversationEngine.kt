@@ -66,7 +66,7 @@ class ProviderNeutralConversationEngine(
     beforeFinalRoomTransaction: suspend () -> Unit = {},
     ownerSessionToken: String = ConversationEngineOwnerRegistry.newToken(),
 ) : AutoCloseable {
-    private val timelineService = ConversationTimelineService(database)
+    private val canonicalImageSelector = CanonicalConversationImageSelector(database)
     private val ownerSessionToken = ownerSessionToken
     private val persistence = ConversationRunPersistence(
         database = database,
@@ -197,7 +197,11 @@ class ProviderNeutralConversationEngine(
             return ConversationEngineResult.Existing(reserved.toSnapshot())
         }
         try {
-            val imageIdsByMessage = relevantCanonicalImageIds(reserved)
+            val imageIdsByMessage = canonicalImageSelector.select(
+                conversationId = reserved.conversationId,
+                userMessageId = reserved.userMessageId,
+                contextHeadMessageId = reserved.contextHeadMessageId,
+            )
             val attachmentIds = imageIdsByMessage.values.flatten()
             if (attachmentIds.isNotEmpty() && imageInputAuthorization == null) {
                 return failRun(
@@ -542,28 +546,6 @@ class ProviderNeutralConversationEngine(
             current.height == expected.height &&
             current.bytes.size == expected.bytes.size &&
             current.contentSha256 == expected.contentSha256
-    }
-
-    /** Current images plus, for a text follow-up, only the immediately preceding user interaction. */
-    private suspend fun relevantCanonicalImageIds(
-        run: ConversationRunEntity,
-    ): Map<String, List<String>> {
-        val currentIds = persistence.attachmentIdsForMessage(run.userMessageId)
-        if (currentIds.isNotEmpty()) return mapOf(run.userMessageId to currentIds)
-        val tail = timelineService.activeTimelineTailEndingAt(
-            conversationId = run.conversationId,
-            contextHeadMessageId = run.contextHeadMessageId,
-            maximumMessages = ActiveConversationContextSource.MAX_TRANSCRIPT_MESSAGES,
-        ) as? TimelineReadResult.Success ?: return emptyMap()
-        val currentIndex = tail.messages.indexOfLast { it.id == run.userMessageId }
-        if (currentIndex <= 0) return emptyMap()
-        val previousUser = tail.messages.subList(0, currentIndex)
-            .lastOrNull { message ->
-                message.role == com.shai.riven.data.persistence.model.MessageRole.USER &&
-                    message.deliveryState == com.shai.riven.data.persistence.model.MessageDeliveryState.PERSISTED
-            } ?: return emptyMap()
-        val previousIds = persistence.attachmentIdsForMessage(previousUser.id)
-        return if (previousIds.isEmpty()) emptyMap() else mapOf(previousUser.id to previousIds)
     }
 
     private suspend fun settleCancellation(run: ConversationRunEntity) {
