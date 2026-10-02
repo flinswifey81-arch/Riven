@@ -1,6 +1,7 @@
 package com.shai.riven.data.automaticmemory
 
 import com.shai.riven.data.attention.AttentionContextMessage
+import com.shai.riven.data.attention.AttentionAssessment
 import com.shai.riven.data.attention.ImmediateAttentionSnapshot
 import com.shai.riven.data.attention.PositiveAttentionSignal
 import com.shai.riven.data.credential.ProviderSecret
@@ -29,6 +30,13 @@ import com.shai.riven.data.validation.ClassificationChangeReason
 import com.shai.riven.data.validation.ValidationAttentionSignals
 import com.shai.riven.data.validation.ValidationCandidateSnapshot
 import com.shai.riven.data.memory.RefinementDisposition
+import com.shai.riven.data.memory.ConsolidationProposal
+import com.shai.riven.data.memory.ConsolidationSnapshot
+import com.shai.riven.data.memory.ConsolidationSourceMemory
+import com.shai.riven.data.memory.OpenLoopLifecycleItem
+import com.shai.riven.data.memory.OpenLoopLifecycleProposal
+import com.shai.riven.data.memory.OpenLoopLifecycleSnapshot
+import com.shai.riven.data.persistence.model.OpenLoopState
 import java.math.BigDecimal
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -306,6 +314,96 @@ class OpenRouterAutomaticMemoryModelTest {
             assertTrue(failure is AutomaticMemoryModelFailure)
             assertEquals("INVALID_VALIDATION_RESPONSE", (failure as AutomaticMemoryModelFailure).errorCode)
         }
+    }
+
+    @Test
+    fun openLoopProposalUsesOnlySuppliedLoopIdsAndParsesTerminalTransition() = runBlocking {
+        val response = JSONObject()
+            .put("action", "TRANSITION")
+            .put("openLoopId", "loop-1")
+            .put("state", "COMPLETED")
+            .put("dueAt", JSONObject.NULL)
+        val http = RecordingHttpClient(response)
+        val model = OpenRouterAutomaticMemoryModel(runtimeProfile(), http)
+
+        val proposal = model.proposeOpenLoop(
+            OpenLoopLifecycleSnapshot(
+                attention = AttentionAssessment(
+                    experienceId = "experience-1",
+                    outcome = AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+                    positiveSignals = setOf(PositiveAttentionSignal.OPEN_LOOP),
+                    antiSignals = emptySet(),
+                    revision = 2,
+                    createdAt = 1,
+                    updatedAt = 2,
+                ),
+                grounding = snapshot(),
+                currentLoops = listOf(
+                    OpenLoopLifecycleItem(
+                        "loop-1",
+                        "Send draft",
+                        null,
+                        OpenLoopState.ACTIVE,
+                        null,
+                        SensitivityLevel.STANDARD,
+                        1,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            OpenLoopLifecycleProposal.Transition("loop-1", OpenLoopState.COMPLETED),
+            proposal,
+        )
+        val payload = JSONObject(JSONObject(http.requests.single().body.orEmpty())
+            .getJSONArray("messages").getJSONObject(1).getString("content"))
+        assertEquals("loop-1", payload.getJSONArray("currentLoops").getJSONObject(0)
+            .getString("openLoopId"))
+    }
+
+    @Test
+    fun consolidationProposalCarriesLockedCanonAndIndependentSourceIds() = runBlocking {
+        val response = JSONObject()
+            .put("action", "CREATE")
+            .put("sourceMemoryIds", JSONArray().put("m1").put("m2"))
+            .put("meaning", "A cautious broader pattern.")
+            .put("kind", "SEMANTIC")
+            .put("scope", "SHAI")
+            .put("certainty", "PROBABLE")
+            .put("sensitivity", "STANDARD")
+            .put("temporalState", "CURRENT")
+            .put("significance", JSONObject())
+            .put("entityLinks", JSONArray())
+        val http = RecordingHttpClient(response)
+        val model = OpenRouterAutomaticMemoryModel(
+            runtimeProfile(),
+            http,
+            lockedPersonalityCanon = "exact locked canon",
+        )
+        val snapshot = ConsolidationSnapshot(
+            corpusFingerprint = "corpus",
+            sources = listOf(
+                ConsolidationSourceMemory(
+                    "m1", MemoryKind.SEMANTIC, MemoryScope.SHAI, "First", MemoryCertainty.CERTAIN,
+                    SensitivityLevel.STANDARD, listOf("e1"), "evidence-1", 1,
+                ),
+                ConsolidationSourceMemory(
+                    "m2", MemoryKind.SEMANTIC, MemoryScope.SHAI, "Second", MemoryCertainty.PROBABLE,
+                    SensitivityLevel.STANDARD, listOf("e2"), "evidence-2", 2,
+                ),
+            ),
+        )
+
+        val proposal = model.proposeConsolidation(snapshot)
+
+        assertTrue(proposal is ConsolidationProposal.Create)
+        assertEquals(listOf("m1", "m2"), (proposal as ConsolidationProposal.Create).sourceMemoryIds)
+        val payload = JSONObject(JSONObject(http.requests.single().body.orEmpty())
+            .getJSONArray("messages").getJSONObject(1).getString("content"))
+        assertEquals("exact locked canon", payload.getString("lockedRivenPersonalityCanon"))
+        assertEquals("e2", payload.getJSONArray("sources").getJSONObject(1)
+            .getJSONArray("sourceExperienceIds").getString(0))
     }
 
     private fun snapshot() = ImmediateAttentionSnapshot(

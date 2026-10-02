@@ -71,6 +71,10 @@ class RivenResetBootstrapTest {
         val seeded = openCanonicalDatabase()
         try {
             assertEquals(1L, applicationTableCounts(seeded).getValue("suppression_source_coverages"))
+            assertEquals(1L, applicationTableCounts(seeded).getValue("memory_accessibility"))
+            assertEquals(1L, applicationTableCounts(seeded).getValue("open_loop_pass_checkpoints"))
+            assertEquals(1L, applicationTableCounts(seeded).getValue("consolidation_checkpoints"))
+            assertEquals(1L, applicationTableCounts(seeded).getValue("derived_artifact_payloads"))
         } finally {
             seeded.close()
         }
@@ -81,7 +85,7 @@ class RivenResetBootstrapTest {
         val fresh = openCanonicalDatabase()
         try {
             val counts = applicationTableCounts(fresh)
-            assertEquals(39, counts.size)
+            assertEquals(44, counts.size)
             assertTrue(counts.values.all { it == 0L })
         } finally {
             fresh.close()
@@ -112,7 +116,7 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun emptyDatabaseVerifierAcceptsFreshThirtyNineTableVersionTenDatabase() {
+    fun emptyDatabaseVerifierAcceptsFreshFortyFourTableVersionElevenDatabase() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         fresh.close()
@@ -149,14 +153,14 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun freshVersionTenResetDatabaseHasExactlyThirtyNineEmptyApplicationTables() {
+    fun freshVersionElevenResetDatabaseHasExactlyFortyFourEmptyApplicationTables() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         val counts = applicationTableCounts(fresh)
         fresh.close()
         createFreshReminderDatabase()
 
-        assertEquals(39, counts.size)
+        assertEquals(44, counts.size)
         assertTrue(counts.values.all { it == 0L })
         assertTrue(
             RivenEmptyDatabaseVerifier.verify(

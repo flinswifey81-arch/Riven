@@ -364,6 +364,16 @@ class RivenArchiveRestoreService(
                     "SET state = 'REBUILD_PENDING', artifact_hash = NULL, invalidated_at = ?",
                 arrayOf(occurredAt),
             )
+            sqlite.execSQL("DELETE FROM derived_artifact_payloads")
+            sqlite.execSQL(
+                "INSERT OR IGNORE INTO repair_jobs (" +
+                    "repair_job_id, job_type, state, target_type, target_id, attempt_count, " +
+                    "created_at, updated_at, last_error_code) " +
+                    "SELECT 'restore-rebuild-' || derived_artifact_id || '-' || ?, 'REBUILD_DERIVED', " +
+                    "'PENDING', 'DERIVED_ARTIFACT', derived_artifact_id, 0, ?, ?, " +
+                    "'RESTORE_REBUILD_REQUIRED' FROM derived_artifacts",
+                arrayOf(occurredAt, occurredAt, occurredAt),
+            )
             // WorkManager execution state is intentionally not portable. Requeue only jobs that
             // were RUNNING in the archived database without counting restore as another attempt.
             sqlite.execSQL(

@@ -34,6 +34,8 @@ class RivenBackgroundBootstrapAndWorkerTest {
 
             assertEquals(1, scheduler.attachmentSweepCalls)
             assertEquals(1, scheduler.repairSweepCalls)
+            assertEquals(1, scheduler.automaticMemorySweepCalls)
+            assertEquals(1, scheduler.memoryLifecycleSweepCalls)
             assertEquals(1, scheduler.periodicCalls)
             assertTrue(scheduler.targetedIds.isEmpty())
             assertEquals(before, canonicalCounts(database))
@@ -95,6 +97,8 @@ class RivenBackgroundBootstrapAndWorkerTest {
     private class RecordingScheduler : RivenBackgroundWorkScheduler {
         var attachmentSweepCalls = 0
         var repairSweepCalls = 0
+        var automaticMemorySweepCalls = 0
+        var memoryLifecycleSweepCalls = 0
         var periodicCalls = 0
         val targetedIds = mutableListOf<String>()
 
@@ -116,6 +120,16 @@ class RivenBackgroundBootstrapAndWorkerTest {
         override fun enqueueRepairSweep(): RivenBackgroundScheduleResult {
             repairSweepCalls += 1
             return enqueued("repair-sweep")
+        }
+
+        override fun enqueueAutomaticMemorySweep(): RivenBackgroundScheduleResult {
+            automaticMemorySweepCalls += 1
+            return enqueued("automatic-memory-sweep")
+        }
+
+        override fun enqueueMemoryLifecycleSweep(): RivenBackgroundScheduleResult {
+            memoryLifecycleSweepCalls += 1
+            return enqueued("memory-lifecycle-sweep")
         }
 
         override fun ensurePeriodicMaintenance(): RivenBackgroundScheduleResult {

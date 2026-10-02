@@ -28,14 +28,21 @@ class AutomaticMemorySweepService(
 
     override suspend fun runSweep(): AutomaticMemorySweepResult = try {
         val reconciled = queue.reconcileSucceededRuns(limit, clock())
+        val shortWindow = queue.requeueDueShortWindow(clock(), limit)
         val schedulingFailures = linkedSetOf<String>().apply {
             addAll(reconciled.schedulingFailedJobIds)
+            addAll(shortWindow.schedulingFailedJobIds)
             addAll(queue.schedulePending(limit))
         }
+        val shortWindowSchedule = queue.reconcileShortWindowSchedule(clock())
+        val shortWindowScheduleFailed =
+            shortWindowSchedule is com.shai.riven.data.background.RivenBackgroundScheduleResult.Failure
         AutomaticMemorySweepResult.Completed(
             reconciledJobIds = reconciled.jobIds,
             schedulingFailedJobIds = schedulingFailures.toList(),
-            moreWorkRemaining = reconciled.truncated,
+            moreWorkRemaining = reconciled.truncated ||
+                shortWindow.moreWorkRemaining ||
+                shortWindowScheduleFailed,
         )
     } catch (cancelled: CancellationException) {
         throw cancelled

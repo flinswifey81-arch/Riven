@@ -867,7 +867,7 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun migrationOneToTenRunsFullNonDestructiveChainWithoutInventingMemoryJobsOrCoverage() {
+    fun migrationOneToElevenRunsFullNonDestructiveChainWithoutInventingLifecycleRows() {
         migrationHelper.createDatabase(1).apply {
             execSQL("INSERT INTO conversations VALUES ('conversation-v1-v9', 1, 1, 'ACTIVE', 'Preserved')")
             execSQL(
@@ -879,7 +879,7 @@ class RivenMigrationTest {
         }
 
         val migrated = migrationHelper.runMigrationsAndValidate(
-            version = 10,
+            version = 11,
             migrations = listOf(
                 MIGRATION_1_2,
                 MIGRATION_2_3,
@@ -890,12 +890,38 @@ class RivenMigrationTest {
                 MIGRATION_7_8,
                 MIGRATION_8_9,
                 MIGRATION_9_10,
+                MIGRATION_10_11,
             ),
         )
 
         assertEquals("Exact", migrated.singleString("SELECT content FROM messages WHERE message_id='message-v1-v9'"))
         assertEquals(0L, migrated.rowCount("automatic_memory_jobs"))
         assertEquals(0L, migrated.rowCount("suppression_source_coverages"))
+        assertEquals(0L, migrated.rowCount("memory_accessibility"))
+        assertEquals(0L, migrated.rowCount("memory_aging_sweep_checkpoints"))
+        assertEquals(0L, migrated.rowCount("open_loop_pass_checkpoints"))
+        assertEquals(0L, migrated.rowCount("consolidation_checkpoints"))
+        assertEquals(0L, migrated.rowCount("derived_artifact_payloads"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationTenToElevenAddsEmptyLifecycleAndRepairMaterializationTables() {
+        migrationHelper.createDatabase(10).close()
+
+        val migrated = migrationHelper.runMigrationsAndValidate(11, listOf(MIGRATION_10_11))
+
+        assertEquals(0L, migrated.rowCount("memory_accessibility"))
+        assertEquals(0L, migrated.rowCount("memory_aging_sweep_checkpoints"))
+        assertEquals(0L, migrated.rowCount("open_loop_pass_checkpoints"))
+        assertEquals(0L, migrated.rowCount("consolidation_checkpoints"))
+        assertEquals(0L, migrated.rowCount("derived_artifact_payloads"))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('memory_accessibility')",
+        ))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('derived_artifact_payloads')",
+        ))
         migrated.close()
     }
 
@@ -1016,8 +1042,8 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun databaseVersionTenHasExactlyThirtyNineApplicationTables() {
-        val created = migrationHelper.createDatabase(10)
+    fun databaseVersionElevenHasExactlyFortyFourApplicationTables() {
+        val created = migrationHelper.createDatabase(11)
         val count = created.singleLong(
             """
             SELECT COUNT(*) FROM sqlite_master
@@ -1026,7 +1052,7 @@ class RivenMigrationTest {
               AND name NOT LIKE 'sqlite_%'
             """.trimIndent(),
         )
-        assertEquals(39L, count)
+        assertEquals(44L, count)
         created.close()
     }
 

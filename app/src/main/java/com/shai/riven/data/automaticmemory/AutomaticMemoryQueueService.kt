@@ -42,6 +42,11 @@ data class AutomaticMemoryReconciliationResult(
     val truncated: Boolean,
 )
 
+data class AutomaticMemoryShortWindowResult(
+    val schedulingFailedJobIds: List<String>,
+    val moreWorkRemaining: Boolean,
+)
+
 /**
  * Transactionally derives durable, message-unique automatic-memory work from successful runs.
  * Scheduling is intentionally outside the transaction: pending rows are authoritative and the
@@ -145,6 +150,60 @@ class AutomaticMemoryQueueService(
         require(limit > 0)
         val jobs = automaticMemoryDao.jobsInState(AutomaticMemoryJobState.PENDING, limit)
         return schedule(jobs)
+    }
+
+    fun requeueDueShortWindow(
+        occurredAt: Long,
+        limit: Int,
+    ): AutomaticMemoryShortWindowResult {
+        require(limit > 0)
+        val due = automaticMemoryDao.dueShortWindowJobs(
+            succeededState = AutomaticMemoryJobState.SUCCEEDED,
+            maxAttempts = MAX_AUTOMATIC_MEMORY_ATTEMPTS,
+            dueBefore = occurredAt - com.shai.riven.data.background.AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+            limit = limit + 1,
+        )
+        val requeued = due.take(limit).mapNotNull { job ->
+            if (automaticMemoryDao.requeueForShortWindow(
+                    jobId = job.id,
+                    succeededState = AutomaticMemoryJobState.SUCCEEDED,
+                    pendingState = AutomaticMemoryJobState.PENDING,
+                    attentionStage = AutomaticMemoryJobStage.REFRESH_ATTENTION,
+                    expectedAttemptCount = job.attemptCount,
+                    expectedContextRevision = job.sourceTimelineRevision,
+                    contextRevision = job.sourceTimelineRevision,
+                    updatedAt = occurredAt,
+                    reasonCode = SHORT_WINDOW_INACTIVITY_CODE,
+                ) == 1
+            ) {
+                job.copy(
+                    state = AutomaticMemoryJobState.PENDING,
+                    nextStage = AutomaticMemoryJobStage.REFRESH_ATTENTION,
+                    updatedAt = occurredAt,
+                    lastErrorCode = SHORT_WINDOW_INACTIVITY_CODE,
+                )
+            } else {
+                null
+            }
+        }
+        return AutomaticMemoryShortWindowResult(
+            schedulingFailedJobIds = schedule(requeued),
+            moreWorkRemaining = due.size > limit,
+        )
+    }
+
+    /** Recreates the replaceable wake from the earliest durable successful completion. */
+    fun reconcileShortWindowSchedule(occurredAt: Long): RivenBackgroundScheduleResult? {
+        val completedAt = automaticMemoryDao.earliestShortWindowEligibleCompletion(
+            succeededState = AutomaticMemoryJobState.SUCCEEDED,
+            maxAttempts = MAX_AUTOMATIC_MEMORY_ATTEMPTS,
+        ) ?: return null
+        val dueAt = completedAt.saturatingAdd(
+            com.shai.riven.data.background.AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+        )
+        return scheduler.enqueueAutomaticMemoryShortWindowSweep(
+            initialDelayMs = if (dueAt <= occurredAt) 0L else dueAt - occurredAt,
+        )
     }
 
     fun status(): AutomaticMemoryStatusSnapshot = AutomaticMemoryStatusSnapshot(
@@ -269,9 +328,13 @@ class AutomaticMemoryQueueService(
     private fun String.safeCodeFragment(): String =
         filter { it.isLetterOrDigit() || it == '_' }.ifBlank { "Exception" }.take(40)
 
+    private fun Long.saturatingAdd(increment: Long): Long =
+        if (this > Long.MAX_VALUE - increment) Long.MAX_VALUE else this + increment
+
     companion object {
         const val DISCARDED_BRANCH_CODE = "DISCARDED_REGENERATED_BRANCH"
         const val SHORT_WINDOW_CONTEXT_CODE = "SHORT_WINDOW_CONTEXT_AVAILABLE"
+        const val SHORT_WINDOW_INACTIVITY_CODE = "SHORT_WINDOW_INACTIVITY"
         const val MAX_SHORT_WINDOW_REQUEUES_PER_TURN = 8
     }
 

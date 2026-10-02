@@ -20,6 +20,7 @@ import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.EpistemicBasis
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
@@ -132,6 +133,12 @@ interface MemoryDao {
     fun candidateEvidence(candidateMemoryId: String): List<CandidateMemoryEvidenceEntity>
 
     @Query(
+        "DELETE FROM candidate_memory_evidence " +
+            "WHERE candidate_memory_id = :candidateMemoryId AND experience_id = :experienceId",
+    )
+    fun deleteCandidateEvidence(candidateMemoryId: String, experienceId: String): Int
+
+    @Query(
         """
         SELECT candidate_memory_evidence.* FROM candidate_memory_evidence
         INNER JOIN candidate_memories
@@ -195,6 +202,64 @@ interface MemoryDao {
     )
     fun directRelationshipsForMemory(memoryId: String): List<MemoryRelationshipEntity>
 
+    @Query(
+        """
+        SELECT DISTINCT memories.* FROM memories
+        INNER JOIN memory_relationships
+            ON memory_relationships.source_memory_id = memories.memory_id
+        WHERE memory_relationships.target_memory_id IN (:sourceMemoryIds)
+          AND memory_relationships.relationship_type = 'DERIVED_FROM'
+          AND memories.epistemic_basis = 'CONSOLIDATION'
+          AND memories.truth_state NOT IN ('CORRECTED_FALSE', 'UNSUPPORTED')
+          AND memories.retention_state != 'FORGOTTEN'
+          AND memories.lifecycle_state NOT IN ('SUPERSEDED', 'RESOLVED')
+        ORDER BY memories.memory_id
+        LIMIT :limit
+        """,
+    )
+    fun consolidatedDependentsOf(sourceMemoryIds: List<String>, limit: Int): List<MemoryEntity>
+
+    @Query(
+        """
+        SELECT DISTINCT memories.* FROM memories
+        INNER JOIN memory_relationships
+            ON memory_relationships.source_memory_id = memories.memory_id
+        WHERE memory_relationships.target_memory_id IN (:sourceMemoryIds)
+          AND memory_relationships.relationship_type = 'DERIVED_FROM'
+          AND memories.epistemic_basis = 'CONSOLIDATION'
+          AND (
+              memories.truth_state IN ('CORRECTED_FALSE', 'UNSUPPORTED')
+              OR memories.retention_state = 'FORGOTTEN'
+              OR memories.lifecycle_state IN ('SUPERSEDED', 'RESOLVED')
+          )
+        ORDER BY memories.memory_id
+        LIMIT :limit
+        """,
+    )
+    fun terminalConsolidatedDependentsOf(
+        sourceMemoryIds: List<String>,
+        limit: Int,
+    ): List<MemoryEntity>
+
+    @Query(
+        "DELETE FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId",
+    )
+    fun deleteMemoryEvidence(memoryId: String, experienceId: String): Int
+
+    @Query(
+        """
+        DELETE FROM memory_relationships
+        WHERE source_memory_id = :sourceMemoryId
+          AND target_memory_id = :targetMemoryId
+          AND relationship_type = :relationshipType
+        """,
+    )
+    fun deleteMemoryRelationship(
+        sourceMemoryId: String,
+        targetMemoryId: String,
+        relationshipType: MemoryRelationshipType,
+    ): Int
+
     @Query("SELECT COUNT(*) FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId")
     fun memoryEvidenceExists(memoryId: String, experienceId: String): Int
 
@@ -229,7 +294,7 @@ interface MemoryDao {
 
     @Query(
         """
-        SELECT memory_id AS memoryId,
+        SELECT memories.memory_id AS memoryId,
                kind,
                scope,
                substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
@@ -250,9 +315,13 @@ interface MemoryDao {
                practical_significance AS practicalSignificance,
                identity_significance AS identitySignificance,
                sensitivity,
-               updated_at AS updatedAt
+               updated_at AS updatedAt,
+               COALESCE(memory_accessibility.band, 'ORDINARY') AS accessibilityBand
         FROM memories
-        WHERE memory_id > :afterMemoryId
+        LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
+        WHERE memories.memory_id > :afterMemoryId
+          AND memories.truth_state != 'UNSUPPORTED'
+          AND memories.lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -260,7 +329,7 @@ interface MemoryDao {
               WHERE memory_evidence.memory_id = memories.memory_id
                 AND experiences.availability = 'AVAILABLE'
           )
-        ORDER BY memory_id
+        ORDER BY memories.memory_id
         LIMIT :limit
         """,
     )
@@ -272,7 +341,7 @@ interface MemoryDao {
 
     @Query(
         """
-        SELECT memory_id AS memoryId,
+        SELECT memories.memory_id AS memoryId,
                kind,
                scope,
                substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
@@ -293,9 +362,13 @@ interface MemoryDao {
                practical_significance AS practicalSignificance,
                identity_significance AS identitySignificance,
                sensitivity,
-               updated_at AS updatedAt
+               updated_at AS updatedAt,
+               COALESCE(memory_accessibility.band, 'ORDINARY') AS accessibilityBand
         FROM memories
-        WHERE memory_id IN (:memoryIds)
+        LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
+        WHERE memories.memory_id IN (:memoryIds)
+          AND memories.truth_state != 'UNSUPPORTED'
+          AND memories.lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -303,7 +376,7 @@ interface MemoryDao {
               WHERE memory_evidence.memory_id = memories.memory_id
                 AND experiences.availability = 'AVAILABLE'
           )
-        ORDER BY memory_id
+        ORDER BY memories.memory_id
         """,
     )
     fun conversationalRecallMemoryRows(
@@ -328,6 +401,8 @@ interface MemoryDao {
                sensitivity
         FROM memories
         WHERE memory_id > :afterMemoryId
+          AND truth_state != 'UNSUPPORTED'
+          AND lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -358,6 +433,8 @@ interface MemoryDao {
                sensitivity
         FROM memories
         WHERE memory_id IN (:memoryIds)
+          AND truth_state != 'UNSUPPORTED'
+          AND lifecycle_state != 'REASSESSMENT_PENDING'
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -474,6 +551,7 @@ data class ConversationalRecallMemoryRow(
     val identitySignificance: SignificanceLevel?,
     val sensitivity: SensitivityLevel,
     val updatedAt: Long,
+    val accessibilityBand: MemoryAccessibilityBand = MemoryAccessibilityBand.ORDINARY,
 )
 
 data class ValidationRecallEvidenceRow(

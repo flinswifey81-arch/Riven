@@ -19,6 +19,7 @@ import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DerivedArtifactPayloadEntity
 import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
@@ -171,7 +172,7 @@ class RivenArchiveExportAndStageTest {
         val manifest = checkNotNull(RivenArchiveManifestJson.decode(entries.single { it.first == ARCHIVE_MANIFEST_PATH }.second))
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
-        assertEquals(10, manifest.databaseSchemaVersion)
+        assertEquals(11, manifest.databaseSchemaVersion)
         assertEquals(2, manifest.reminderDatabaseSchemaVersion)
         assertEquals(
             sha256Hex(entries.single { it.first == ARCHIVE_REMINDER_DATABASE_PATH }.second),
@@ -581,18 +582,18 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(4, result.sourceDatabaseVersion)
-        assertEquals(10, result.resultingDatabaseVersion)
+        assertEquals(11, result.resultingDatabaseVersion)
     }
 
     @Test
     fun stageRejectsDatabaseNewerThanCurrentVersion() {
-        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 11") }
+        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 12") }
 
         val result = stage(archive)
 
         assertTrue(result is StageRivenRestoreResult.Failure)
         assertEquals(
-            RivenArchiveRestoreError.DatabaseTooNew(11, 10),
+            RivenArchiveRestoreError.DatabaseTooNew(12, 11),
             (result as StageRivenRestoreResult.Failure).error,
         )
     }
@@ -643,6 +644,14 @@ class RivenArchiveExportAndStageTest {
                 createdAt = 1,
             ),
         )
+        database.memoryLifecycleDao().upsertDerivedPayload(
+            DerivedArtifactPayloadEntity(
+                derivedArtifactId = "derived",
+                formatVersion = 1,
+                content = "non-portable projection",
+                builtAt = 1,
+            ),
+        )
 
         assertTrue(stage(validArchive(), occurredAt = 777) is StageRivenRestoreResult.RestoreStaged)
         val staged = RivenDatabase.buildNamedForRestoreValidation(
@@ -654,6 +663,10 @@ class RivenArchiveExportAndStageTest {
             assertEquals(DerivedArtifactState.REBUILD_PENDING, artifact.state)
             assertNull(artifact.artifactHash)
             assertEquals(777L, artifact.invalidatedAt)
+            assertNull(staged.memoryLifecycleDao().derivedPayload("derived"))
+            val rebuild = staged.maintenanceDao().repairJobs("DERIVED_ARTIFACT", "derived").single()
+            assertEquals(RepairJobType.REBUILD_DERIVED, rebuild.jobType)
+            assertEquals(RepairJobState.PENDING, rebuild.state)
         } finally {
             staged.close()
         }
@@ -870,7 +883,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionFiveArchiveRestoresIntoVersionTenWithoutInventingDraftRows() {
+    fun versionFiveArchiveRestoresIntoVersionElevenWithoutInventingDraftRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(5).apply {
             execSQL(
@@ -886,7 +899,7 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(5, result.sourceDatabaseVersion)
-        assertEquals(10, result.resultingDatabaseVersion)
+        assertEquals(11, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertTrue(staged.conversationDraftDao().allDrafts().isEmpty())
@@ -897,7 +910,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionSixArchiveRestoresIntoVersionTenWithoutInventingAttentionRows() {
+    fun versionSixArchiveRestoresIntoVersionElevenWithoutInventingAttentionRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(6).apply {
             execSQL(
@@ -911,7 +924,7 @@ class RivenArchiveExportAndStageTest {
 
         val result = stage(archive) as StageRivenRestoreResult.RestoreStaged
         assertEquals(6, result.sourceDatabaseVersion)
-        assertEquals(10, result.resultingDatabaseVersion)
+        assertEquals(11, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertEquals(1, staged.memoryDao().experienceCount())

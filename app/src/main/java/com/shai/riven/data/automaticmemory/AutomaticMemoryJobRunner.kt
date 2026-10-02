@@ -23,6 +23,12 @@ import com.shai.riven.data.persistence.model.AutomaticMemoryJobStage
 import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.memory.MemoryConsolidationDecider
+import com.shai.riven.data.memory.MemoryConsolidationResult
+import com.shai.riven.data.memory.MemoryConsolidationService
+import com.shai.riven.data.memory.OpenLoopLifecycleDecider
+import com.shai.riven.data.memory.OpenLoopLifecycleResult
+import com.shai.riven.data.memory.OpenLoopLifecycleService
 import com.shai.riven.data.validation.CandidateValidationDecider
 import com.shai.riven.data.validation.CandidateValidationError
 import com.shai.riven.data.validation.CandidateValidationResult
@@ -35,7 +41,9 @@ import kotlinx.coroutines.CancellationException
 interface AutomaticMemoryModel :
     ImmediateAttentionAnalyzer,
     CandidateMemoryExtractor,
-    CandidateValidationDecider
+    CandidateValidationDecider,
+    OpenLoopLifecycleDecider,
+    MemoryConsolidationDecider
 
 sealed interface AutomaticMemoryModelFactoryResult {
     data class Ready(val model: AutomaticMemoryModel) : AutomaticMemoryModelFactoryResult
@@ -76,6 +84,11 @@ class AutomaticMemoryJobRunner(
     private val clock: () -> Long = System::currentTimeMillis,
     private val maxAttempts: Int = com.shai.riven.data.background.MAX_AUTOMATIC_MEMORY_ATTEMPTS,
     private val runningLeaseMs: Long = com.shai.riven.data.background.AUTOMATIC_MEMORY_RUNNING_LEASE_MS,
+    private val maxConsolidationPassesPerRun: Int = DEFAULT_CONSOLIDATION_PASSES_PER_RUN,
+    private val maxRunElapsedMs: Long = DEFAULT_RUN_ELAPSED_BUDGET_MS,
+    private val elapsedRealtimeMs: () -> Long = { System.nanoTime() / NANOS_PER_MILLISECOND },
+    /** Reconciles the earliest durable five-minute wake after the completion commit. */
+    private val reconcileShortWindowSweep: (Long) -> Unit = {},
 ) : AutomaticMemoryJobOperations {
     private val dao = database.automaticMemoryDao()
     private val memoryDao = database.memoryDao()
@@ -86,6 +99,8 @@ class AutomaticMemoryJobRunner(
     init {
         require(maxAttempts > 0)
         require(runningLeaseMs > 0L)
+        require(maxConsolidationPassesPerRun > 0)
+        require(maxRunElapsedMs > 0L)
     }
 
     override suspend fun run(jobId: String): AutomaticMemoryJobRunResult {
@@ -93,6 +108,7 @@ class AutomaticMemoryJobRunner(
             is ClaimResult.Claimed -> result.job
             is ClaimResult.Completed -> return result.result
         }
+        val runStartedAt = elapsedRealtimeMs()
         val run = runDao.run(claimed.originatingRunId)
             ?: return fail(claimed, "MISSING_ORIGINATING_RUN", retryable = false)
         when (val source = sourceEligibility(claimed)) {
@@ -118,6 +134,9 @@ class AutomaticMemoryJobRunner(
         val validation = CandidateValidationService(database, decider = model)
         try {
             var stage = claimed.nextStage
+            if (elapsedBudgetReached(runStartedAt)) {
+                return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+            }
             if (
                 stage == AutomaticMemoryJobStage.ATTENTION ||
                 stage == AutomaticMemoryJobStage.REFRESH_ATTENTION
@@ -134,6 +153,9 @@ class AutomaticMemoryJobRunner(
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }
                 stage = nextStage
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                }
             }
             if (
                 stage == AutomaticMemoryJobStage.EXTRACTION ||
@@ -150,16 +172,55 @@ class AutomaticMemoryJobRunner(
                         return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                     }
                     stage = AutomaticMemoryJobStage.VALIDATION
+                    if (elapsedBudgetReached(runStartedAt)) {
+                        return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                    }
                 } else {
-                    if (!advance(claimed, stage, AutomaticMemoryJobStage.COMPLETE)) {
+                    if (!advance(claimed, stage, AutomaticMemoryJobStage.CONSOLIDATION)) {
                         return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                     }
-                    stage = AutomaticMemoryJobStage.COMPLETE
+                    stage = AutomaticMemoryJobStage.CONSOLIDATION
+                    if (elapsedBudgetReached(runStartedAt)) {
+                        return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                    }
                 }
             }
             if (stage == AutomaticMemoryJobStage.VALIDATION) {
-                val result = ensureValidation(claimed, extraction, validation)
+                val result = ensureValidation(claimed, extraction, validation, runStartedAt)
                 if (result != null) return finishStageFailure(claimed, result)
+                if (!advance(claimed, stage, AutomaticMemoryJobStage.OPEN_LOOP)) {
+                    return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
+                }
+                stage = AutomaticMemoryJobStage.OPEN_LOOP
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                }
+            }
+            if (stage == AutomaticMemoryJobStage.OPEN_LOOP) {
+                when (
+                    val result = OpenLoopLifecycleService(database, model, clock = clock)
+                        .process(claimed.sourceExperienceId)
+                ) {
+                    is OpenLoopLifecycleResult.Failure ->
+                        return finishStageFailure(
+                            claimed,
+                            if (result.retryable) StageFailure.Retryable(result.errorCode)
+                            else StageFailure.Permanent(result.errorCode),
+                        )
+                    else -> Unit
+                }
+                if (!advance(claimed, stage, AutomaticMemoryJobStage.CONSOLIDATION)) {
+                    return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
+                }
+                stage = AutomaticMemoryJobStage.CONSOLIDATION
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                }
+            }
+            if (stage == AutomaticMemoryJobStage.CONSOLIDATION) {
+                ensureConsolidation(model, run.profileId, runStartedAt)?.let { failure ->
+                    return finishStageFailure(claimed, failure)
+                }
                 if (!advance(claimed, stage, AutomaticMemoryJobStage.COMPLETE)) {
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }
@@ -253,6 +314,7 @@ class AutomaticMemoryJobRunner(
         job: AutomaticMemoryJobEntity,
         extraction: CandidateExtractionService,
         validation: CandidateValidationService,
+        runStartedAt: Long,
     ): StageFailure? {
         val candidates = when (
             val read = extraction.readCandidatesSeededByExperience(job.sourceExperienceId)
@@ -268,8 +330,42 @@ class AutomaticMemoryJobRunner(
                     is CandidateValidationResult.Failure -> return result.error.toStageFailure()
                     else -> Unit
                 }
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return StageFailure.Continuation(ELAPSED_TIME_CONTINUATION_CODE)
+                }
             }
         return null
+    }
+
+    private suspend fun ensureConsolidation(
+        model: AutomaticMemoryModel,
+        profileId: String,
+        runStartedAt: Long,
+    ): StageFailure? {
+        val service = MemoryConsolidationService(
+            database = database,
+            decider = model,
+            profileId = profileId,
+            clock = clock,
+        )
+        repeat(maxConsolidationPassesPerRun) {
+            when (val result = service.consolidate()) {
+                is MemoryConsolidationResult.Created,
+                is MemoryConsolidationResult.Reused,
+                -> if (elapsedBudgetReached(runStartedAt)) {
+                    return StageFailure.Continuation(ELAPSED_TIME_CONTINUATION_CODE)
+                }
+                is MemoryConsolidationResult.NoConsolidation,
+                is MemoryConsolidationResult.AlreadyProcessed,
+                -> return null
+                is MemoryConsolidationResult.Failure -> return if (result.retryable) {
+                    StageFailure.Retryable(result.errorCode)
+                } else {
+                    StageFailure.Permanent(result.errorCode)
+                }
+            }
+        }
+        return StageFailure.Continuation(CONSOLIDATION_CONTINUATION_CODE)
     }
 
     private suspend fun sourceEligibility(job: AutomaticMemoryJobEntity): SourceEligibility {
@@ -394,21 +490,31 @@ class AutomaticMemoryJobRunner(
         updatedAt = clock(),
     ) == 1
 
-    private fun finishSucceeded(job: AutomaticMemoryJobEntity): AutomaticMemoryJobRunResult =
-        if (dao.finishClaimed(
+    private fun finishSucceeded(job: AutomaticMemoryJobEntity): AutomaticMemoryJobRunResult {
+        val completedAt = clock()
+        return if (dao.finishClaimed(
                 job.id,
                 AutomaticMemoryJobState.RUNNING,
                 AutomaticMemoryJobState.SUCCEEDED,
                 AutomaticMemoryJobStage.COMPLETE,
                 job.attemptCount,
-                clock(),
+                completedAt,
                 null,
             ) == 1
         ) {
+            if (dao.shortWindowEligibleCompletion(
+                    jobId = job.id,
+                    succeededState = AutomaticMemoryJobState.SUCCEEDED,
+                    maxAttempts = maxAttempts,
+                ) != null
+            ) {
+                runCatching { reconcileShortWindowSweep(completedAt) }
+            }
             AutomaticMemoryJobRunResult.Succeeded(job.id)
         } else {
             AutomaticMemoryJobRunResult.LeaseLost(job.id)
         }
+    }
 
     private suspend fun exclude(
         job: AutomaticMemoryJobEntity,
@@ -451,8 +557,32 @@ class AutomaticMemoryJobRunner(
         failure: StageFailure,
     ): AutomaticMemoryJobRunResult = when (failure) {
         is StageFailure.Excluded -> exclude(job, failure.errorCode)
+        is StageFailure.Continuation -> continueAfterProgress(job, failure.errorCode)
         is StageFailure.Retryable -> fail(job, failure.errorCode, retryable = true)
         is StageFailure.Permanent -> fail(job, failure.errorCode, retryable = false)
+    }
+
+    private fun continueAfterProgress(
+        job: AutomaticMemoryJobEntity,
+        reasonCode: String,
+    ): AutomaticMemoryJobRunResult {
+        val code = reasonCode.safeErrorCode()
+        val currentStage = dao.job(job.id)?.nextStage
+            ?: return AutomaticMemoryJobRunResult.LeaseLost(job.id)
+        val changed = dao.releaseContinuation(
+            jobId = job.id,
+            runningState = AutomaticMemoryJobState.RUNNING,
+            pendingState = AutomaticMemoryJobState.PENDING,
+            expectedStage = currentStage,
+            expectedAttemptCount = job.attemptCount,
+            updatedAt = clock(),
+            reasonCode = code,
+        )
+        return if (changed == 1) {
+            AutomaticMemoryJobRunResult.RetryableFailure(job.id, code)
+        } else {
+            AutomaticMemoryJobRunResult.LeaseLost(job.id)
+        }
     }
 
     private fun fail(
@@ -540,6 +670,9 @@ class AutomaticMemoryJobRunner(
     private fun String.safeCodeFragment(): String =
         filter { it.isLetterOrDigit() || it == '_' }.ifBlank { "Exception" }.take(40)
 
+    private fun elapsedBudgetReached(runStartedAt: Long): Boolean =
+        elapsedRealtimeMs() - runStartedAt >= maxRunElapsedMs
+
     private sealed interface ClaimResult {
         data class Claimed(val job: AutomaticMemoryJobEntity) : ClaimResult
         data class Completed(val result: AutomaticMemoryJobRunResult) : ClaimResult
@@ -558,11 +691,17 @@ class AutomaticMemoryJobRunner(
 
     private sealed interface StageFailure {
         data class Excluded(val errorCode: String) : StageFailure
+        data class Continuation(val errorCode: String) : StageFailure
         data class Retryable(val errorCode: String) : StageFailure
         data class Permanent(val errorCode: String) : StageFailure
     }
 
     private companion object {
         const val ATTEMPT_BUDGET_EXHAUSTED = "ATTEMPT_BUDGET_EXHAUSTED"
+        const val CONSOLIDATION_CONTINUATION_CODE = "CONSOLIDATION_CONTINUATION"
+        const val ELAPSED_TIME_CONTINUATION_CODE = "ELAPSED_TIME_CONTINUATION"
+        const val DEFAULT_CONSOLIDATION_PASSES_PER_RUN = 8
+        const val DEFAULT_RUN_ELAPSED_BUDGET_MS = 8L * 60L * 1_000L
+        const val NANOS_PER_MILLISECOND = 1_000_000L
     }
 }

@@ -1,5 +1,6 @@
 package com.shai.riven.data.memory
 
+import com.shai.riven.data.persistence.dao.MaintenanceDao
 import java.security.MessageDigest
 
 /**
@@ -66,6 +67,27 @@ internal fun sourceClaimSuppressionHash(experienceId: String, lineageKey: String
         append(anchorEnd)
     }
     return sha256(canonicalSource)
+}
+
+/** Shared transaction-local suppression predicate for every semantic rebuild/provenance path. */
+internal fun isEvidenceSuppressedInCurrentTransaction(
+    maintenanceDao: MaintenanceDao,
+    experienceId: String,
+    lineageKey: String,
+): Boolean {
+    val exact = maintenanceDao.suppressionTombstone(
+        sourceClaimSuppressionHash(experienceId, lineageKey),
+    )?.isActive == true || maintenanceDao.suppressionTombstone(
+        sourceLineageHash(experienceId, lineageKey),
+    )?.isActive == true
+    if (exact) return true
+    return sourceSuppressionCoverage(experienceId, lineageKey)?.let { coverage ->
+        maintenanceDao.activeSuppressionCoverageOverlapCount(
+            coverage.sourceIdentityHash,
+            coverage.startOffset,
+            coverage.endOffsetExclusive,
+        ) != 0
+    } == true
 }
 
 private fun sha256(canonical: String): String = MessageDigest.getInstance("SHA-256")

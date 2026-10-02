@@ -445,3 +445,95 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
         )
     }
 }
+
+// Schema 11 is still an unreleased feature-branch schema authored atomically from Foundation v10.
+// Databases created by intermediate v11 development builds are intentionally unsupported.
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `memory_accessibility` (
+                `memory_id` TEXT NOT NULL,
+                `band` TEXT NOT NULL,
+                `reason_code` TEXT NOT NULL,
+                `evaluated_at` INTEGER NOT NULL,
+                `source_updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`memory_id`),
+                FOREIGN KEY(`memory_id`) REFERENCES `memories`(`memory_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_memory_accessibility_band_evaluated_at` " +
+                "ON `memory_accessibility` (`band`, `evaluated_at`)",
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `open_loop_pass_checkpoints` (
+                `experience_id` TEXT NOT NULL,
+                `attention_revision` INTEGER NOT NULL,
+                `timeline_revision` INTEGER,
+                `input_fingerprint` TEXT NOT NULL,
+                `result_fingerprint` TEXT NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`experience_id`),
+                FOREIGN KEY(`experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_open_loop_pass_checkpoints_input_fingerprint` " +
+                "ON `open_loop_pass_checkpoints` (`input_fingerprint`)",
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `consolidation_checkpoints` (
+                `checkpoint_id` TEXT NOT NULL,
+                `corpus_fingerprint` TEXT NOT NULL,
+                `source_set_hash` TEXT,
+                `source_memory_ids` TEXT,
+                `result_memory_id` TEXT,
+                `profile_id` TEXT NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                PRIMARY KEY(`checkpoint_id`)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_consolidation_checkpoints_corpus_fingerprint` " +
+                "ON `consolidation_checkpoints` (`corpus_fingerprint`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_consolidation_checkpoints_source_set_hash` " +
+                "ON `consolidation_checkpoints` (`source_set_hash`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                "`index_consolidation_checkpoints_corpus_fingerprint_source_set_hash` " +
+                "ON `consolidation_checkpoints` (`corpus_fingerprint`, `source_set_hash`)",
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `memory_aging_sweep_checkpoints` (
+                `checkpoint_id` TEXT NOT NULL,
+                `sweep_started_at` INTEGER NOT NULL,
+                `after_memory_id` TEXT NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                PRIMARY KEY(`checkpoint_id`)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `derived_artifact_payloads` (
+                `derived_artifact_id` TEXT NOT NULL,
+                `format_version` INTEGER NOT NULL,
+                `content` TEXT NOT NULL,
+                `built_at` INTEGER NOT NULL,
+                PRIMARY KEY(`derived_artifact_id`),
+                FOREIGN KEY(`derived_artifact_id`) REFERENCES `derived_artifacts`(`derived_artifact_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+    }
+}

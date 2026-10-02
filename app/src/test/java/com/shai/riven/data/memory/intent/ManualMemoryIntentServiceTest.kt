@@ -3,12 +3,21 @@ package com.shai.riven.data.memory.intent
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.shai.riven.data.background.DerivedArtifactRepairService
+import com.shai.riven.data.background.ProvenanceRepairService
+import com.shai.riven.data.background.RepairJobHandlerResult
+import com.shai.riven.data.background.RivenBackgroundClock
 import com.shai.riven.data.background.RivenBackgroundScheduleError
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.deletion.SafeDeleteService
 import com.shai.riven.data.memory.MemoryTransactionService
 import com.shai.riven.data.memory.MemoryWriteIdGenerator
+import com.shai.riven.data.memory.ConsolidationProposal
+import com.shai.riven.data.memory.ConsolidationSnapshot
+import com.shai.riven.data.memory.MemoryConsolidationDecider
+import com.shai.riven.data.memory.MemoryConsolidationResult
+import com.shai.riven.data.memory.MemoryConsolidationService
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
@@ -48,6 +57,8 @@ import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SignificanceLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
+import com.shai.riven.data.recall.ConversationalMemoryQuery
+import com.shai.riven.data.recall.TargetedConversationalMemoryRetriever
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -319,6 +330,68 @@ class ManualMemoryIntentServiceTest {
         )
         assertEquals(DerivedArtifactState.STALE, database.maintenanceDao().derivedArtifact("artifact-old")?.state)
         assertTrue(database.maintenanceDao().repairJobs("MEMORY", "memory-old").isNotEmpty())
+    }
+
+    @Test
+    fun correctedReplacementSurvivesObsoleteDeleteAndFeedsRecallConsolidationAndSearchDocument() = runBlocking {
+        insertExperience("experience-old", 1)
+        insertMemory("memory-old", "experience-old", "Incorrect meaning.")
+        assertCorrected(service().correct(correctInput()))
+        insertArtifact(
+            artifactId = "artifact-replacement",
+            memoryId = "memory-new",
+            artifactType = DerivedArtifactType.SEARCH_DOCUMENT,
+        )
+
+        assertDeleted(service().delete(ManualDeleteMemoryInput("memory-old", 20)))
+        assertEquals(
+            RepairJobHandlerResult.Success,
+            ProvenanceRepairService(database, RivenBackgroundClock { 21L }).repair(
+                "MEMORY",
+                "memory-new",
+            ),
+        )
+
+        val replacement = checkNotNull(database.memoryDao().memory("memory-new"))
+        assertEquals(MemoryTruthState.SUPPORTED, replacement.truthState)
+        assertEquals(MemoryLifecycleState.VALIDATED, replacement.lifecycleState)
+        assertEquals(EvidenceRole.CORRECTS, database.memoryDao().evidenceForMemory("memory-new").single().role)
+
+        val recall = TargetedConversationalMemoryRetriever(database)
+        val recalled = recall.retrieve(ConversationalMemoryQuery("accurate meaning", 22L))
+        recall.close()
+        assertEquals(listOf("memory-new"), recalled.memories.map { it.memoryId })
+
+        insertExperience("experience-peer", 23)
+        insertMemory("memory-peer", "experience-peer", "Independent peer meaning.")
+        var observedSnapshot: ConsolidationSnapshot? = null
+        assertEquals(
+            MemoryConsolidationResult.NoConsolidation,
+            MemoryConsolidationService(
+                database = database,
+                decider = object : MemoryConsolidationDecider {
+                    override suspend fun proposeConsolidation(snapshot: ConsolidationSnapshot): ConsolidationProposal {
+                        observedSnapshot = snapshot
+                        return ConsolidationProposal.NoConsolidation
+                    }
+                },
+                profileId = "profile",
+                clock = { 24L },
+            ).consolidate(),
+        )
+        assertTrue(checkNotNull(observedSnapshot).sources.any { it.memoryId == "memory-new" })
+
+        assertEquals(
+            RepairJobHandlerResult.Success,
+            DerivedArtifactRepairService(database, RivenBackgroundClock { 25L }).repair(
+                "DERIVED_ARTIFACT",
+                "artifact-replacement",
+            ),
+        )
+        assertTrue(
+            checkNotNull(database.memoryLifecycleDao().derivedPayload("artifact-replacement"))
+                .content.contains("Accurate meaning."),
+        )
     }
 
     @Test
@@ -856,11 +929,12 @@ class ManualMemoryIntentServiceTest {
         memoryId: String? = null,
         experienceId: String? = null,
         messageId: String? = null,
+        artifactType: DerivedArtifactType = DerivedArtifactType.SUMMARY,
     ) {
         database.maintenanceDao().insertDerivedArtifact(
             DerivedArtifactEntity(
                 id = artifactId,
-                artifactType = DerivedArtifactType.SUMMARY,
+                artifactType = artifactType,
                 state = DerivedArtifactState.CURRENT,
                 producerVersion = "test",
                 sourceRevision = 1,

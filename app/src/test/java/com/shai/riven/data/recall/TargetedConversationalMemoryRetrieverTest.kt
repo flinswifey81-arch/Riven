@@ -41,6 +41,7 @@ import com.shai.riven.data.memory.MemoryWriteResult
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.dao.ConversationalRecallMemoryRow
 import com.shai.riven.data.persistence.dao.ValidationRecallEntityRow
+import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
@@ -52,6 +53,7 @@ import com.shai.riven.data.persistence.model.ExperienceActor
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.ExperienceType
 import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
@@ -111,6 +113,32 @@ class TargetedConversationalMemoryRetrieverTest {
         assertEquals(listOf("rain"), result.memories.map { it.memoryId })
         assertEquals(EpistemicBasis.DIRECT_USER_STATEMENT, result.memories.single().epistemicBasis)
         assertTrue(ConversationalSelectionReason.LEXICAL_RELEVANCE in result.memories.single().selectionReasons)
+    }
+
+    @Test
+    fun limitedAccessibilityRequiresAnExactGroundedMemoryCue() = runBlocking {
+        insertMemory("limited", "Shai once catalogued antique telescope lenses.")
+        database.memoryLifecycleDao().upsertAccessibility(
+            MemoryAccessibilityEntity(
+                memoryId = "limited",
+                band = MemoryAccessibilityBand.LIMITED,
+                reasonCode = "AGED_ACCESS_LIMIT",
+                evaluatedAt = 100,
+                sourceUpdatedAt = 1,
+            ),
+        )
+        val recall = retriever()
+
+        val broad = recall.retrieve(query("antique telescope lenses"))
+        val grounded = recall.retrieve(
+            query(
+                "antique telescope lenses",
+                RivenGroundedRecallCues(directlyRelevantMemoryIds = setOf("limited")),
+            ),
+        )
+
+        assertTrue(broad.memories.isEmpty())
+        assertEquals(listOf("limited"), grounded.memories.map { it.memoryId })
     }
 
     @Test

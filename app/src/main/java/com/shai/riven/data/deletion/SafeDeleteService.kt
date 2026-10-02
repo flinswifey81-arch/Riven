@@ -3,6 +3,7 @@ package com.shai.riven.data.deletion
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
 import com.shai.riven.data.memory.SourceSuppressionCoverage
+import com.shai.riven.data.memory.hasTerminalLifecycleIntent
 import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.memory.sourceSuppressionCoverage
@@ -17,6 +18,9 @@ import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
+import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.MemoryLifecycleState
+import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.OpenLoopAuditAction
 import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobState
@@ -427,6 +431,24 @@ class SafeDeleteService(
             } else {
                 relationship.sourceMemoryId
             }
+            if (relationship.targetMemoryId == memoryId &&
+                relationship.relationshipType == MemoryRelationshipType.DERIVED_FROM
+            ) {
+                database.memoryDao().memory(relationship.sourceMemoryId)
+                    ?.takeIf {
+                        it.epistemicBasis == EpistemicBasis.CONSOLIDATION &&
+                            !it.hasTerminalLifecycleIntent()
+                    }
+                    ?.let { dependent ->
+                        database.memoryDao().updateMemory(
+                            dependent.copy(
+                                lifecycleState = MemoryLifecycleState.REASSESSMENT_PENDING,
+                                updatedAt = accumulator.occurredAt,
+                            ),
+                        )
+                        database.memoryLifecycleDao().deleteAccessibility(dependent.id)
+                    }
+            }
             dao.deleteMemoryRelationship(relationship)
             if (neighborId != memoryId && dao.memory(neighborId) != null) {
                 accumulator.reassessedMemoryIds += neighborId
@@ -497,6 +519,7 @@ class SafeDeleteService(
             state = DerivedArtifactState.INVALIDATED,
             invalidatedAt = accumulator.occurredAt,
         )
+        database.memoryLifecycleDao().deleteDerivedPayloads(newArtifactIds)
         newArtifactIds.forEach { artifactId ->
             accumulator.invalidatedArtifactIds += artifactId
             accumulator.queueRepair(
