@@ -7,6 +7,34 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.shai.riven.data.reminder.ReminderRepository
+
+internal class ReminderRecoveryCoordinator(
+    private val repository: ReminderRepository,
+    private val dispatcher: ReminderDeliveryDispatcher,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+) {
+    suspend fun recover(reason: String) {
+        repository.rescheduleAll(reason)
+        repository.pendingNotificationDeliveries().forEach { pending ->
+            dispatcher.recoverPending(pending)
+        }
+        repository.ringingDeliveries().forEach { reminder ->
+            val token = reminder.deliveryToken ?: return@forEach
+            val ringUntilAt = reminder.ringUntilAt ?: 0L
+            if (ringUntilAt <= nowMillis()) {
+                val delivering = repository.prepareRingingTimeoutNotification(
+                    reminder.id,
+                    reminder.scheduleRevision,
+                    token,
+                ) ?: return@forEach
+                dispatcher.recoverPending(delivering)
+            } else {
+                dispatcher.recoverPending(reminder)
+            }
+        }
+    }
+}
 
 class ReminderRecoveryWorker(
     appContext: Context,
@@ -16,25 +44,8 @@ class ReminderRecoveryWorker(
         val reason = inputData.getString(INPUT_REASON) ?: "unspecified"
         return try {
             val runtime = ReminderRuntime.from(applicationContext)
-            runtime.repository.rescheduleAll(reason)
             val dispatcher = ReminderDeliveryDispatcher.create(applicationContext, runtime)
-            runtime.repository.pendingNotificationDeliveries().forEach { pending ->
-                dispatcher.recoverPending(pending)
-            }
-            runtime.repository.ringingDeliveries().forEach { reminder ->
-                val token = reminder.deliveryToken ?: return@forEach
-                val ringUntilAt = reminder.ringUntilAt ?: 0L
-                if (ringUntilAt <= System.currentTimeMillis()) {
-                    val delivering = runtime.repository.prepareRingingTimeoutNotification(
-                        reminder.id,
-                        reminder.scheduleRevision,
-                        token,
-                    ) ?: return@forEach
-                    dispatcher.recoverPending(delivering)
-                } else {
-                    dispatcher.recoverPending(reminder)
-                }
-            }
+            ReminderRecoveryCoordinator(runtime.repository, dispatcher).recover(reason)
             Result.success()
         } catch (_: Exception) {
             Result.retry()

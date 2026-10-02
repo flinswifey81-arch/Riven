@@ -285,6 +285,29 @@ interface ReminderDao {
     @Query(
         """
         UPDATE local_reminders
+        SET status = 'DELIVERED',
+            last_failure_code = :failureCode,
+            last_failure_detail = :failureDetail,
+            updated_at = :now
+        WHERE reminder_id = :reminderId
+          AND schedule_revision = :scheduleRevision
+          AND delivery_token = :deliveryToken
+          AND delivery_mode = 'AUDIBLE_ALARM'
+          AND status = 'DELIVERING'
+        """,
+    )
+    suspend fun markTimedOutAlarmFollowupFailure(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+        failureCode: String,
+        failureDetail: String,
+        now: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE local_reminders
         SET status = 'DELIVERED', updated_at = :now
         WHERE reminder_id = :reminderId
           AND schedule_revision = :scheduleRevision

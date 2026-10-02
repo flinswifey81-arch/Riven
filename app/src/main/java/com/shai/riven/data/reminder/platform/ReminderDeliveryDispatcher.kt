@@ -47,13 +47,7 @@ internal class ReminderDeliveryDispatcher(
             reminder.deliveryMode
         }
         permissionFailure(dispatchMode, permissions.snapshot())?.let { (code, detail) ->
-            repository.failClaimedDelivery(
-                reminder.id,
-                reminder.scheduleRevision,
-                deliveryToken,
-                code,
-                detail,
-            )
+            handleDeliveryFailure(reminder, deliveryToken, code, detail)
             return
         }
         val current = repository.isCurrentDelivery(
@@ -64,9 +58,8 @@ internal class ReminderDeliveryDispatcher(
         when (current.status) {
             ReminderStatus.DELIVERING -> {
                 if (!notifier.postReminder(current, deliveryToken)) {
-                    repository.failClaimedDelivery(
-                        current.id,
-                        current.scheduleRevision,
+                    handleDeliveryFailure(
+                        current,
                         deliveryToken,
                         ReminderFailureCode.NOTIFICATION_PERMISSION_REQUIRED,
                         "Android blocked the reminder notification at delivery time.",
@@ -136,6 +129,33 @@ internal class ReminderDeliveryDispatcher(
                 }
             }
             else -> Unit
+        }
+    }
+
+    private suspend fun handleDeliveryFailure(
+        reminder: ReminderSnapshot,
+        deliveryToken: String,
+        code: ReminderFailureCode,
+        detail: String,
+    ) {
+        if (reminder.status == ReminderStatus.DELIVERING &&
+            reminder.deliveryMode == ReminderDeliveryMode.AUDIBLE_ALARM
+        ) {
+            repository.finishTimedOutAlarmFollowupFailure(
+                reminderId = reminder.id,
+                scheduleRevision = reminder.scheduleRevision,
+                deliveryToken = deliveryToken,
+                code = code,
+                detail = detail,
+            )
+        } else {
+            repository.failClaimedDelivery(
+                reminderId = reminder.id,
+                scheduleRevision = reminder.scheduleRevision,
+                deliveryToken = deliveryToken,
+                code = code,
+                detail = detail,
+            )
         }
     }
 
