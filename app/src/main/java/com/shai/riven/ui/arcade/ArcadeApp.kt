@@ -78,8 +78,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
+import com.shai.riven.ui.arcade.spire.CelestialSpireGame
 import com.shai.riven.ui.theme.AquaHeart
-import com.shai.riven.ui.theme.CoralHeart
 import com.shai.riven.ui.theme.DeepInk
 import com.shai.riven.ui.theme.LimeHeart
 import com.shai.riven.ui.theme.MistBlue
@@ -260,7 +260,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Layout preview • Game engines and live Riven replies are not connected in this slice.",
+                text = "Celestial Spire is playable • Four table previews and live Riven replies remain unconnected.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -364,6 +364,7 @@ private fun ArcadeGameScreen(
                 item {
                     GameBoardCard(
                         game = game,
+                        externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                         onAction = onAction,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -401,6 +402,7 @@ private fun ArcadeGameScreen(
                 )
                 GameBoardCard(
                     game = game,
+                    externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                     onAction = onAction,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -421,6 +423,7 @@ private fun ArcadeGameScreen(
 @Composable
 private fun GameBoardCard(
     game: ArcadeGame,
+    externallyPaused: Boolean,
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -431,7 +434,7 @@ private fun GameBoardCard(
         border = androidx.compose.foundation.BorderStroke(1.dp, MutedGold.copy(alpha = 0.42f)),
     ) {
         when (game) {
-            ArcadeGame.STACKER -> StackerPreview(onAction)
+            ArcadeGame.STACKER -> CelestialSpireGame(externallyPaused = externallyPaused)
             ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
             ArcadeGame.HEART_MATCH -> HeartMatchPreview(onAction)
             ArcadeGame.WRAPPING_SNAKE -> SnakePreview(onAction)
@@ -457,7 +460,7 @@ private fun PendingRulesLabel(
 }
 
 private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
-    ArcadeGame.STACKER -> 460.dp
+    ArcadeGame.STACKER -> 760.dp
     ArcadeGame.KLONDIKE -> 520.dp
     ArcadeGame.HEART_MATCH -> 520.dp
     ArcadeGame.WRAPPING_SNAKE -> 500.dp
@@ -755,74 +758,6 @@ private fun PreviewNotice(notice: String, onDismiss: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
             )
             TextButton(onClick = onDismiss) { Text("Got it") }
-        }
-    }
-}
-
-@Composable
-private fun StackerPreview(onAction: (ArcadeAction) -> Unit) {
-    PreviewBoard(title = "BLOCK BOARD", status = "Ruleset awaiting confirmation") {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Canvas(
-                modifier = Modifier
-                    .weight(1f)
-                    .aspectRatio(0.72f)
-                    .background(PenthouseNavy, RoundedCornerShape(16.dp))
-                    .border(1.dp, MutedGold.copy(alpha = 0.45f), RoundedCornerShape(16.dp)),
-            ) {
-                val columns = 8
-                val rows = 12
-                val cell = min(size.width / columns, size.height / rows)
-                val left = (size.width - columns * cell) / 2f
-                val top = (size.height - rows * cell) / 2f
-                for (column in 1 until columns) {
-                    drawLine(
-                        color = MistBlue.copy(alpha = 0.08f),
-                        start = Offset(left + column * cell, top),
-                        end = Offset(left + column * cell, top + rows * cell),
-                    )
-                }
-                for (row in 1 until rows) {
-                    drawLine(
-                        color = MistBlue.copy(alpha = 0.08f),
-                        start = Offset(left, top + row * cell),
-                        end = Offset(left + columns * cell, top + row * cell),
-                    )
-                }
-                val blocks = listOf(
-                    Triple(1, 9, RubyHeart),
-                    Triple(2, 9, RubyHeart),
-                    Triple(2, 10, AquaHeart),
-                    Triple(3, 10, AquaHeart),
-                    Triple(4, 8, VioletHeart),
-                    Triple(4, 9, VioletHeart),
-                    Triple(5, 9, MutedGold),
-                    Triple(6, 10, CoralHeart),
-                    Triple(6, 7, LimeHeart),
-                    Triple(7, 7, LimeHeart),
-                )
-                blocks.forEach { (column, row, color) ->
-                    drawRoundRect(
-                        color = color,
-                        topLeft = Offset(left + column * cell + 2f, top + row * cell + 2f),
-                        size = androidx.compose.ui.geometry.Size(cell - 4f, cell - 4f),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cell * 0.18f),
-                    )
-                }
-            }
-            Button(
-                onClick = { onAction(ArcadeAction.PreviewControl("Stacker board control")) },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MutedGold),
-            ) {
-                Text("CONTROL LAYOUT PREVIEW", color = DeepInk)
-            }
         }
     }
 }
@@ -1542,7 +1477,8 @@ private fun PlayingCard(
 }
 
 private fun pendingRulesText(game: ArcadeGame): String = when (game) {
-    ArcadeGame.STACKER -> "Preview only • Board actions and scoring await the confirmed Stacker ruleset."
+    ArcadeGame.STACKER ->
+        "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
     ArcadeGame.KLONDIKE -> "Preview only • Draw-one Klondike engine and legal move handling are not implemented."
     ArcadeGame.HEART_MATCH -> "Preview only • Cascade, sound, and power-up thresholds/effects remain to be finalized."
     ArcadeGame.WRAPPING_SNAKE -> "Preview only • Edge wrapping is intended; self-collision behavior remains undecided."

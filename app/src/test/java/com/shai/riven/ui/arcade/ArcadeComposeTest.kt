@@ -7,6 +7,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasSetTextAction
@@ -60,7 +61,7 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Layout preview • Game engines and live Riven replies are not connected in this slice.",
+            "Celestial Spire is playable • Four table previews and live Riven replies remain unconnected.",
         ).assertIsDisplayed()
     }
 
@@ -130,7 +131,7 @@ class ArcadeComposeTest {
     }
 
     @Test
-    fun stackerPreviewStaysNeutralUntilItsRulesetIsConfirmed() {
+    fun celestialSpireShowsPlayableEndlessControlsWithoutALossState() {
         composeRule.setContent {
             RivenTheme {
                 ArcadeExperience(
@@ -140,9 +141,13 @@ class ArcadeComposeTest {
             }
         }
 
-        composeRule.onNodeWithText("BLOCK BOARD").assertIsDisplayed()
-        composeRule.onNodeWithText("Ruleset awaiting confirmation").assertIsDisplayed()
-        composeRule.onNodeWithText("CONTROL LAYOUT PREVIEW").assertIsDisplayed()
+        composeRule.onNodeWithText("FALLING BLOCKS").assertIsDisplayed()
+        composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Move piece left").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Hard drop piece").assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "Endless play • Reaching the top refreshes the board at your selected speed.",
+        ).assertIsDisplayed()
     }
 
     @Test
@@ -199,6 +204,15 @@ class ArcadeActivityScreenshotTest {
         composeRule.onNodeWithText("Starstruck").performClick()
         composeRule.onNodeWithText("CELESTIAL GRID").assertIsDisplayed()
         writeScreenshot("starstruck-grid.png")
+    }
+
+    @Test
+    fun rendersPlayableCelestialSpireToInspectablePng() {
+        composeRule.onNodeWithText("Celestial Spire").performClick()
+        composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
+        composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
+        writeScreenshot("celestial-spire.png")
     }
 
     @Test
@@ -287,10 +301,23 @@ class ArcadeCompactActivityScreenshotTest {
             "celestial_hand_rewrite-the-stars_effect",
             useUnmergedTree = true,
         ).assertIsDisplayed()
+        writeScreenshot("shared-card-table-compact.png")
+    }
 
+    @Test
+    fun rendersCompactCelestialSpireControlsToInspectablePng() {
+        composeRule.onNodeWithText("Celestial Spire").performClick()
+        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(2)
+        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
+        composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
+        composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
+        writeScreenshot("celestial-spire-compact.png")
+    }
+
+    private fun writeScreenshot(fileName: String) {
         val output = File(
             System.getProperty("user.dir"),
-            "build/reports/arcade-preview/shared-card-table-compact.png",
+            "build/reports/arcade-preview/$fileName",
         )
         output.parentFile?.mkdirs()
         composeRule.runOnIdle {

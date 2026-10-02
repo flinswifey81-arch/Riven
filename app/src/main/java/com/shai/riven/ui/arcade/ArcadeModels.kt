@@ -18,8 +18,8 @@ enum class ArcadeGame(
     STACKER(
         gameId = "stacker",
         title = "Celestial Spire",
-        eyebrow = "STACKER • BLOCK BOARD",
-        description = "A celestial block-board preview reserved for the confirmed Stacker ruleset.",
+        eyebrow = "FALLING BLOCKS • ENDLESS",
+        description = "Clear lines at your chosen steady pace; reaching the top begins a fresh board.",
         mode = ArcadeGameMode.SOLO,
         commentary = "Let's read the board before choosing a move.",
     ),
@@ -57,8 +57,12 @@ enum class ArcadeGame(
     ),
     ;
 
-    /** Game engines are intentionally outside this foundation/layout slice. */
-    val hasPlayableEngine: Boolean = false
+    val hasPlayableEngine: Boolean
+        get() = this == STACKER
+
+    /** Solo tables refresh or continue; only Cosmic Mischief may eventually end in a loss. */
+    val allowsLoss: Boolean
+        get() = this == RIVEN_CARD_TABLE
 
     companion object {
         fun fromId(gameId: String?): ArcadeGame? = entries.firstOrNull { it.gameId == gameId }
