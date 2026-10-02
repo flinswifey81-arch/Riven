@@ -14,6 +14,7 @@ import com.shai.riven.data.persistence.entity.DerivedArtifactOpenLoopDependencyE
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
@@ -28,6 +29,29 @@ interface MaintenanceDao {
 
     @Query("SELECT * FROM suppression_tombstones WHERE source_lineage_hash = :sourceLineageHash LIMIT 1")
     fun suppressionTombstone(sourceLineageHash: String): SuppressionTombstoneEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun upsertSuppressionSourceCoverage(coverage: SuppressionSourceCoverageEntity)
+
+    @Query("SELECT * FROM suppression_source_coverages WHERE tombstone_id = :tombstoneId LIMIT 1")
+    fun suppressionSourceCoverage(tombstoneId: String): SuppressionSourceCoverageEntity?
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM suppression_source_coverages
+        INNER JOIN suppression_tombstones
+            ON suppression_tombstones.tombstone_id = suppression_source_coverages.tombstone_id
+        WHERE suppression_source_coverages.source_identity_hash = :sourceIdentityHash
+          AND suppression_source_coverages.start_offset < :endOffsetExclusive
+          AND suppression_source_coverages.end_offset_exclusive > :startOffset
+          AND suppression_tombstones.is_active = 1
+        """,
+    )
+    fun activeSuppressionCoverageOverlapCount(
+        sourceIdentityHash: String,
+        startOffset: Int,
+        endOffsetExclusive: Int,
+    ): Int
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     fun insertDerivedArtifact(artifact: DerivedArtifactEntity)

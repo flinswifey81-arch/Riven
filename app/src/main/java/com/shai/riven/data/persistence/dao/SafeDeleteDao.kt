@@ -24,6 +24,7 @@ import com.shai.riven.data.persistence.entity.OpenLoopAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
 
@@ -247,6 +248,12 @@ interface SafeDeleteDao {
 
     @Query("SELECT * FROM suppression_tombstones WHERE source_lineage_hash = :sourceLineageHash LIMIT 1")
     fun suppressionTombstone(sourceLineageHash: String): SuppressionTombstoneEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun upsertSuppressionSourceCoverage(coverage: SuppressionSourceCoverageEntity)
+
+    @Query("SELECT * FROM suppression_source_coverages WHERE tombstone_id = :tombstoneId LIMIT 1")
+    fun suppressionSourceCoverage(tombstoneId: String): SuppressionSourceCoverageEntity?
 
     @Query("SELECT * FROM suppression_tombstones ORDER BY created_at, tombstone_id")
     fun suppressionTombstones(): List<SuppressionTombstoneEntity>

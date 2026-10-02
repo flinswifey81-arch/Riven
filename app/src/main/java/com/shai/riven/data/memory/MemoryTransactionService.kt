@@ -11,6 +11,7 @@ import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
@@ -376,6 +377,7 @@ class MemoryTransactionService(
                 ensureForgetTombstone(
                     sourceClaimHash = sourceClaimSuppressionHash(source.experienceId, source.lineageKey),
                     legacyLineageHash = sourceLineageHash(source.experienceId, source.lineageKey),
+                    coverage = sourceSuppressionCoverage(source.experienceId, source.lineageKey),
                     occurredAt = input.occurredAt,
                 )
             }
@@ -969,36 +971,43 @@ class MemoryTransactionService(
     private fun ensureForgetTombstone(
         sourceClaimHash: String,
         legacyLineageHash: String,
+        coverage: SourceSuppressionCoverage?,
         occurredAt: Long,
     ) {
         val existing = maintenanceDao.suppressionTombstone(sourceClaimHash)
             ?: maintenanceDao.suppressionTombstone(legacyLineageHash)
-        when {
-            existing == null -> maintenanceDao.insertSuppressionTombstone(
-                SuppressionTombstoneEntity(
-                    id = idGenerator.nextId(),
-                    kind = SuppressionKind.FORGET,
-                    sourceLineageHash = sourceClaimHash,
-                    isActive = true,
-                    createdAt = occurredAt,
-                    formatVersion = 1,
+        val tombstone = when {
+            existing == null -> SuppressionTombstoneEntity(
+                id = idGenerator.nextId(),
+                kind = SuppressionKind.FORGET,
+                sourceLineageHash = sourceClaimHash,
+                isActive = true,
+                createdAt = occurredAt,
+                formatVersion = 1,
+            ).also(maintenanceDao::insertSuppressionTombstone)
+            existing.sourceLineageHash != sourceClaimHash ||
+                !existing.isActive || existing.kind != SuppressionKind.FORGET -> existing.copy(
+                kind = if (existing.kind == SuppressionKind.DELETE) {
+                    SuppressionKind.DELETE
+                } else {
+                    SuppressionKind.FORGET
+                },
+                sourceLineageHash = sourceClaimHash,
+                isActive = true,
+                expiresAt = null,
+            ).also(maintenanceDao::updateSuppressionTombstone)
+            else -> existing
+        }
+        coverage?.let { value ->
+            maintenanceDao.upsertSuppressionSourceCoverage(
+                SuppressionSourceCoverageEntity(
+                    id = tombstone.id,
+                    tombstoneId = tombstone.id,
+                    sourceIdentityHash = value.sourceIdentityHash,
+                    startOffset = value.startOffset,
+                    endOffsetExclusive = value.endOffsetExclusive,
                 ),
             )
-            existing.sourceLineageHash != sourceClaimHash ||
-                !existing.isActive ||
-                existing.kind != SuppressionKind.FORGET ->
-                maintenanceDao.updateSuppressionTombstone(
-                    existing.copy(
-                        kind = if (existing.kind == SuppressionKind.DELETE) {
-                            SuppressionKind.DELETE
-                        } else {
-                            SuppressionKind.FORGET
-                        },
-                        sourceLineageHash = sourceClaimHash,
-                        isActive = true,
-                        expiresAt = null,
-                    ),
-                )
         }
     }
 

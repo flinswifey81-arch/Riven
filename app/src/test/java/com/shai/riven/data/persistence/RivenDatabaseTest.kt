@@ -98,6 +98,7 @@ class RivenDatabaseTest {
             "open_loops",
             "open_loop_entity_links",
             "suppression_tombstones",
+            "suppression_source_coverages",
             "derived_artifacts",
             "derived_artifact_memory_dependencies",
             "derived_artifact_experience_dependencies",
@@ -145,12 +146,12 @@ class RivenDatabaseTest {
     }
 
     @Test
-    fun currentSchemaIdentityMatchesCheckedInVersionNineSchema() {
+    fun currentSchemaIdentityMatchesCheckedInVersionTenSchema() {
         database.openHelper.writableDatabase
             .query("SELECT identity_hash FROM room_master_table WHERE id = 42")
             .use { cursor ->
                 assertTrue(cursor.moveToFirst())
-                assertEquals("de6f6df0ec631af640087a19ff23c849", cursor.getString(0))
+                assertEquals("efc171f0cf7dc83cb99b6923c32e730b", cursor.getString(0))
                 assertFalse(cursor.moveToNext())
             }
     }

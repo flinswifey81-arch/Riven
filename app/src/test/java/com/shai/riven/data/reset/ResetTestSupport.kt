@@ -28,6 +28,8 @@ import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileCapabilityEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileEntity
 import com.shai.riven.data.persistence.entity.ShaiSystemInstructionsEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
+import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
@@ -48,6 +50,7 @@ import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.provider.ProviderCapability
 import java.io.File
@@ -181,6 +184,25 @@ internal fun seedRepresentativeState(database: RivenDatabase) {
             sensitivity = SensitivityLevel.STANDARD,
             createdAt = 1,
             updatedAt = 1,
+        ),
+    )
+    database.maintenanceDao().insertSuppressionTombstone(
+        SuppressionTombstoneEntity(
+            id = "suppression",
+            kind = SuppressionKind.FORGET,
+            sourceLineageHash = "a".repeat(64),
+            isActive = true,
+            createdAt = 1,
+            formatVersion = 1,
+        ),
+    )
+    database.maintenanceDao().upsertSuppressionSourceCoverage(
+        SuppressionSourceCoverageEntity(
+            id = "suppression",
+            tombstoneId = "suppression",
+            sourceIdentityHash = "b".repeat(64),
+            startOffset = 0,
+            endOffsetExclusive = 7,
         ),
     )
     database.shaiSystemInstructionsDao().insert(

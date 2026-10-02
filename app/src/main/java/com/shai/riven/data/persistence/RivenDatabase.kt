@@ -55,6 +55,7 @@ import com.shai.riven.data.persistence.entity.ProviderProfileCapabilityEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.entity.ShaiSystemInstructionsEntity
 import com.shai.riven.data.persistence.model.SignificanceLevelConverters
 
@@ -76,6 +77,7 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         OpenLoopEntity::class,
         OpenLoopEntityLinkEntity::class,
         SuppressionTombstoneEntity::class,
+        SuppressionSourceCoverageEntity::class,
         DerivedArtifactEntity::class,
         DerivedArtifactMemoryDependencyEntity::class,
         DerivedArtifactExperienceDependencyEntity::class,
@@ -100,7 +102,7 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         ConversationRunEntity::class,
         AutomaticMemoryJobEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -166,6 +168,7 @@ abstract class RivenDatabase : RoomDatabase() {
             MIGRATION_6_7,
             MIGRATION_7_8,
             MIGRATION_8_9,
+            MIGRATION_9_10,
         )
     }
 }

@@ -867,7 +867,7 @@ class RivenMigrationTest {
     }
 
     @Test
-    fun migrationOneToNineRunsFullNonDestructiveChainWithoutInventingMemoryJobs() {
+    fun migrationOneToTenRunsFullNonDestructiveChainWithoutInventingMemoryJobsOrCoverage() {
         migrationHelper.createDatabase(1).apply {
             execSQL("INSERT INTO conversations VALUES ('conversation-v1-v9', 1, 1, 'ACTIVE', 'Preserved')")
             execSQL(
@@ -879,7 +879,7 @@ class RivenMigrationTest {
         }
 
         val migrated = migrationHelper.runMigrationsAndValidate(
-            version = 9,
+            version = 10,
             migrations = listOf(
                 MIGRATION_1_2,
                 MIGRATION_2_3,
@@ -889,11 +889,37 @@ class RivenMigrationTest {
                 MIGRATION_6_7,
                 MIGRATION_7_8,
                 MIGRATION_8_9,
+                MIGRATION_9_10,
             ),
         )
 
         assertEquals("Exact", migrated.singleString("SELECT content FROM messages WHERE message_id='message-v1-v9'"))
         assertEquals(0L, migrated.rowCount("automatic_memory_jobs"))
+        assertEquals(0L, migrated.rowCount("suppression_source_coverages"))
+        migrated.close()
+    }
+
+    @Test
+    fun migrationNineToTenPreservesTombstonesAndAddsEmptyDurableCoverage() {
+        migrationHelper.createDatabase(9).apply {
+            execSQL(
+                "INSERT INTO suppression_tombstones VALUES " +
+                    "('tombstone-v9', 'FORGET', '${"a".repeat(64)}', 1, 10, NULL, 1)",
+            )
+            close()
+        }
+
+        val migrated = migrationHelper.runMigrationsAndValidate(10, listOf(MIGRATION_9_10))
+
+        assertEquals(1L, migrated.rowCount("suppression_tombstones"))
+        assertEquals(0L, migrated.rowCount("suppression_source_coverages"))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('suppression_source_coverages')",
+        ))
+        assertEquals(1L, migrated.singleLong(
+            "SELECT COUNT(*) FROM pragma_index_list('suppression_source_coverages') " +
+                "WHERE name='index_suppression_source_coverages_tombstone_id' AND `unique`=1",
+        ))
         migrated.close()
     }
 
@@ -986,6 +1012,21 @@ class RivenMigrationTest {
             """.trimIndent(),
         )
         assertEquals(38L, count)
+        created.close()
+    }
+
+    @Test
+    fun databaseVersionTenHasExactlyThirtyNineApplicationTables() {
+        val created = migrationHelper.createDatabase(10)
+        val count = created.singleLong(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT IN ('android_metadata', 'room_master_table')
+              AND name NOT LIKE 'sqlite_%'
+            """.trimIndent(),
+        )
+        assertEquals(39L, count)
         created.close()
     }
 

@@ -29,6 +29,8 @@ import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
+import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
@@ -61,6 +63,7 @@ import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -142,7 +145,7 @@ class RivenArchiveExportAndStageTest {
         val manifest = checkNotNull(RivenArchiveManifestJson.decode(entries.single { it.first == ARCHIVE_MANIFEST_PATH }.second))
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
-        assertEquals(9, manifest.databaseSchemaVersion)
+        assertEquals(10, manifest.databaseSchemaVersion)
         assertFalse(manifest.secretsIncluded)
     }
 
@@ -415,18 +418,18 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(4, result.sourceDatabaseVersion)
-        assertEquals(9, result.resultingDatabaseVersion)
+        assertEquals(10, result.resultingDatabaseVersion)
     }
 
     @Test
     fun stageRejectsDatabaseNewerThanCurrentVersion() {
-        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 10") }
+        val archive = mutateDatabase(validArchive()) { sqlite -> sqlite.execSQL("PRAGMA user_version = 11") }
 
         val result = stage(archive)
 
         assertTrue(result is StageRivenRestoreResult.Failure)
         assertEquals(
-            RivenArchiveRestoreError.DatabaseTooNew(10, 9),
+            RivenArchiveRestoreError.DatabaseTooNew(11, 10),
             (result as StageRivenRestoreResult.Failure).error,
         )
     }
@@ -488,6 +491,51 @@ class RivenArchiveExportAndStageTest {
             assertEquals(DerivedArtifactState.REBUILD_PENDING, artifact.state)
             assertNull(artifact.artifactHash)
             assertEquals(777L, artifact.invalidatedAt)
+        } finally {
+            staged.close()
+        }
+    }
+
+    @Test
+    fun stagePreservesDurableSuppressionCoverageAcrossArchiveRestore() {
+        val sourceIdentityHash = "b".repeat(64)
+        database.maintenanceDao().insertSuppressionTombstone(
+            SuppressionTombstoneEntity(
+                id = "coverage-tombstone",
+                kind = SuppressionKind.FORGET,
+                sourceLineageHash = "a".repeat(64),
+                isActive = true,
+                createdAt = 1,
+                formatVersion = 1,
+            ),
+        )
+        database.maintenanceDao().upsertSuppressionSourceCoverage(
+            SuppressionSourceCoverageEntity(
+                id = "coverage-tombstone",
+                tombstoneId = "coverage-tombstone",
+                sourceIdentityHash = sourceIdentityHash,
+                startOffset = 4,
+                endOffsetExclusive = 12,
+            ),
+        )
+
+        assertTrue(stage(validArchive()) is StageRivenRestoreResult.RestoreStaged)
+        val staged = openStagedDatabase()
+        try {
+            assertEquals(
+                SuppressionSourceCoverageEntity(
+                    id = "coverage-tombstone",
+                    tombstoneId = "coverage-tombstone",
+                    sourceIdentityHash = sourceIdentityHash,
+                    startOffset = 4,
+                    endOffsetExclusive = 12,
+                ),
+                staged.maintenanceDao().suppressionSourceCoverage("coverage-tombstone"),
+            )
+            assertEquals(
+                1,
+                staged.maintenanceDao().activeSuppressionCoverageOverlapCount(sourceIdentityHash, 8, 16),
+            )
         } finally {
             staged.close()
         }
@@ -659,7 +707,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionFiveArchiveRestoresIntoVersionNineWithoutInventingDraftRows() {
+    fun versionFiveArchiveRestoresIntoVersionTenWithoutInventingDraftRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(5).apply {
             execSQL(
@@ -675,7 +723,7 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is StageRivenRestoreResult.RestoreStaged)
         result as StageRivenRestoreResult.RestoreStaged
         assertEquals(5, result.sourceDatabaseVersion)
-        assertEquals(9, result.resultingDatabaseVersion)
+        assertEquals(10, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertTrue(staged.conversationDraftDao().allDrafts().isEmpty())
@@ -686,7 +734,7 @@ class RivenArchiveExportAndStageTest {
     }
 
     @Test
-    fun versionSixArchiveRestoresIntoVersionNineWithoutInventingAttentionRows() {
+    fun versionSixArchiveRestoresIntoVersionTenWithoutInventingAttentionRows() {
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
         migrationHelper.createDatabase(6).apply {
             execSQL(
@@ -700,7 +748,7 @@ class RivenArchiveExportAndStageTest {
 
         val result = stage(archive) as StageRivenRestoreResult.RestoreStaged
         assertEquals(6, result.sourceDatabaseVersion)
-        assertEquals(9, result.resultingDatabaseVersion)
+        assertEquals(10, result.resultingDatabaseVersion)
         val staged = openStagedDatabase()
         try {
             assertEquals(1, staged.memoryDao().experienceCount())
@@ -1197,6 +1245,7 @@ class RivenArchiveExportAndStageTest {
         "candidate_memories",
         "open_loops",
         "suppression_tombstones",
+        "suppression_source_coverages",
         "provider_profiles",
         "attachments",
         "shai_system_instructions",

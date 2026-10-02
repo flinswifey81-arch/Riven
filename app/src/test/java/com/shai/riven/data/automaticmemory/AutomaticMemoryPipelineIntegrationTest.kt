@@ -672,6 +672,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                 ManualMemoryIntentResult.Forgotten,
         )
 
+        reopenDatabase()
         replay = true
         val reextracted = CandidateExtractionService(database, model).extract(
             ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
@@ -681,6 +682,107 @@ class AutomaticMemoryPipelineIntegrationTest {
         assertTrue(reextracted.createdCandidateIds.isEmpty())
         assertEquals(listOf(pixelMemory.id), reextracted.existingMemoryIds)
         assertNotNull(database.memoryDao().memory(pixelMemory.id))
+    }
+
+    @Test
+    fun forgetCoverageBlocksNarrowerBroaderPunctuationAndPartialOverlapButKeepsAdjacentSibling() = runBlocking {
+        var replay = false
+        model.extractionOverride = { snapshot ->
+            if (!replay) {
+                CandidateExtractionProposal(
+                    listOf(
+                        proposalFor(snapshot, "I love sardines;", "Shai loves sardines."),
+                        proposalFor(snapshot, "my dog is Pixel.", "Shai's dog is Pixel."),
+                    ),
+                )
+            } else {
+                CandidateExtractionProposal(
+                    listOf(
+                        proposalFor(snapshot, "I love sardines", "Narrower sardine claim."),
+                        proposalFor(snapshot, "sardines;", "Punctuation-boundary sardine claim."),
+                        proposalFor(snapshot, "I love sardines;my", "Broader combined claim."),
+                        proposalFor(snapshot, "sardines;my", "Partially overlapping combined claim."),
+                        proposalFor(snapshot, "my dog is Pixel.", "Shai's dog is Pixel."),
+                    ),
+                )
+            }
+        }
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines;my dog is Pixel.",
+            "I will keep those independently anchored facts.",
+        )
+        enqueueAndRun(sourceTurn)
+        val initial = database.memoryDao().recentMemories(10)
+        val sardineMemory = initial.single { it.meaning.contains("sardine", ignoreCase = true) }
+        val pixelMemory = initial.single { it.meaning.contains("Pixel") }
+        val manual = ManualMemoryIntentService(database, scheduler)
+        assertTrue(
+            manual.forget(ManualForgetMemoryInput(sardineMemory.id, now())) is
+                ManualMemoryIntentResult.Forgotten,
+        )
+
+        replay = true
+        val result = CandidateExtractionService(database, model).extract(
+            ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
+        ) as CandidateExtractionResult.Extracted
+
+        assertEquals(4, result.suppressedLineageCount)
+        assertTrue(result.createdCandidateIds.isEmpty())
+        assertEquals(listOf(pixelMemory.id), result.existingMemoryIds)
+        assertNotNull(database.memoryDao().memory(pixelMemory.id))
+        assertEquals(1L, rowCount("suppression_source_coverages"))
+        assertEquals(0 to 16, singleCoverageRange())
+    }
+
+    @Test
+    fun deleteCoverageBlocksBoundaryDriftAndPartialOverlapButKeepsDisjointSibling() = runBlocking {
+        var replay = false
+        model.extractionOverride = { snapshot ->
+            if (!replay) {
+                CandidateExtractionProposal(
+                    listOf(
+                        proposalFor(snapshot, "I love sardines", "Shai loves sardines."),
+                        proposalFor(snapshot, "my dog is Pixel.", "Shai's dog is Pixel."),
+                    ),
+                )
+            } else {
+                CandidateExtractionProposal(
+                    listOf(
+                        proposalFor(snapshot, "love sardines", "Narrower deleted claim."),
+                        proposalFor(snapshot, "I love sardines;", "Punctuation-expanded deleted claim."),
+                        proposalFor(snapshot, "love sardines;my", "Partial deleted overlap."),
+                        proposalFor(snapshot, "I love sardines;my", "Broad deleted overlap."),
+                        proposalFor(snapshot, "my dog is Pixel.", "Shai's dog is Pixel."),
+                    ),
+                )
+            }
+        }
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines;my dog is Pixel.",
+            "I will keep those independently anchored facts.",
+        )
+        enqueueAndRun(sourceTurn)
+        val initial = database.memoryDao().recentMemories(10)
+        val sardineMemory = initial.single { it.meaning.contains("sardine", ignoreCase = true) }
+        val pixelMemory = initial.single { it.meaning.contains("Pixel") }
+        val manual = ManualMemoryIntentService(database, scheduler)
+        assertTrue(
+            manual.delete(ManualDeleteMemoryInput(sardineMemory.id, now())) is
+                ManualMemoryIntentResult.Deleted,
+        )
+
+        replay = true
+        val result = CandidateExtractionService(database, model).extract(
+            ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
+        ) as CandidateExtractionResult.Extracted
+
+        assertEquals(4, result.suppressedLineageCount)
+        assertTrue(result.createdCandidateIds.isEmpty())
+        assertEquals(listOf(pixelMemory.id), result.existingMemoryIds)
+        assertEquals(null, database.memoryDao().memory(sardineMemory.id))
+        assertNotNull(database.memoryDao().memory(pixelMemory.id))
+        assertEquals(1L, rowCount("suppression_source_coverages"))
+        assertEquals(0 to 15, singleCoverageRange())
     }
 
     @Test
@@ -932,6 +1034,19 @@ class AutomaticMemoryPipelineIntegrationTest {
 
     private fun experienceFor(messageId: String): String =
         database.memoryDao().canonicalConversationExperiencesForMessage(messageId).single().id
+
+    private fun rowCount(table: String): Long = database.openHelper.readableDatabase
+        .query("SELECT COUNT(*) FROM $table")
+        .use { cursor -> cursor.moveToFirst(); cursor.getLong(0) }
+
+    private fun singleCoverageRange(): Pair<Int, Int> = database.openHelper.readableDatabase
+        .query("SELECT start_offset, end_offset_exclusive FROM suppression_source_coverages")
+        .use { cursor ->
+            check(cursor.moveToFirst())
+            val range = cursor.getInt(0) to cursor.getInt(1)
+            check(!cursor.moveToNext())
+            range
+        }
 
     private fun reopenDatabase() {
         database.close()

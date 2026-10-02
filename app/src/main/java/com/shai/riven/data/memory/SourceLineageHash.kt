@@ -15,6 +15,35 @@ internal fun sourceLineageHash(experienceId: String, lineageKey: String): String
         .joinToString("") { byte -> "%02x".format(byte) }
 }
 
+internal data class SourceSuppressionCoverage(
+    val sourceIdentityHash: String,
+    val startOffset: Int,
+    val endOffsetExclusive: Int,
+)
+
+/** Opaque stable identity for an immutable source Experience; it contains no source content. */
+internal fun sourceIdentityHash(experienceId: String): String = sha256(
+    canonical = buildString {
+        append("riven-source-identity-v1:")
+        append(experienceId.toByteArray(Charsets.UTF_8).size)
+        append(':')
+        append(experienceId)
+    },
+)
+
+internal fun sourceSuppressionCoverage(
+    experienceId: String,
+    lineageKey: String,
+): SourceSuppressionCoverage? {
+    val (anchorStart, anchorEnd) = automaticClaimOffsets(lineageKey) ?: return null
+    if (anchorStart < 0 || anchorEnd <= anchorStart) return null
+    return SourceSuppressionCoverage(
+        sourceIdentityHash = sourceIdentityHash(experienceId),
+        startOffset = anchorStart,
+        endOffsetExclusive = anchorEnd,
+    )
+}
+
 /**
  * Minimal claim-scoped suppression key. Automatic candidate lineage v4 embeds a server-validated
  * immutable source-anchor range plus a semantic digest. Only the nonsemantic source offsets are
@@ -24,11 +53,7 @@ internal fun sourceLineageHash(experienceId: String, lineageKey: String): String
  * they do not receive V4 paraphrase reconciliation because they contain no validated child range.
  */
 internal fun sourceClaimSuppressionHash(experienceId: String, lineageKey: String): String {
-    val automaticClaim = AUTO_CANDIDATE_V4_PATTERN.matchEntire(lineageKey)
-        ?: return sourceLineageHash(experienceId, lineageKey)
-    val anchorStart = automaticClaim.groupValues[1].toIntOrNull()
-        ?: return sourceLineageHash(experienceId, lineageKey)
-    val anchorEnd = automaticClaim.groupValues[2].toIntOrNull()
+    val (anchorStart, anchorEnd) = automaticClaimOffsets(lineageKey)
         ?: return sourceLineageHash(experienceId, lineageKey)
     val canonicalSource = buildString {
         append("riven-source-claim-v3:")
@@ -40,9 +65,18 @@ internal fun sourceClaimSuppressionHash(experienceId: String, lineageKey: String
         append(':')
         append(anchorEnd)
     }
-    return MessageDigest.getInstance("SHA-256")
-        .digest(canonicalSource.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> "%02x".format(byte) }
+    return sha256(canonicalSource)
 }
 
+private fun sha256(canonical: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(canonical.toByteArray(Charsets.UTF_8))
+    .joinToString("") { byte -> "%02x".format(byte) }
+
 private val AUTO_CANDIDATE_V4_PATTERN = Regex("AUTO_CANDIDATE_V4:(\\d+):(\\d+):[0-9a-f]{64}")
+
+private fun automaticClaimOffsets(lineageKey: String): Pair<Int, Int>? {
+    val automaticClaim = AUTO_CANDIDATE_V4_PATTERN.matchEntire(lineageKey) ?: return null
+    val anchorStart = automaticClaim.groupValues[1].toIntOrNull() ?: return null
+    val anchorEnd = automaticClaim.groupValues[2].toIntOrNull() ?: return null
+    return anchorStart to anchorEnd
+}

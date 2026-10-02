@@ -419,3 +419,29 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
         )
     }
 }
+
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `suppression_source_coverages` (
+                `coverage_id` TEXT NOT NULL,
+                `tombstone_id` TEXT NOT NULL,
+                `source_identity_hash` TEXT NOT NULL,
+                `start_offset` INTEGER NOT NULL,
+                `end_offset_exclusive` INTEGER NOT NULL,
+                PRIMARY KEY(`coverage_id`),
+                FOREIGN KEY(`tombstone_id`) REFERENCES `suppression_tombstones`(`tombstone_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_suppression_source_coverages_tombstone_id` " +
+                "ON `suppression_source_coverages` (`tombstone_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_suppression_source_coverages_source_identity_hash_start_offset_end_offset_exclusive` " +
+                "ON `suppression_source_coverages` (`source_identity_hash`, `start_offset`, `end_offset_exclusive`)",
+        )
+    }
+}

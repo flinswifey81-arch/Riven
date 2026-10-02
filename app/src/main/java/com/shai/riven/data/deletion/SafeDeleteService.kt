@@ -2,23 +2,26 @@ package com.shai.riven.data.deletion
 
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
+import com.shai.riven.data.memory.SourceSuppressionCoverage
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
+import com.shai.riven.data.memory.sourceLineageHash
+import com.shai.riven.data.memory.sourceSuppressionCoverage
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
-import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.OpenLoopAuditAction
 import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
-import com.shai.riven.data.memory.sourceClaimSuppressionHash
-import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.requireTopLevelValidationRecallMutation
 import com.shai.riven.data.validation.validationRecallCorpusFence
@@ -395,6 +398,7 @@ class SafeDeleteService(
             accumulator.tombstones += ensureDeleteTombstone(
                 sourceClaimHash = sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey),
                 legacyLineageHash = sourceLineageHash(evidence.experienceId, evidence.lineageKey),
+                coverage = sourceSuppressionCoverage(evidence.experienceId, evidence.lineageKey),
                 occurredAt = accumulator.occurredAt,
             )
         }
@@ -506,6 +510,7 @@ class SafeDeleteService(
     private fun ensureDeleteTombstone(
         sourceClaimHash: String,
         legacyLineageHash: String,
+        coverage: SourceSuppressionCoverage?,
         occurredAt: Long,
     ): SuppressionTombstoneReference {
         val existing = dao.suppressionTombstone(sourceClaimHash)
@@ -529,6 +534,17 @@ class SafeDeleteService(
             ).also { updated ->
                 if (updated != existing) dao.updateSuppressionTombstone(updated)
             }
+        }
+        coverage?.let { value ->
+            dao.upsertSuppressionSourceCoverage(
+                SuppressionSourceCoverageEntity(
+                    id = tombstone.id,
+                    tombstoneId = tombstone.id,
+                    sourceIdentityHash = value.sourceIdentityHash,
+                    startOffset = value.startOffset,
+                    endOffsetExclusive = value.endOffsetExclusive,
+                ),
+            )
         }
         return SuppressionTombstoneReference(tombstone.id, tombstone.sourceLineageHash)
     }

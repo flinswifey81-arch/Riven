@@ -7,6 +7,7 @@ import com.shai.riven.data.memory.IntrinsicSignificanceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
 import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
+import com.shai.riven.data.memory.sourceSuppressionCoverage
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.CandidateMemoryState
@@ -140,12 +141,21 @@ internal class CandidateValidationGrounding(
     fun hasActiveSuppressionInCurrentTransaction(
         context: GroundedCandidateValidationContext,
     ): Boolean = context.evidence.any { evidence ->
-        maintenanceDao.suppressionTombstone(
+        val exactSuppression = maintenanceDao.suppressionTombstone(
             sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey),
         )?.isActive == true ||
             maintenanceDao.suppressionTombstone(
                 sourceLineageHash(evidence.experienceId, evidence.lineageKey),
             )?.isActive == true
+        val coverageSuppression = sourceSuppressionCoverage(evidence.experienceId, evidence.lineageKey)
+            ?.let { coverage ->
+                maintenanceDao.activeSuppressionCoverageOverlapCount(
+                    coverage.sourceIdentityHash,
+                    coverage.startOffset,
+                    coverage.endOffsetExclusive,
+                ) != 0
+            } == true
+        exactSuppression || coverageSuppression
     }
 
     fun admittedMemoryIdsInCurrentTransaction(

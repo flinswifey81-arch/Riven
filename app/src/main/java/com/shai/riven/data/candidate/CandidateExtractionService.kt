@@ -17,6 +17,7 @@ import com.shai.riven.data.memory.MemoryTransactionService
 import com.shai.riven.data.memory.MemoryWriteError
 import com.shai.riven.data.memory.MemoryWriteResult
 import com.shai.riven.data.memory.sourceClaimSuppressionHash
+import com.shai.riven.data.memory.sourceIdentityHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -102,7 +103,12 @@ class CandidateExtractionService(
                     val exactLineageHash = sourceLineageHash(input.experienceId, candidate.lineageKey)
                     if (
                         maintenanceDao.suppressionTombstone(claimSuppressionHash)?.isActive == true ||
-                        maintenanceDao.suppressionTombstone(exactLineageHash)?.isActive == true
+                        maintenanceDao.suppressionTombstone(exactLineageHash)?.isActive == true ||
+                        maintenanceDao.activeSuppressionCoverageOverlapCount(
+                            sourceIdentityHash(input.experienceId),
+                            candidate.sourceAnchor.startOffset,
+                            candidate.sourceAnchor.endOffsetExclusive,
+                        ) != 0
                     ) {
                         suppressedCount += 1
                         return@forEach
@@ -289,7 +295,7 @@ class CandidateExtractionService(
                 ),
             )
             val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate, sourceAnchor)
-            PreparedCandidate(index, candidate, lineageKey)
+            PreparedCandidate(index, candidate, lineageKey, sourceAnchor)
         }
     }
 
@@ -563,6 +569,7 @@ class CandidateExtractionService(
         val index: Int,
         val proposal: CandidateMemoryProposal,
         val lineageKey: String,
+        val sourceAnchor: ResolvedCandidateSourceAnchor,
     )
 
     private class CandidateExtractionAbort(val error: CandidateExtractionError) : RuntimeException()

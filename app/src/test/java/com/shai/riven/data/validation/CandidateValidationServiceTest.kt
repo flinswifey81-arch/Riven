@@ -12,6 +12,8 @@ import com.shai.riven.data.memory.MemoryTransactionService
 import com.shai.riven.data.memory.MemoryWriteResult
 import com.shai.riven.data.memory.RefinementDisposition
 import com.shai.riven.data.memory.ValidatedMemoryInput
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
+import com.shai.riven.data.memory.sourceIdentityHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -28,6 +30,7 @@ import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
+import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.AttentionSignal
@@ -651,6 +654,28 @@ class CandidateValidationServiceTest {
     fun deleteTombstoneCreatedAfterExtractionBlocksAdmission() = runBlocking {
         insertSuppression(SuppressionKind.DELETE)
         assertTrue(validate() is CandidateValidationResult.SuppressedCandidateDiscarded)
+    }
+
+    @Test
+    fun overlappingCoverageBlocksAtInitialValidationFence() = runBlocking {
+        replaceCandidateLineage(v4Lineage(2, 8, 'b'))
+        insertCoverageSuppression(0, 4, SuppressionKind.FORGET)
+
+        assertTrue(validate() is CandidateValidationResult.SuppressedCandidateDiscarded)
+        assertNull(decider.snapshot)
+        assertNull(database.memoryDao().candidateMemory(CANDIDATE))
+        assertEquals(0, database.memoryDao().memoryCount())
+    }
+
+    @Test
+    fun overlappingCoverageCreatedDuringDecisionBlocksAtApplyFence() = runBlocking {
+        replaceCandidateLineage(v4Lineage(2, 8, 'b'))
+        decider.onDecide = { insertCoverageSuppression(6, 12, SuppressionKind.DELETE) }
+
+        assertTrue(validate() is CandidateValidationResult.SuppressedCandidateDiscarded)
+        assertNotNull(decider.snapshot)
+        assertNull(database.memoryDao().candidateMemory(CANDIDATE))
+        assertEquals(0, database.memoryDao().memoryCount())
     }
 
     @Test // 62
@@ -1564,6 +1589,41 @@ class CandidateValidationServiceTest {
         )
     }
 
+    private fun insertCoverageSuppression(
+        startOffset: Int,
+        endOffsetExclusive: Int,
+        kind: SuppressionKind,
+    ) {
+        val lineage = v4Lineage(startOffset, endOffsetExclusive, 'a')
+        val tombstoneId = "coverage-tombstone-$startOffset-$endOffsetExclusive"
+        database.maintenanceDao().insertSuppressionTombstone(
+            SuppressionTombstoneEntity(
+                id = tombstoneId,
+                kind = kind,
+                sourceLineageHash = sourceClaimSuppressionHash(SEED, lineage),
+                isActive = true,
+                createdAt = 101,
+                formatVersion = 1,
+            ),
+        )
+        database.maintenanceDao().upsertSuppressionSourceCoverage(
+            SuppressionSourceCoverageEntity(
+                id = tombstoneId,
+                tombstoneId = tombstoneId,
+                sourceIdentityHash = sourceIdentityHash(SEED),
+                startOffset = startOffset,
+                endOffsetExclusive = endOffsetExclusive,
+            ),
+        )
+    }
+
+    private fun replaceCandidateLineage(lineage: String) {
+        database.openHelper.writableDatabase.execSQL(
+            "UPDATE candidate_memory_evidence SET lineage_key = ? WHERE candidate_memory_id = ?",
+            arrayOf(lineage, CANDIDATE),
+        )
+    }
+
     private fun replaceSeedSensitivity(sensitivity: SensitivityLevel) {
         database.openHelper.writableDatabase.execSQL(
             "UPDATE experiences SET sensitivity = ? WHERE experience_id = ?",
@@ -1654,6 +1714,9 @@ class CandidateValidationServiceTest {
         const val VALIDATED_AT = 500L
         const val CONVERSATION = "conversation"
         const val SOURCE_MESSAGE = "source-message"
+
+        fun v4Lineage(startOffset: Int, endOffsetExclusive: Int, digestCharacter: Char): String =
+            "AUTO_CANDIDATE_V4:$startOffset:$endOffsetExclusive:${digestCharacter.toString().repeat(64)}"
 
         fun admission(
             temporalState: TemporalState = TemporalState.CURRENT,

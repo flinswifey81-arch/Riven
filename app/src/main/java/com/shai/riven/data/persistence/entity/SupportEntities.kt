@@ -206,6 +206,36 @@ data class SuppressionTombstoneEntity(
 )
 
 @Entity(
+    tableName = "suppression_source_coverages",
+    foreignKeys = [
+        ForeignKey(
+            entity = SuppressionTombstoneEntity::class,
+            parentColumns = ["tombstone_id"],
+            childColumns = ["tombstone_id"],
+            onDelete = ForeignKey.CASCADE,
+            onUpdate = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [
+        Index(value = ["tombstone_id"], unique = true),
+        Index(value = ["source_identity_hash", "start_offset", "end_offset_exclusive"]),
+    ],
+)
+data class SuppressionSourceCoverageEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "coverage_id")
+    val id: String,
+    @ColumnInfo(name = "tombstone_id")
+    val tombstoneId: String,
+    @ColumnInfo(name = "source_identity_hash")
+    val sourceIdentityHash: String,
+    @ColumnInfo(name = "start_offset")
+    val startOffset: Int,
+    @ColumnInfo(name = "end_offset_exclusive")
+    val endOffsetExclusive: Int,
+)
+
+@Entity(
     tableName = "derived_artifacts",
     indices = [Index(value = ["artifact_type", "state"])],
 )

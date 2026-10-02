@@ -66,6 +66,12 @@ class RivenResetBootstrapTest {
     @Test
     fun factoryResetClearsEveryRoomApplicationTable() {
         seedCanonicalState()
+        val seeded = openCanonicalDatabase()
+        try {
+            assertEquals(1L, applicationTableCounts(seeded).getValue("suppression_source_coverages"))
+        } finally {
+            seeded.close()
+        }
         stageReset()
 
         assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
@@ -73,7 +79,7 @@ class RivenResetBootstrapTest {
         val fresh = openCanonicalDatabase()
         try {
             val counts = applicationTableCounts(fresh)
-            assertEquals(38, counts.size)
+            assertEquals(39, counts.size)
             assertTrue(counts.values.all { it == 0L })
         } finally {
             fresh.close()
@@ -104,7 +110,7 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun emptyDatabaseVerifierAcceptsFreshThirtyEightTableVersionNineDatabase() {
+    fun emptyDatabaseVerifierAcceptsFreshThirtyNineTableVersionTenDatabase() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         fresh.close()
@@ -140,13 +146,13 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun freshVersionNineResetDatabaseHasExactlyThirtyEightEmptyApplicationTables() {
+    fun freshVersionTenResetDatabaseHasExactlyThirtyNineEmptyApplicationTables() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         val counts = applicationTableCounts(fresh)
         fresh.close()
 
-        assertEquals(38, counts.size)
+        assertEquals(39, counts.size)
         assertTrue(counts.values.all { it == 0L })
         assertTrue(
             RivenEmptyDatabaseVerifier.verify(
