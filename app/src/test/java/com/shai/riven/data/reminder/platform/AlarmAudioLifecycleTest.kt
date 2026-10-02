@@ -42,6 +42,7 @@ class AlarmAudioLifecycleTest {
         status = ReminderStatus.RINGING,
         scheduleRevision = 1,
         deliveryToken = "delivery-1",
+        ringUntilAt = 600_000,
         lastFailureCode = null,
         lastFailureDetail = null,
     )

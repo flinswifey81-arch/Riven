@@ -29,6 +29,7 @@ enum class ReminderTimeZonePolicy {
 enum class ReminderStatus {
     SCHEDULED,
     SNOOZED,
+    DELIVERING,
     RINGING,
     DELIVERED,
     COMPLETED,
@@ -53,6 +54,7 @@ enum class ReminderEventKind {
     EDITED,
     SCHEDULED,
     RESCHEDULED,
+    DELIVERY_CLAIMED,
     DELIVERED,
     SNOOZED,
     COMPLETED,
@@ -90,6 +92,7 @@ data class ReminderSnapshot(
     val status: ReminderStatus,
     val scheduleRevision: Long,
     val deliveryToken: String?,
+    val ringUntilAt: Long?,
     val lastFailureCode: ReminderFailureCode?,
     val lastFailureDetail: String?,
 )
@@ -165,3 +168,5 @@ internal fun defaultFeatureControl(feature: ReminderFeature): ReminderFeatureCon
         enabled = true,
         allowDuringQuietHours = false,
     )
+
+const val AUDIBLE_ALARM_MAX_RING_MILLIS = 10 * 60 * 1_000L

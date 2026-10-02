@@ -27,6 +27,7 @@ import org.robolectric.annotation.Config
 class ReminderRepositoryTest {
     private lateinit var database: ReminderDatabase
     private lateinit var scheduler: RecordingScheduler
+    private lateinit var deliveryEffects: RecordingDeliveryEffects
     private lateinit var repository: ReminderRepository
     private var idCounter = 0
     private val now = Instant.parse("2026-10-02T12:00:00Z")
@@ -38,9 +39,11 @@ class ReminderRepositoryTest {
             .allowMainThreadQueries()
             .build()
         scheduler = RecordingScheduler()
+        deliveryEffects = RecordingDeliveryEffects()
         repository = ReminderRepository(
             dao = database.reminderDao(),
             scheduler = scheduler,
+            deliveryEffects = deliveryEffects,
             timePolicy = ReminderTimePolicy(Clock.fixed(now, ZoneOffset.UTC)) { ZoneOffset.UTC },
             newId = { "id-${++idCounter}" },
         )
@@ -83,7 +86,7 @@ class ReminderRepositoryTest {
         assertEquals(ReminderDeliveryClaim.IgnoredDuplicateOrStale, duplicate)
         assertEquals(
             1,
-            database.reminderDao().eventCount(created.reminder.id, ReminderEventKind.DELIVERED.name),
+            database.reminderDao().eventCount(created.reminder.id, ReminderEventKind.DELIVERY_CLAIMED.name),
         )
     }
 
@@ -99,6 +102,7 @@ class ReminderRepositoryTest {
 
         val snoozed = repository.snoozeDelivery(
             created.reminder.id,
+            created.reminder.scheduleRevision,
             claim.deliveryToken,
             Duration.ofMinutes(10),
         ) as ReminderOperationResult.Success
@@ -151,6 +155,7 @@ class ReminderRepositoryTest {
 
         val dismissed = repository.dismissDelivery(
             created.reminder.id,
+            created.reminder.scheduleRevision,
             claim.deliveryToken,
         ) as ReminderOperationResult.Success
         val report = repository.rescheduleAll("BOOT_COMPLETED")
@@ -177,9 +182,135 @@ class ReminderRepositoryTest {
         assertEquals(claim.deliveryToken, ringing.deliveryToken)
         assertEquals(ReminderStatus.RINGING, ringing.status)
         assertEquals(
-            1,
-            database.reminderDao().eventCount(created.reminder.id, ReminderEventKind.DELIVERED.name),
+            now.plusMillis(AUDIBLE_ALARM_MAX_RING_MILLIS).toEpochMilli(),
+            ringing.ringUntilAt,
         )
+        assertEquals(
+            1,
+            database.reminderDao().eventCount(created.reminder.id, ReminderEventKind.DELIVERY_CLAIMED.name),
+        )
+    }
+
+    @Test
+    fun staleActionRevisionCannotMutateMatchingDeliveryToken() = runBlocking {
+        val created = repository.create(
+            draft("Revision guarded", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),
+        ) as ReminderOperationResult.Success
+        val claim = repository.claimDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+
+        val result = repository.dismissDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision + 1,
+            claim.deliveryToken,
+        )
+        val current = repository.ringingDeliveries().single()
+
+        assertTrue(result is ReminderOperationResult.Failure)
+        assertEquals(ReminderStatus.RINGING, current.status)
+        assertEquals(claim.deliveryToken, current.deliveryToken)
+        assertTrue(deliveryEffects.cancellations.isEmpty())
+    }
+
+    @Test
+    fun claimedOldBroadcastCannotPostAfterEditAndOnlyLatestScheduleRemains() = runBlocking {
+        val created = repository.create(draft("Race edit")) as ReminderOperationResult.Success
+        val claim = repository.claimDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+
+        val edited = repository.edit(
+            created.reminder.id,
+            draft("Edited", LocalDateTime.parse("2026-10-05T10:00:00")),
+        ) as ReminderOperationResult.Success
+
+        assertNull(repository.isCurrentDelivery(created.reminder.id, 1, claim.deliveryToken))
+        assertEquals(2, edited.reminder.scheduleRevision)
+        assertEquals(2, scheduler.active.getValue(created.reminder.id).scheduleRevision)
+        assertTrue(deliveryEffects.cancellations.contains(created.reminder.id to claim.deliveryToken))
+    }
+
+    @Test
+    fun cancelWinningRaceMakesQueuedOldBroadcastStale() = runBlocking {
+        val created = repository.create(draft("Race cancel")) as ReminderOperationResult.Success
+
+        val cancelled = repository.cancel(created.reminder.id) as ReminderOperationResult.Success
+        val stale = repository.claimDelivery(created.reminder.id, created.reminder.scheduleRevision)
+
+        assertEquals(ReminderStatus.CANCELLED, cancelled.reminder.status)
+        assertEquals(ReminderDeliveryClaim.IgnoredDuplicateOrStale, stale)
+        assertTrue(created.reminder.id !in scheduler.active)
+    }
+
+    @Test
+    fun completeAfterClaimInvalidatesTokenAndStopsOnlyThatDelivery() = runBlocking {
+        val created = repository.create(
+            draft("Race complete", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),
+        ) as ReminderOperationResult.Success
+        val claim = repository.claimDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+
+        val completed = repository.complete(created.reminder.id) as ReminderOperationResult.Success
+
+        assertEquals(ReminderStatus.COMPLETED, completed.reminder.status)
+        assertEquals(2, completed.reminder.scheduleRevision)
+        assertNull(repository.isCurrentDelivery(created.reminder.id, 1, claim.deliveryToken))
+        assertTrue(deliveryEffects.cancellations.contains(created.reminder.id to claim.deliveryToken))
+    }
+
+    @Test
+    fun rescheduleWinningRaceLeavesExactlyOneLatestPlatformSchedule() = runBlocking {
+        val created = repository.create(draft("Race recovery")) as ReminderOperationResult.Success
+
+        repository.rescheduleAll("timezone_changed")
+        val stale = repository.claimDelivery(created.reminder.id, created.reminder.scheduleRevision)
+
+        assertEquals(ReminderDeliveryClaim.IgnoredDuplicateOrStale, stale)
+        assertEquals(2, scheduler.active.getValue(created.reminder.id).scheduleRevision)
+        assertEquals(1, scheduler.active.size)
+    }
+
+    @Test
+    fun snoozeDeadlineRemainsAbsoluteAcrossDeviceTimezoneChange() = runBlocking {
+        var deviceZone: ZoneId = ZoneOffset.UTC
+        val timezoneAware = ReminderRepository(
+            dao = database.reminderDao(),
+            scheduler = scheduler,
+            deliveryEffects = deliveryEffects,
+            timePolicy = ReminderTimePolicy(Clock.fixed(now, ZoneOffset.UTC)) { deviceZone },
+            newId = { "tz-${++idCounter}" },
+        )
+        val created = timezoneAware.create(
+            ReminderDraft(
+                title = "Absolute snooze",
+                localDateTime = LocalDateTime.parse("2026-10-04T09:00:00"),
+                zoneId = ZoneOffset.UTC,
+                timeZonePolicy = ReminderTimeZonePolicy.FOLLOW_DEVICE,
+                deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM,
+            ),
+        ) as ReminderOperationResult.Success
+        val claim = timezoneAware.claimDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+        val snoozed = timezoneAware.snoozeDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+            claim.deliveryToken,
+            Duration.ofMinutes(10),
+        ) as ReminderOperationResult.Success
+        deviceZone = ZoneId.of("Pacific/Auckland")
+
+        timezoneAware.rescheduleAll("timezone_changed")
+        val recovered = timezoneAware.observeReminders().first().single()
+
+        assertEquals(snoozed.reminder.requestedTriggerAt, recovered.requestedTriggerAt)
+        assertEquals(snoozed.reminder.scheduledTriggerAt, recovered.scheduledTriggerAt)
     }
 
     private fun draft(
@@ -211,6 +342,14 @@ class ReminderRepositoryTest {
         override fun cancel(reminderId: String) {
             cancellations += reminderId
             active.remove(reminderId)
+        }
+    }
+
+    private class RecordingDeliveryEffects : ReminderDeliveryEffects {
+        val cancellations = mutableListOf<Pair<String, String?>>()
+
+        override fun cancelDelivery(reminderId: String, deliveryToken: String?) {
+            cancellations += reminderId to deliveryToken
         }
     }
 }

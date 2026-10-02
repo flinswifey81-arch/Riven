@@ -125,7 +125,7 @@ sealed interface RivenRestoreBootstrapResult {
 }
 
 internal const val CURRENT_RIVEN_DATABASE_VERSION = 8
-internal const val CURRENT_REMINDER_DATABASE_VERSION = 1
+internal const val CURRENT_REMINDER_DATABASE_VERSION = 2
 internal const val MINIMUM_SUPPORTED_RIVEN_ARCHIVE_FORMAT_VERSION = 1
 internal const val ARCHIVE_MANIFEST_PATH = "manifest.json"
 internal const val ARCHIVE_DATABASE_PATH = "database/riven.db"

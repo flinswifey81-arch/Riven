@@ -30,7 +30,7 @@ class ReminderDatabaseTest {
     }
 
     @Test
-    fun independentVersionOneSchemaContainsOnlyReminderTables() {
+    fun independentVersionTwoSchemaContainsOnlyReminderTables() {
         val tables = database.openHelper.writableDatabase.query(
             """
             SELECT name FROM sqlite_master

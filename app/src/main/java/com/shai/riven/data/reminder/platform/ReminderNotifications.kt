@@ -53,23 +53,46 @@ object ReminderNotificationChannels {
     }
 }
 
-class ReminderNotifier(private val context: Context) {
+internal interface ReminderNotificationSink {
+    fun postReminder(reminder: ReminderSnapshot, deliveryToken: String): Boolean
+
+    fun postAlarm(reminder: ReminderSnapshot, deliveryToken: String): Boolean
+
+    fun cancel(reminderId: String)
+}
+
+class ReminderNotifier(private val context: Context) : ReminderNotificationSink {
     private val notificationManager = context.getSystemService(NotificationManager::class.java)
 
-    fun postReminder(reminder: ReminderSnapshot, deliveryToken: String): Boolean = try {
+    override fun postReminder(reminder: ReminderSnapshot, deliveryToken: String): Boolean = try {
         notificationManager.notify(
             notificationId(reminder.id),
-            buildNotification(
-                reminderId = reminder.id,
-                title = reminder.title,
-                note = reminder.note,
-                scheduleRevision = reminder.scheduleRevision,
-                deliveryToken = deliveryToken,
-                ringing = false,
-            ),
+            reminderNotification(reminder, deliveryToken),
         )
         true
-    } catch (_: SecurityException) {
+    } catch (_: RuntimeException) {
+        false
+    }
+
+    internal fun reminderNotification(
+        reminder: ReminderSnapshot,
+        deliveryToken: String,
+    ): Notification = buildNotification(
+        reminderId = reminder.id,
+        title = reminder.title,
+        note = reminder.note,
+        scheduleRevision = reminder.scheduleRevision,
+        deliveryToken = deliveryToken,
+        ringing = false,
+    )
+
+    override fun postAlarm(reminder: ReminderSnapshot, deliveryToken: String): Boolean = try {
+        notificationManager.notify(
+            notificationId(reminder.id),
+            alarmNotification(reminder, deliveryToken),
+        )
+        true
+    } catch (_: RuntimeException) {
         false
     }
 
@@ -97,7 +120,7 @@ class ReminderNotifier(private val context: Context) {
         ringing = true,
     )
 
-    fun cancel(reminderId: String) {
+    override fun cancel(reminderId: String) {
         notificationManager.cancel(notificationId(reminderId))
     }
 
@@ -150,7 +173,7 @@ class ReminderNotifier(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setAutoCancel(!ringing)
             .setOngoing(ringing)
-            .setOnlyAlertOnce(ringing)
+            .setOnlyAlertOnce(true)
             .setSilent(ringing)
             .setDeleteIntent(dismiss)
             .addAction(0, "Snooze 10m", snooze)

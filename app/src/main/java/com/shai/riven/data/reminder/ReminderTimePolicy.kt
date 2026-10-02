@@ -65,7 +65,8 @@ class ReminderTimePolicy(
         val start = quietHours.startMinuteOfDay
         val end = quietHours.endMinuteOfDay
         return when {
-            start == end -> true
+            // Equal boundaries define an empty interval, never an all-day quiet period.
+            start == end -> false
             start < end -> minute in start until end
             else -> minute >= start || minute < end
         }

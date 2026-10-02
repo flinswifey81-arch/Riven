@@ -1,6 +1,7 @@
 package com.shai.riven.data.reset
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.archive.RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME
 import com.shai.riven.data.archive.RivenRestorePaths
@@ -22,6 +23,7 @@ import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
@@ -108,6 +110,7 @@ class RivenResetBootstrapTest {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         fresh.close()
+        createFreshReminderDatabase()
 
         assertTrue(
             RivenEmptyDatabaseVerifier.verify(
@@ -145,6 +148,7 @@ class RivenResetBootstrapTest {
         fresh.openHelper.writableDatabase
         val counts = applicationTableCounts(fresh)
         fresh.close()
+        createFreshReminderDatabase()
 
         assertEquals(37, counts.size)
         assertTrue(counts.values.all { it == 0L })
@@ -330,6 +334,72 @@ class RivenResetBootstrapTest {
             RivenResetBootstrapHooks(afterVerifiedJournalWritten = { error("death") }),
             RivenResetJournalStage.VERIFIED,
         )
+    }
+
+    @Test
+    fun seededFreshReminderDatabaseBlocksResetVerification() {
+        seedCanonicalState()
+        stageReset()
+        val interrupted = bootstrap().apply {
+            hooks = RivenResetBootstrapHooks(
+                afterFreshDatabaseCreated = {
+                    mutateReminderDatabase(
+                        "INSERT INTO reminder_feature_controls VALUES ('REMINDERS', 1, 0, 1)",
+                    )
+                },
+            )
+        }
+
+        val result = interrupted.recoverAndApply()
+
+        assertEquals(
+            FactoryResetBootstrapResult.Failure(
+                RivenResetError.FreshDatabaseVerificationFailure("NOT_EMPTY_OR_INVALID"),
+            ),
+            result,
+        )
+        assertTrue(RivenResetGate.isPending(context, resetRoot))
+    }
+
+    @Test
+    fun corruptFreshReminderSchemaBlocksResetVerification() {
+        seedCanonicalState()
+        stageReset()
+        val interrupted = bootstrap().apply {
+            hooks = RivenResetBootstrapHooks(
+                afterFreshDatabaseCreated = {
+                    mutateReminderDatabase("PRAGMA user_version = 999")
+                },
+            )
+        }
+
+        val result = interrupted.recoverAndApply()
+
+        assertEquals(
+            FactoryResetBootstrapResult.Failure(
+                RivenResetError.FreshDatabaseVerificationFailure("NOT_EMPTY_OR_INVALID"),
+            ),
+            result,
+        )
+        assertTrue(RivenResetGate.isPending(context, resetRoot))
+    }
+
+    @Test
+    fun verifiedJournalRecoveryReerasesReminderRowsBeforeSuccess() {
+        seedCanonicalState()
+        stageReset()
+        val interrupted = bootstrap().apply {
+            hooks = RivenResetBootstrapHooks(afterVerifiedJournalWritten = { error("death") })
+        }
+        assertTrue(interrupted.recoverAndApply() is FactoryResetBootstrapResult.Failure)
+        mutateReminderDatabase(
+            "INSERT INTO reminder_feature_controls VALUES ('REMINDERS', 1, 0, 1)",
+        )
+
+        assertEquals(FactoryResetBootstrapResult.ResetApplied, bootstrap().recoverAndApply())
+
+        assertEquals(2, keyResetter.calls)
+        assertTrue(RivenEmptyDatabaseVerifier.verify(context, context.getDatabasePath(RivenDatabase.DATABASE_NAME)))
     }
 
     @Test
@@ -584,4 +654,20 @@ class RivenResetBootstrapTest {
             context,
             context.getDatabasePath(RivenDatabase.DATABASE_NAME).absolutePath,
         )
+
+    private fun mutateReminderDatabase(sql: String) {
+        val file = context.getDatabasePath(ReminderDatabase.DATABASE_NAME)
+        SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use {
+            it.execSQL(sql)
+        }
+    }
+
+    private fun createFreshReminderDatabase() {
+        val reminders = ReminderDatabase.build(context)
+        try {
+            reminders.openHelper.writableDatabase
+        } finally {
+            reminders.close()
+        }
+    }
 }

@@ -7,8 +7,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
-import androidx.core.content.ContextCompat
-import com.shai.riven.data.reminder.ReminderFailureCode
+import com.shai.riven.data.reminder.ReminderDeliveryMode
 
 class ReminderRecoveryWorker(
     appContext: Context,
@@ -19,28 +18,30 @@ class ReminderRecoveryWorker(
         return try {
             val runtime = ReminderRuntime.from(applicationContext)
             runtime.repository.rescheduleAll(reason)
+            val dispatcher = ReminderDeliveryDispatcher.create(applicationContext, runtime)
+            runtime.repository.pendingNotificationDeliveries().forEach { pending ->
+                dispatcher.recoverPending(pending)
+            }
             runtime.repository.ringingDeliveries().forEach { reminder ->
                 val token = reminder.deliveryToken ?: return@forEach
-                try {
-                    ContextCompat.startForegroundService(
-                        applicationContext,
-                        AlarmRingingService.intent(
-                            context = applicationContext,
-                            reminderId = reminder.id,
-                            scheduleRevision = reminder.scheduleRevision,
-                            deliveryToken = token,
-                            title = reminder.title,
-                            note = reminder.note,
-                        ),
-                    )
-                } catch (failure: RuntimeException) {
-                    runtime.repository.failClaimedDelivery(
-                        reminderId = reminder.id,
-                        scheduleRevision = reminder.scheduleRevision,
-                        deliveryToken = token,
-                        code = ReminderFailureCode.SCHEDULER_FAILURE,
-                        detail = "Alarm recovery failed with ${failure::class.java.simpleName}.",
-                    )
+                val ringUntilAt = reminder.ringUntilAt ?: 0L
+                if (ringUntilAt <= System.currentTimeMillis()) {
+                    val delivered = runtime.repository.markRingingAudioStopped(
+                        reminder.id,
+                        reminder.scheduleRevision,
+                        token,
+                    ) ?: return@forEach
+                    val permissions = ReminderPermissionInspector(applicationContext).snapshot()
+                    if (permissions.notificationPermissionGranted &&
+                        permissions.notificationsEnabled &&
+                        permissions.channelEnabled(ReminderDeliveryMode.NOTIFICATION)
+                    ) {
+                        runtime.notifier.postReminder(delivered, token)
+                    } else {
+                        runtime.notifier.cancel(reminder.id)
+                    }
+                } else {
+                    dispatcher.recoverPending(reminder)
                 }
             }
             Result.success()

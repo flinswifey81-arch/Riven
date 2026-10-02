@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.map
 class ReminderRepository(
     private val dao: ReminderDao,
     private val scheduler: ReminderPlatformScheduler,
+    private val deliveryEffects: ReminderDeliveryEffects = NoOpReminderDeliveryEffects,
     private val timePolicy: ReminderTimePolicy = ReminderTimePolicy(),
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) : ReminderController {
@@ -63,6 +64,7 @@ class ReminderRepository(
             status = ReminderStatus.SCHEDULED.name,
             scheduleRevision = 1,
             deliveryToken = null,
+            ringUntilAt = null,
             lastFailureCode = null,
             lastFailureDetail = null,
             createdAt = now,
@@ -81,7 +83,6 @@ class ReminderRepository(
                 ReminderFailureCode.INVALID_REQUEST,
                 "Reminder no longer exists.",
             )
-        scheduler.cancel(reminderId)
         val now = timePolicy.nowMillis()
         val requested = timePolicy.resolveRequestedInstant(
             draft.localDateTime,
@@ -110,12 +111,17 @@ class ReminderRepository(
             status = ReminderStatus.SCHEDULED.name,
             scheduleRevision = existing.scheduleRevision + 1,
             deliveryToken = null,
+            ringUntilAt = null,
             lastFailureCode = null,
             lastFailureDetail = null,
             updatedAt = now,
             finishedAt = null,
         )
-        dao.updateReminder(revised)
+        if (!dao.replaceActiveIfCurrent(existing.scheduleRevision, revised)) {
+            return staleDeliveryFailure(checkNotNull(dao.reminder(reminderId)))
+        }
+        scheduler.cancel(reminderId)
+        deliveryEffects.cancelDelivery(reminderId, existing.deliveryToken)
         recordEvent(revised, ReminderEventKind.EDITED, detail = null)
         return scheduleEntity(revised, control, ReminderStatus.SCHEDULED, ReminderEventKind.SCHEDULED)
     }
@@ -126,14 +132,33 @@ class ReminderRepository(
     override suspend fun cancel(reminderId: String): ReminderOperationResult =
         finish(reminderId, ReminderStatus.CANCELLED, ReminderEventKind.CANCELLED)
 
-    suspend fun dismissDelivery(reminderId: String, deliveryToken: String): ReminderOperationResult =
-        finishDelivery(reminderId, deliveryToken, ReminderStatus.DISMISSED, ReminderEventKind.DISMISSED)
+    suspend fun dismissDelivery(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+    ): ReminderOperationResult = finishDelivery(
+        reminderId,
+        scheduleRevision,
+        deliveryToken,
+        ReminderStatus.DISMISSED,
+        ReminderEventKind.DISMISSED,
+    )
 
-    suspend fun completeDelivery(reminderId: String, deliveryToken: String): ReminderOperationResult =
-        finishDelivery(reminderId, deliveryToken, ReminderStatus.COMPLETED, ReminderEventKind.COMPLETED)
+    suspend fun completeDelivery(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+    ): ReminderOperationResult = finishDelivery(
+        reminderId,
+        scheduleRevision,
+        deliveryToken,
+        ReminderStatus.COMPLETED,
+        ReminderEventKind.COMPLETED,
+    )
 
     suspend fun snoozeDelivery(
         reminderId: String,
+        scheduleRevision: Long,
         deliveryToken: String,
         duration: Duration,
     ): ReminderOperationResult {
@@ -150,6 +175,7 @@ class ReminderRepository(
         val local = requested.atZone(zone).toLocalDateTime()
         val changed = dao.snoozeDelivery(
             reminderId = reminderId,
+            expectedRevision = scheduleRevision,
             deliveryToken = deliveryToken,
             requestedLocalDateTime = local.toString(),
             requestedTriggerAt = requested.toEpochMilli(),
@@ -157,6 +183,8 @@ class ReminderRepository(
             now = now,
         )
         if (changed != 1) return staleDeliveryFailure(existing)
+        scheduler.cancel(reminderId)
+        deliveryEffects.cancelDelivery(reminderId, deliveryToken)
         val snoozed = checkNotNull(dao.reminder(reminderId))
         recordEvent(snoozed, ReminderEventKind.SNOOZED, detail = duration.toString())
         return scheduleEntity(
@@ -174,20 +202,23 @@ class ReminderRepository(
         val existing = dao.reminder(reminderId) ?: return ReminderDeliveryClaim.IgnoredDuplicateOrStale
         val deliveryToken = newId()
         val now = timePolicy.nowMillis()
-        val deliveryStatus = if (existing.deliveryMode == ReminderDeliveryMode.AUDIBLE_ALARM.name) {
+        val audible = existing.deliveryMode == ReminderDeliveryMode.AUDIBLE_ALARM.name
+        val deliveryStatus = if (audible) {
             ReminderStatus.RINGING
         } else {
-            ReminderStatus.DELIVERED
+            ReminderStatus.DELIVERING
         }
+        val ringUntilAt = if (audible) now + AUDIBLE_ALARM_MAX_RING_MILLIS else null
         val claimed = dao.claimDelivery(
             reminderId = reminderId,
             scheduleRevision = scheduleRevision,
             deliveryToken = deliveryToken,
+            ringUntilAt = ringUntilAt,
             deliveryStatus = deliveryStatus.name,
             now = now,
             event = event(
                 reminder = existing,
-                kind = ReminderEventKind.DELIVERED,
+                kind = ReminderEventKind.DELIVERY_CLAIMED,
                 detail = null,
                 deliveryToken = deliveryToken,
                 at = now,
@@ -201,6 +232,7 @@ class ReminderRepository(
         if (!control.enabled) {
             finishDelivery(
                 reminderId,
+                delivered.scheduleRevision,
                 deliveryToken,
                 ReminderStatus.DISMISSED,
                 ReminderEventKind.DISMISSED,
@@ -239,9 +271,45 @@ class ReminderRepository(
         ?.takeIf {
             it.scheduleRevision == scheduleRevision &&
                 it.deliveryToken == deliveryToken &&
-                it.status in setOf(ReminderStatus.RINGING.name, ReminderStatus.DELIVERED.name)
+                it.status in setOf(
+                    ReminderStatus.DELIVERING.name,
+                    ReminderStatus.RINGING.name,
+                    ReminderStatus.DELIVERED.name,
+                )
         }
         ?.toSnapshot()
+
+    suspend fun pendingNotificationDeliveries(): List<ReminderSnapshot> =
+        dao.pendingNotificationDeliveries().map(LocalReminderEntity::toSnapshot)
+
+    suspend fun acknowledgeNotificationDelivery(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+    ): ReminderSnapshot? {
+        val current = dao.reminder(reminderId)
+            ?.takeIf {
+                it.scheduleRevision == scheduleRevision &&
+                    it.deliveryToken == deliveryToken &&
+                    it.status == ReminderStatus.DELIVERING.name
+            }
+            ?: return null
+        val now = timePolicy.nowMillis()
+        val acknowledged = dao.acknowledgeNotificationDelivery(
+            reminderId = reminderId,
+            scheduleRevision = scheduleRevision,
+            deliveryToken = deliveryToken,
+            now = now,
+            event = event(
+                reminder = current,
+                kind = ReminderEventKind.DELIVERED,
+                detail = null,
+                deliveryToken = deliveryToken,
+                at = now,
+            ),
+        )
+        return if (acknowledged) dao.reminder(reminderId)?.toSnapshot() else null
+    }
 
     suspend fun recordAudioWarning(
         reminderId: String,
@@ -283,6 +351,7 @@ class ReminderRepository(
         )
         val reminder = dao.reminder(reminderId) ?: return invalidReminderFailure()
         if (changed == 1) {
+            deliveryEffects.cancelDelivery(reminderId, deliveryToken)
             recordEvent(reminder, ReminderEventKind.FAILED, detail, deliveryToken)
         }
         return ReminderOperationResult.Failure(code, detail, reminder.toSnapshot())
@@ -334,20 +403,29 @@ class ReminderRepository(
         var permissionBlocked = 0
         var failed = 0
         dao.activeReminders().forEach { existing ->
-            scheduler.cancel(existing.id)
             val feature = ReminderFeature.valueOf(existing.featureKey)
             val control = featureControl(feature)
             val localDateTime = LocalDateTime.parse(existing.requestedLocalDateTime)
             val storedZone = ZoneId.of(existing.timeZoneId)
             val policy = ReminderTimeZonePolicy.valueOf(existing.timeZonePolicy)
-            val requested = timePolicy.resolveRequestedInstant(localDateTime, storedZone, policy)
+            val isSnoozed = existing.status == ReminderStatus.SNOOZED.name
+            val requested = if (isSnoozed) {
+                // Snooze is a duration from an instant, not a wall-clock appointment.
+                Instant.ofEpochMilli(existing.requestedTriggerAt)
+            } else {
+                timePolicy.resolveRequestedInstant(localDateTime, storedZone, policy)
+            }
             val zone = if (policy == ReminderTimeZonePolicy.FOLLOW_DEVICE) {
                 timePolicy.currentDeviceZone()
             } else {
                 storedZone
             }
-            val effective = effectiveInstant(requested, quietHours(), control, zone)
-            val status = if (existing.status == ReminderStatus.SNOOZED.name) {
+            val effective = if (isSnoozed) {
+                timePolicy.coerceFuture(requested)
+            } else {
+                effectiveInstant(requested, quietHours(), control, zone)
+            }
+            val status = if (isSnoozed) {
                 ReminderStatus.SNOOZED
             } else {
                 ReminderStatus.SCHEDULED
@@ -358,12 +436,15 @@ class ReminderRepository(
                 status = status.name,
                 scheduleRevision = existing.scheduleRevision + 1,
                 deliveryToken = null,
+                ringUntilAt = null,
                 lastFailureCode = null,
                 lastFailureDetail = null,
                 updatedAt = timePolicy.nowMillis(),
                 finishedAt = null,
             )
-            dao.updateReminder(revised)
+            if (!dao.replaceActiveIfCurrent(existing.scheduleRevision, revised)) return@forEach
+            scheduler.cancel(existing.id)
+            deliveryEffects.cancelDelivery(existing.id, existing.deliveryToken)
             when (scheduleEntity(revised, control, status, ReminderEventKind.RESCHEDULED, reason)) {
                 is ReminderOperationResult.Success -> scheduled++
                 is ReminderOperationResult.Failure -> {
@@ -409,13 +490,20 @@ class ReminderRepository(
             )
         ) {
             ReminderScheduleResult.Scheduled -> {
-                val scheduled = entity.copy(
-                    status = scheduledStatus.name,
-                    lastFailureCode = null,
-                    lastFailureDetail = null,
-                    updatedAt = timePolicy.nowMillis(),
-                )
-                dao.updateReminder(scheduled)
+                val scheduled = dao.reminder(entity.id)
+                if (scheduled == null ||
+                    scheduled.scheduleRevision != entity.scheduleRevision ||
+                    scheduled.status != scheduledStatus.name ||
+                    scheduled.deliveryToken != null
+                ) {
+                    scheduler.cancel(entity.id)
+                    deliveryEffects.cancelDelivery(entity.id, entity.deliveryToken)
+                    return if (scheduled == null) {
+                        invalidReminderFailure()
+                    } else {
+                        staleDeliveryFailure(scheduled)
+                    }
+                }
                 recordEvent(scheduled, eventKind, detail)
                 ReminderOperationResult.Success(scheduled.toSnapshot())
             }
@@ -431,7 +519,7 @@ class ReminderRepository(
         code: ReminderFailureCode,
         detail: String,
     ): ReminderOperationResult {
-        dao.markScheduleFailure(
+        val changed = dao.markScheduleFailure(
             reminderId = entity.id,
             scheduleRevision = entity.scheduleRevision,
             failureCode = code.name,
@@ -439,6 +527,7 @@ class ReminderRepository(
             now = timePolicy.nowMillis(),
         )
         val failed = checkNotNull(dao.reminder(entity.id))
+        if (changed != 1) return staleDeliveryFailure(failed)
         recordEvent(failed, ReminderEventKind.FAILED, detail)
         return ReminderOperationResult.Failure(code, detail, failed.toSnapshot())
     }
@@ -449,15 +538,16 @@ class ReminderRepository(
         kind: ReminderEventKind,
     ): ReminderOperationResult {
         val existing = dao.reminder(reminderId) ?: return invalidReminderFailure()
-        scheduler.cancel(reminderId)
         val now = timePolicy.nowMillis()
-        if (dao.finishActive(reminderId, status.name, now) != 1) {
+        if (dao.finishActive(reminderId, existing.scheduleRevision, status.name, now) != 1) {
             return ReminderOperationResult.Failure(
                 ReminderFailureCode.INVALID_REQUEST,
                 "Reminder is already ${existing.status.lowercase()}.",
                 existing.toSnapshot(),
             )
         }
+        scheduler.cancel(reminderId)
+        deliveryEffects.cancelDelivery(reminderId, existing.deliveryToken)
         val finished = checkNotNull(dao.reminder(reminderId))
         recordEvent(finished, kind, detail = null)
         return ReminderOperationResult.Success(finished.toSnapshot())
@@ -465,6 +555,7 @@ class ReminderRepository(
 
     private suspend fun finishDelivery(
         reminderId: String,
+        scheduleRevision: Long,
         deliveryToken: String,
         status: ReminderStatus,
         kind: ReminderEventKind,
@@ -472,10 +563,11 @@ class ReminderRepository(
     ): ReminderOperationResult {
         val existing = dao.reminder(reminderId) ?: return invalidReminderFailure()
         val now = timePolicy.nowMillis()
-        if (dao.finishDelivery(reminderId, deliveryToken, status.name, now) != 1) {
+        if (dao.finishDelivery(reminderId, scheduleRevision, deliveryToken, status.name, now) != 1) {
             return staleDeliveryFailure(existing)
         }
         scheduler.cancel(reminderId)
+        deliveryEffects.cancelDelivery(reminderId, deliveryToken)
         val finished = checkNotNull(dao.reminder(reminderId))
         recordEvent(finished, kind, detail, deliveryToken)
         return ReminderOperationResult.Success(finished.toSnapshot())
@@ -490,6 +582,7 @@ class ReminderRepository(
     ): ReminderOperationResult {
         val changed = dao.snoozeDelivery(
             reminderId = reminderId,
+            expectedRevision = existing.scheduleRevision,
             deliveryToken = deliveryToken,
             requestedLocalDateTime = deferred.atZone(zone).toLocalDateTime().toString(),
             requestedTriggerAt = deferred.toEpochMilli(),
@@ -497,6 +590,8 @@ class ReminderRepository(
             now = timePolicy.nowMillis(),
         )
         if (changed != 1) return staleDeliveryFailure(existing)
+        scheduler.cancel(reminderId)
+        deliveryEffects.cancelDelivery(reminderId, deliveryToken)
         val deferredEntity = checkNotNull(dao.reminder(reminderId))
         recordEvent(
             deferredEntity,
@@ -605,6 +700,7 @@ internal fun LocalReminderEntity.toSnapshot() = ReminderSnapshot(
     status = ReminderStatus.valueOf(status),
     scheduleRevision = scheduleRevision,
     deliveryToken = deliveryToken,
+    ringUntilAt = ringUntilAt,
     lastFailureCode = lastFailureCode?.let(ReminderFailureCode::valueOf),
     lastFailureDetail = lastFailureDetail,
 )

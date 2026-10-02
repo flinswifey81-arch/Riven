@@ -16,6 +16,7 @@ import com.shai.riven.data.credential.ProviderSecret
 import com.shai.riven.data.credential.PutProviderCredentialResult
 import com.shai.riven.data.credential.ReadProviderCredentialResult
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.entity.ConversationEntity
 import com.shai.riven.data.persistence.entity.ConversationDraftEntity
@@ -112,6 +113,7 @@ internal class FakeResetCredentialStore : ProviderCredentialStore {
 
 internal fun clearResetTestState(context: Context) {
     context.deleteDatabase(RivenDatabase.DATABASE_NAME)
+    context.deleteDatabase(ReminderDatabase.DATABASE_NAME)
     FileAttachmentBlobStore.rootForContext(context).deleteRecursively()
     FileProviderCredentialStore.rootForContext(context).deleteRecursively()
     File(context.noBackupFilesDir, RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME).deleteRecursively()

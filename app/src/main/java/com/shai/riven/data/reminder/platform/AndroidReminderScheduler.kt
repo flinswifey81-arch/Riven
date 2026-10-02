@@ -14,7 +14,7 @@ import com.shai.riven.data.reminder.ReminderScheduleResult
 class AndroidReminderScheduler(
     private val context: Context,
     private val alarmManager: AlarmManager = context.getSystemService(AlarmManager::class.java),
-    private val permissions: ReminderPermissionInspector = ReminderPermissionInspector(context),
+    private val permissions: ReminderPermissionSource = ReminderPermissionInspector(context),
 ) : ReminderPlatformScheduler {
     override fun schedule(request: ReminderScheduleRequest): ReminderScheduleResult {
         val permission = permissions.snapshot()
@@ -28,6 +28,16 @@ class AndroidReminderScheduler(
             return ReminderScheduleResult.PermissionRequired(
                 ReminderFailureCode.NOTIFICATIONS_DISABLED,
                 "Notifications are disabled for Riven in Android settings.",
+            )
+        }
+        if (!permission.channelEnabled(request.deliveryMode)) {
+            return ReminderScheduleResult.PermissionRequired(
+                ReminderFailureCode.NOTIFICATIONS_DISABLED,
+                if (request.deliveryMode == ReminderDeliveryMode.AUDIBLE_ALARM) {
+                    "The Riven alarms notification channel is disabled in Android settings."
+                } else {
+                    "The Riven reminders notification channel is disabled in Android settings."
+                },
             )
         }
         if (request.deliveryMode == ReminderDeliveryMode.AUDIBLE_ALARM &&
