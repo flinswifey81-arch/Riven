@@ -977,6 +977,136 @@ class MemoryLifecycleServiceTest {
     }
 
     @Test
+    fun terminalConclusionNeverReopensAndMixedArtifactConvergesInEitherJobOrder() = runBlocking {
+        suspend fun exercise(
+            prefix: String,
+            corrected: Boolean,
+            artifactFirst: Boolean,
+            eventOrderBase: Long,
+        ) {
+            insertExperience("$prefix-a-e", eventOrderBase)
+            insertExperience("$prefix-b-e", eventOrderBase + 1L)
+            insertExperience("$prefix-sibling-e", eventOrderBase + 2L)
+            insertMemory("$prefix-a", "$prefix-a-e", "$prefix alpha source")
+            insertMemory("$prefix-b", "$prefix-b-e", "$prefix beta source")
+            insertMemory("$prefix-sibling", "$prefix-sibling-e", "$prefix durable sibling")
+            insertConsolidatedMemory(
+                "$prefix-conclusion",
+                "$prefix terminal composite conclusion",
+                listOf("$prefix-a", "$prefix-b"),
+                listOf("$prefix-a-e", "$prefix-b-e"),
+            )
+            insertSearchArtifact(
+                "$prefix-artifact",
+                listOf("$prefix-conclusion", "$prefix-sibling"),
+            )
+            assertEquals(
+                RepairJobHandlerResult.Success,
+                DerivedArtifactRepairService(database).repair(
+                    "DERIVED_ARTIFACT",
+                    "$prefix-artifact",
+                ),
+            )
+
+            val terminalAt = eventOrderBase + 3L
+            if (corrected) {
+                insertExperience("$prefix-replacement-e", terminalAt)
+                assertTrue(
+                    MemoryTransactionService(database).correct(
+                        CorrectMemoryInput(
+                            inaccurateMemoryId = "$prefix-conclusion",
+                            replacement = ValidatedMemoryInput(
+                                memoryId = "$prefix-replacement",
+                                kind = MemoryKind.SEMANTIC,
+                                scope = MemoryScope.SHAI,
+                                meaning = "$prefix corrected replacement",
+                                epistemicBasis = EpistemicBasis.EXPLICIT_CORRECTION,
+                                certainty = MemoryCertainty.CERTAIN,
+                                learnedAt = terminalAt,
+                                sensitivity = SensitivityLevel.STANDARD,
+                                evidence = listOf(
+                                    MemoryEvidenceInput(
+                                        experienceId = "$prefix-replacement-e",
+                                        role = EvidenceRole.CORRECTS,
+                                        epistemicBasis = EpistemicBasis.EXPLICIT_CORRECTION,
+                                        sourceCertainty = MemoryCertainty.CERTAIN,
+                                        lineageKey = "$prefix-replacement-lineage",
+                                    ),
+                                ),
+                            ),
+                            occurredAt = terminalAt,
+                            triggeringExperienceId = "$prefix-replacement-e",
+                        ),
+                    ) is MemoryWriteResult.Success,
+                )
+            } else {
+                assertTrue(
+                    MemoryTransactionService(database).forget(
+                        MemoryStateTransitionInput("$prefix-conclusion", terminalAt),
+                    ) is MemoryWriteResult.Success,
+                )
+            }
+
+            val sourceInvalidatedAt = eventOrderBase + 4L
+            assertTrue(
+                MemoryTransactionService(database).forget(
+                    MemoryStateTransitionInput("$prefix-a", sourceInvalidatedAt),
+                ) is MemoryWriteResult.Success,
+            )
+            val terminal = checkNotNull(database.memoryDao().memory("$prefix-conclusion"))
+            assertFalse(terminal.lifecycleState == MemoryLifecycleState.REASSESSMENT_PENDING)
+            if (corrected) {
+                assertEquals(MemoryTruthState.CORRECTED_FALSE, terminal.truthState)
+            } else {
+                assertEquals(MemoryRetentionState.FORGOTTEN, terminal.retentionState)
+            }
+
+            val artifactJob = database.maintenanceDao()
+                .repairJobs("DERIVED_ARTIFACT", "$prefix-artifact")
+                .last {
+                    it.jobType == com.shai.riven.data.persistence.model.RepairJobType.REBUILD_DERIVED &&
+                        it.createdAt == sourceInvalidatedAt
+                }
+            val provenanceJob = database.maintenanceDao()
+                .repairJobs("MEMORY", "$prefix-conclusion")
+                .last {
+                    it.jobType == com.shai.riven.data.persistence.model.RepairJobType.REASSESS_PROVENANCE &&
+                        it.createdAt == sourceInvalidatedAt
+                }
+            fun runner() = RepairJobRunner(
+                database,
+                RepairJobHandlerRegistry(
+                    derivedArtifactRepairHandlers(DerivedArtifactRepairService(database)) +
+                        ProvenanceRepairHandler(ProvenanceRepairService(database)),
+                ),
+            )
+            if (artifactFirst) {
+                assertTrue(runner().run(artifactJob.id) is RepairJobRunResult.Succeeded)
+                assertTrue(runner().run(provenanceJob.id) is RepairJobRunResult.Succeeded)
+            } else {
+                assertTrue(runner().run(provenanceJob.id) is RepairJobRunResult.Succeeded)
+                assertTrue(runner().run(artifactJob.id) is RepairJobRunResult.Succeeded)
+            }
+
+            val after = checkNotNull(database.memoryDao().memory("$prefix-conclusion"))
+            assertFalse(after.lifecycleState == MemoryLifecycleState.REASSESSMENT_PENDING)
+            if (corrected) {
+                assertEquals(MemoryTruthState.CORRECTED_FALSE, after.truthState)
+            } else {
+                assertEquals(MemoryRetentionState.FORGOTTEN, after.retentionState)
+            }
+            val payload = checkNotNull(
+                database.memoryLifecycleDao().derivedPayload("$prefix-artifact"),
+            ).content
+            assertFalse(payload.contains("$prefix terminal composite conclusion"))
+            assertTrue(payload.contains("$prefix durable sibling"))
+        }
+
+        exercise("corrected-terminal", corrected = true, artifactFirst = true, eventOrderBase = 1L)
+        exercise("forgotten-terminal", corrected = false, artifactFirst = false, eventOrderBase = 101L)
+    }
+
+    @Test
     fun artifactKindsWithoutARealProducerFailWithoutBeingMarkedCurrent() = runBlocking {
         insertExperience("unsupported-source", 1)
         insertMemory("unsupported-memory", "unsupported-source", "Unsupported summary source")

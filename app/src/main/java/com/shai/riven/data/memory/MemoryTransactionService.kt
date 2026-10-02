@@ -921,13 +921,34 @@ class MemoryTransactionService(
         }
 
         val pendingDependents = linkedSetOf<String>()
+        val terminalDependents = linkedSetOf<String>()
         var frontier = canonicalMemoryIds
         var depth = 0
         while (frontier.isNotEmpty() && depth < MAX_PROVENANCE_PROPAGATION_DEPTH) {
-            val remaining = MAX_PROVENANCE_DEPENDENTS - pendingDependents.size
+            var remaining = MAX_PROVENANCE_DEPENDENTS -
+                pendingDependents.size -
+                terminalDependents.size
             check(remaining > 0) { "Provenance dependency capacity exceeded" }
+            val terminal = memoryDao.terminalConsolidatedDependentsOf(frontier, remaining + 1)
+                .filterNot { it.id in memoryIds || it.id in pendingDependents || it.id in terminalDependents }
+            check(terminal.size <= remaining) { "Provenance dependency capacity exceeded" }
+            terminal.forEach { dependent ->
+                terminalDependents += dependent.id
+                queueRepair(
+                    RepairJobType.REASSESS_PROVENANCE,
+                    REPAIR_TARGET_MEMORY,
+                    dependent.id,
+                    occurredAt,
+                )
+            }
+            remaining = MAX_PROVENANCE_DEPENDENTS - pendingDependents.size - terminalDependents.size
+            check(remaining > 0 || terminal.isNotEmpty()) { "Provenance dependency capacity exceeded" }
+            if (remaining == 0) {
+                frontier = emptyList()
+                break
+            }
             val candidates = memoryDao.consolidatedDependentsOf(frontier, remaining + 1)
-                .filterNot { it.id in memoryIds || it.id in pendingDependents }
+                .filterNot { it.id in memoryIds || it.id in pendingDependents || it.id in terminalDependents }
             check(candidates.size <= remaining) { "Provenance dependency capacity exceeded" }
             val next = candidates
             if (next.isEmpty()) break
@@ -962,10 +983,11 @@ class MemoryTransactionService(
                 .any { it.id !in memoryIds && it.id !in pendingDependents }
             check(!beyondLimit) { "Provenance dependency depth exceeded" }
         }
-        if (pendingDependents.isNotEmpty()) {
-            invalidateArtifactLineage(pendingDependents.toList(), occurredAt)
+        val affectedDependents = pendingDependents + terminalDependents
+        if (affectedDependents.isNotEmpty()) {
+            invalidateArtifactLineage(affectedDependents.toList(), occurredAt)
         }
-        return pendingDependents
+        return affectedDependents
     }
 
     private fun invalidateArtifactLineage(memoryIds: List<String>, occurredAt: Long) {

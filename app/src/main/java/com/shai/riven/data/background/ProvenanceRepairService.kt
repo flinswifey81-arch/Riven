@@ -2,6 +2,7 @@ package com.shai.riven.data.background
 
 import androidx.room.withTransaction
 import com.shai.riven.data.memory.isEvidenceSuppressedInCurrentTransaction
+import com.shai.riven.data.memory.hasTerminalLifecycleIntent
 import com.shai.riven.data.memory.isPositiveMemoryGrounding
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
@@ -71,12 +72,7 @@ class ProvenanceRepairService(
     private fun reassessMemoryInCurrentTransaction(memoryId: String): ProvenanceMutation {
         val memory = memoryDao.memory(memoryId)
             ?: return ProvenanceMutation(RepairJobHandlerResult.Success)
-        if (memory.truthState == MemoryTruthState.CORRECTED_FALSE ||
-            memory.truthState == MemoryTruthState.UNSUPPORTED ||
-            memory.retentionState == MemoryRetentionState.FORGOTTEN ||
-            memory.lifecycleState == MemoryLifecycleState.SUPERSEDED ||
-            memory.lifecycleState == MemoryLifecycleState.RESOLVED
-        ) {
+        if (memory.hasTerminalLifecycleIntent()) {
             // Explicit user correction/forget and terminal repair outcomes are durable intent.
             return ProvenanceMutation(RepairJobHandlerResult.Success)
         }

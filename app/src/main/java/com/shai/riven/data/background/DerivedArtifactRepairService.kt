@@ -2,6 +2,7 @@ package com.shai.riven.data.background
 
 import androidx.room.withTransaction
 import com.shai.riven.data.memory.isEvidenceSuppressedInCurrentTransaction
+import com.shai.riven.data.memory.hasTerminalLifecycleIntent
 import com.shai.riven.data.memory.isPositiveMemoryGrounding
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
@@ -176,8 +177,10 @@ class DerivedArtifactRepairService(
 
     private fun hasPendingProvenance(artifact: DerivedArtifactEntity): Boolean =
         lifecycleDao.artifactMemoryDependencies(artifact.id).any { dependency ->
-            memoryDao.memory(dependency.memoryId)?.lifecycleState ==
-                MemoryLifecycleState.REASSESSMENT_PENDING
+            memoryDao.memory(dependency.memoryId)?.let { memory ->
+                memory.lifecycleState == MemoryLifecycleState.REASSESSMENT_PENDING &&
+                    !memory.hasTerminalLifecycleIntent()
+            } == true
         }
 
     private fun escaped(value: String): String = value

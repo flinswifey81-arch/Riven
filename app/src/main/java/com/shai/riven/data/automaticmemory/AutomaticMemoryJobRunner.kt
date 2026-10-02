@@ -85,6 +85,8 @@ class AutomaticMemoryJobRunner(
     private val maxAttempts: Int = com.shai.riven.data.background.MAX_AUTOMATIC_MEMORY_ATTEMPTS,
     private val runningLeaseMs: Long = com.shai.riven.data.background.AUTOMATIC_MEMORY_RUNNING_LEASE_MS,
     private val maxConsolidationPassesPerRun: Int = DEFAULT_CONSOLIDATION_PASSES_PER_RUN,
+    private val maxRunElapsedMs: Long = DEFAULT_RUN_ELAPSED_BUDGET_MS,
+    private val elapsedRealtimeMs: () -> Long = { System.nanoTime() / NANOS_PER_MILLISECOND },
     /** Reconciles the earliest durable five-minute wake after the completion commit. */
     private val reconcileShortWindowSweep: (Long) -> Unit = {},
 ) : AutomaticMemoryJobOperations {
@@ -98,6 +100,7 @@ class AutomaticMemoryJobRunner(
         require(maxAttempts > 0)
         require(runningLeaseMs > 0L)
         require(maxConsolidationPassesPerRun > 0)
+        require(maxRunElapsedMs > 0L)
     }
 
     override suspend fun run(jobId: String): AutomaticMemoryJobRunResult {
@@ -105,6 +108,7 @@ class AutomaticMemoryJobRunner(
             is ClaimResult.Claimed -> result.job
             is ClaimResult.Completed -> return result.result
         }
+        val runStartedAt = elapsedRealtimeMs()
         val run = runDao.run(claimed.originatingRunId)
             ?: return fail(claimed, "MISSING_ORIGINATING_RUN", retryable = false)
         when (val source = sourceEligibility(claimed)) {
@@ -130,6 +134,9 @@ class AutomaticMemoryJobRunner(
         val validation = CandidateValidationService(database, decider = model)
         try {
             var stage = claimed.nextStage
+            if (elapsedBudgetReached(runStartedAt)) {
+                return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+            }
             if (
                 stage == AutomaticMemoryJobStage.ATTENTION ||
                 stage == AutomaticMemoryJobStage.REFRESH_ATTENTION
@@ -146,6 +153,9 @@ class AutomaticMemoryJobRunner(
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }
                 stage = nextStage
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                }
             }
             if (
                 stage == AutomaticMemoryJobStage.EXTRACTION ||
@@ -162,20 +172,29 @@ class AutomaticMemoryJobRunner(
                         return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                     }
                     stage = AutomaticMemoryJobStage.VALIDATION
+                    if (elapsedBudgetReached(runStartedAt)) {
+                        return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                    }
                 } else {
                     if (!advance(claimed, stage, AutomaticMemoryJobStage.CONSOLIDATION)) {
                         return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                     }
                     stage = AutomaticMemoryJobStage.CONSOLIDATION
+                    if (elapsedBudgetReached(runStartedAt)) {
+                        return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                    }
                 }
             }
             if (stage == AutomaticMemoryJobStage.VALIDATION) {
-                val result = ensureValidation(claimed, extraction, validation)
+                val result = ensureValidation(claimed, extraction, validation, runStartedAt)
                 if (result != null) return finishStageFailure(claimed, result)
                 if (!advance(claimed, stage, AutomaticMemoryJobStage.OPEN_LOOP)) {
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }
                 stage = AutomaticMemoryJobStage.OPEN_LOOP
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                }
             }
             if (stage == AutomaticMemoryJobStage.OPEN_LOOP) {
                 when (
@@ -194,9 +213,12 @@ class AutomaticMemoryJobRunner(
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }
                 stage = AutomaticMemoryJobStage.CONSOLIDATION
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return continueAfterProgress(claimed, ELAPSED_TIME_CONTINUATION_CODE)
+                }
             }
             if (stage == AutomaticMemoryJobStage.CONSOLIDATION) {
-                ensureConsolidation(model, run.profileId)?.let { failure ->
+                ensureConsolidation(model, run.profileId, runStartedAt)?.let { failure ->
                     return finishStageFailure(claimed, failure)
                 }
                 if (!advance(claimed, stage, AutomaticMemoryJobStage.COMPLETE)) {
@@ -292,6 +314,7 @@ class AutomaticMemoryJobRunner(
         job: AutomaticMemoryJobEntity,
         extraction: CandidateExtractionService,
         validation: CandidateValidationService,
+        runStartedAt: Long,
     ): StageFailure? {
         val candidates = when (
             val read = extraction.readCandidatesSeededByExperience(job.sourceExperienceId)
@@ -307,6 +330,9 @@ class AutomaticMemoryJobRunner(
                     is CandidateValidationResult.Failure -> return result.error.toStageFailure()
                     else -> Unit
                 }
+                if (elapsedBudgetReached(runStartedAt)) {
+                    return StageFailure.Continuation(ELAPSED_TIME_CONTINUATION_CODE)
+                }
             }
         return null
     }
@@ -314,6 +340,7 @@ class AutomaticMemoryJobRunner(
     private suspend fun ensureConsolidation(
         model: AutomaticMemoryModel,
         profileId: String,
+        runStartedAt: Long,
     ): StageFailure? {
         val service = MemoryConsolidationService(
             database = database,
@@ -325,7 +352,9 @@ class AutomaticMemoryJobRunner(
             when (val result = service.consolidate()) {
                 is MemoryConsolidationResult.Created,
                 is MemoryConsolidationResult.Reused,
-                -> Unit
+                -> if (elapsedBudgetReached(runStartedAt)) {
+                    return StageFailure.Continuation(ELAPSED_TIME_CONTINUATION_CODE)
+                }
                 is MemoryConsolidationResult.NoConsolidation,
                 is MemoryConsolidationResult.AlreadyProcessed,
                 -> return null
@@ -528,21 +557,23 @@ class AutomaticMemoryJobRunner(
         failure: StageFailure,
     ): AutomaticMemoryJobRunResult = when (failure) {
         is StageFailure.Excluded -> exclude(job, failure.errorCode)
-        is StageFailure.Continuation -> continueConsolidation(job, failure.errorCode)
+        is StageFailure.Continuation -> continueAfterProgress(job, failure.errorCode)
         is StageFailure.Retryable -> fail(job, failure.errorCode, retryable = true)
         is StageFailure.Permanent -> fail(job, failure.errorCode, retryable = false)
     }
 
-    private fun continueConsolidation(
+    private fun continueAfterProgress(
         job: AutomaticMemoryJobEntity,
         reasonCode: String,
     ): AutomaticMemoryJobRunResult {
         val code = reasonCode.safeErrorCode()
-        val changed = dao.releaseConsolidationContinuation(
+        val currentStage = dao.job(job.id)?.nextStage
+            ?: return AutomaticMemoryJobRunResult.LeaseLost(job.id)
+        val changed = dao.releaseContinuation(
             jobId = job.id,
             runningState = AutomaticMemoryJobState.RUNNING,
             pendingState = AutomaticMemoryJobState.PENDING,
-            consolidationStage = AutomaticMemoryJobStage.CONSOLIDATION,
+            expectedStage = currentStage,
             expectedAttemptCount = job.attemptCount,
             updatedAt = clock(),
             reasonCode = code,
@@ -639,6 +670,9 @@ class AutomaticMemoryJobRunner(
     private fun String.safeCodeFragment(): String =
         filter { it.isLetterOrDigit() || it == '_' }.ifBlank { "Exception" }.take(40)
 
+    private fun elapsedBudgetReached(runStartedAt: Long): Boolean =
+        elapsedRealtimeMs() - runStartedAt >= maxRunElapsedMs
+
     private sealed interface ClaimResult {
         data class Claimed(val job: AutomaticMemoryJobEntity) : ClaimResult
         data class Completed(val result: AutomaticMemoryJobRunResult) : ClaimResult
@@ -665,6 +699,9 @@ class AutomaticMemoryJobRunner(
     private companion object {
         const val ATTEMPT_BUDGET_EXHAUSTED = "ATTEMPT_BUDGET_EXHAUSTED"
         const val CONSOLIDATION_CONTINUATION_CODE = "CONSOLIDATION_CONTINUATION"
+        const val ELAPSED_TIME_CONTINUATION_CODE = "ELAPSED_TIME_CONTINUATION"
         const val DEFAULT_CONSOLIDATION_PASSES_PER_RUN = 8
+        const val DEFAULT_RUN_ELAPSED_BUDGET_MS = 8L * 60L * 1_000L
+        const val NANOS_PER_MILLISECOND = 1_000_000L
     }
 }

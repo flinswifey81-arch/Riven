@@ -262,16 +262,16 @@ interface AutomaticMemoryDao {
             last_error_code = :reasonCode
         WHERE automatic_memory_job_id = :jobId
           AND state = :runningState
-          AND next_stage = :consolidationStage
+          AND next_stage = :expectedStage
           AND attempt_count = :expectedAttemptCount
           AND attempt_count > 0
         """,
     )
-    fun releaseConsolidationContinuation(
+    fun releaseContinuation(
         jobId: String,
         runningState: AutomaticMemoryJobState,
         pendingState: AutomaticMemoryJobState,
-        consolidationStage: AutomaticMemoryJobStage,
+        expectedStage: AutomaticMemoryJobStage,
         expectedAttemptCount: Int,
         updatedAt: Long,
         reasonCode: String,

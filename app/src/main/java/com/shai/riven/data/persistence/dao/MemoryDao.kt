@@ -210,11 +210,36 @@ interface MemoryDao {
         WHERE memory_relationships.target_memory_id IN (:sourceMemoryIds)
           AND memory_relationships.relationship_type = 'DERIVED_FROM'
           AND memories.epistemic_basis = 'CONSOLIDATION'
+          AND memories.truth_state NOT IN ('CORRECTED_FALSE', 'UNSUPPORTED')
+          AND memories.retention_state != 'FORGOTTEN'
+          AND memories.lifecycle_state NOT IN ('SUPERSEDED', 'RESOLVED')
         ORDER BY memories.memory_id
         LIMIT :limit
         """,
     )
     fun consolidatedDependentsOf(sourceMemoryIds: List<String>, limit: Int): List<MemoryEntity>
+
+    @Query(
+        """
+        SELECT DISTINCT memories.* FROM memories
+        INNER JOIN memory_relationships
+            ON memory_relationships.source_memory_id = memories.memory_id
+        WHERE memory_relationships.target_memory_id IN (:sourceMemoryIds)
+          AND memory_relationships.relationship_type = 'DERIVED_FROM'
+          AND memories.epistemic_basis = 'CONSOLIDATION'
+          AND (
+              memories.truth_state IN ('CORRECTED_FALSE', 'UNSUPPORTED')
+              OR memories.retention_state = 'FORGOTTEN'
+              OR memories.lifecycle_state IN ('SUPERSEDED', 'RESOLVED')
+          )
+        ORDER BY memories.memory_id
+        LIMIT :limit
+        """,
+    )
+    fun terminalConsolidatedDependentsOf(
+        sourceMemoryIds: List<String>,
+        limit: Int,
+    ): List<MemoryEntity>
 
     @Query(
         "DELETE FROM memory_evidence WHERE memory_id = :memoryId AND experience_id = :experienceId",

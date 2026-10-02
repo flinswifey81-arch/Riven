@@ -201,6 +201,46 @@ class AutomaticMemoryPipelineIntegrationTest {
     }
 
     @Test
+    fun elapsedBudgetYieldsAfterDurableProgressWithoutSpendingRetry() = runBlocking {
+        val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
+        queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+        val elapsed = AtomicLong(0L)
+        val slowAttentionModel = object : AutomaticMemoryModel by model {
+            override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal =
+                model.analyze(snapshot).also { elapsed.addAndGet(10L) }
+        }
+        val budgetedRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory {
+                AutomaticMemoryModelFactoryResult.Ready(slowAttentionModel)
+            },
+            clock = ::now,
+            maxRunElapsedMs = 5L,
+            elapsedRealtimeMs = elapsed::get,
+        )
+
+        val yielded = budgetedRunner.run(jobId)
+
+        assertEquals(
+            AutomaticMemoryJobRunResult.RetryableFailure(jobId, "ELAPSED_TIME_CONTINUATION"),
+            yielded,
+        )
+        val durable = checkNotNull(database.automaticMemoryDao().job(jobId))
+        assertEquals(AutomaticMemoryJobState.PENDING, durable.state)
+        assertEquals(AutomaticMemoryJobStage.EXTRACTION, durable.nextStage)
+        assertEquals(0, durable.attemptCount)
+        assertEquals("ELAPSED_TIME_CONTINUATION", durable.lastErrorCode)
+        val attentionCallsAfterYield = model.sardineAnalysisCalls
+        assertEquals(1, attentionCallsAfterYield)
+
+        reopenDatabase()
+        assertTrue(runner.run(jobId) is AutomaticMemoryJobRunResult.Succeeded)
+        assertEquals(attentionCallsAfterYield, model.sardineAnalysisCalls)
+        assertEquals(AutomaticMemoryJobState.SUCCEEDED, database.automaticMemoryDao().job(jobId)?.state)
+    }
+
+    @Test
     fun permanentInputLimitFailsOnceWithoutBurningRetryBudget() = runBlocking {
         val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
         queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())

@@ -3,6 +3,7 @@ package com.shai.riven.data.deletion
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
 import com.shai.riven.data.memory.SourceSuppressionCoverage
+import com.shai.riven.data.memory.hasTerminalLifecycleIntent
 import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.memory.sourceSuppressionCoverage
@@ -434,7 +435,10 @@ class SafeDeleteService(
                 relationship.relationshipType == MemoryRelationshipType.DERIVED_FROM
             ) {
                 database.memoryDao().memory(relationship.sourceMemoryId)
-                    ?.takeIf { it.epistemicBasis == EpistemicBasis.CONSOLIDATION }
+                    ?.takeIf {
+                        it.epistemicBasis == EpistemicBasis.CONSOLIDATION &&
+                            !it.hasTerminalLifecycleIntent()
+                    }
                     ?.let { dependent ->
                         database.memoryDao().updateMemory(
                             dependent.copy(
