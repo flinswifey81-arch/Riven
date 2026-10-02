@@ -28,6 +28,15 @@ import com.shai.riven.data.provider.ProviderCapability
 import com.shai.riven.data.provider.ProviderProfileSnapshot
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogError
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
+import com.shai.riven.data.reminder.ReminderController
+import com.shai.riven.data.reminder.ReminderDraft
+import com.shai.riven.data.reminder.ReminderFeature
+import com.shai.riven.data.reminder.ReminderFeatureControl
+import com.shai.riven.data.reminder.ReminderOperationResult
+import com.shai.riven.data.reminder.ReminderQuietHours
+import com.shai.riven.data.reminder.ReminderRescheduleReport
+import com.shai.riven.data.reminder.ReminderSettingsSnapshot
+import com.shai.riven.data.reminder.ReminderSnapshot
 import com.shai.riven.data.runtime.RivenChatMessage
 import com.shai.riven.data.runtime.RivenMemoryItem
 import com.shai.riven.data.runtime.RivenProfileSaveResult
@@ -43,6 +52,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertTrue
@@ -71,6 +82,7 @@ class RivenAppNormalTest {
         composeRule.onNodeWithText("A grounded reply with enough length to prove the bubble grows naturally.")
             .assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Chat destination", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Alarms destination", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Arcade destination", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Settings destination", useUnmergedTree = true).assertIsDisplayed()
         writeScreenshot("chat-normal.png")
@@ -102,6 +114,32 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("nav_chat").performClick()
 
         composeRule.onNodeWithTag("chat_input").assertTextContains("Keep this immediately")
+    }
+
+    @Test
+    fun alarmNavigationPreservesDraftAndSystemBackReturnsToChat() {
+        val runtime = FakeRivenRuntime(configuredSnapshot())
+        val reminderController = FakeReminderController()
+        composeRule.runOnIdle {
+            composeRule.activity.setContent {
+                RivenTheme {
+                    RivenApp(
+                        runtimeFactory = { runtime },
+                        reminderControllerFactory = { reminderController },
+                    )
+                }
+            }
+        }
+        composeRule.onNodeWithTag("chat_input").performTextReplacement("Return to this thought")
+
+        composeRule.onNodeWithTag("nav_alarms").performClick()
+        composeRule.onNodeWithTag("reminder_alarm_screen").assertIsDisplayed()
+        composeRule.runOnIdle {
+            composeRule.activity.onBackPressedDispatcher.onBackPressed()
+        }
+
+        composeRule.onNodeWithTag("chat_normal").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_input").assertTextContains("Return to this thought")
     }
 
     @Test
@@ -366,6 +404,30 @@ class RivenAppSavedStateTest {
 
         composeRule.onNodeWithTag("chat_input").assertTextContains("Unsent across recreation")
     }
+
+    @Test
+    fun recreationRestoresAlarmDestinationAndKeepsChatDraft() {
+        val runtime = FakeRivenRuntime(configuredSnapshot())
+        val reminderController = FakeReminderController()
+        val restoration = StateRestorationTester(composeRule)
+        restoration.setContent {
+            RivenTheme {
+                RivenApp(
+                    runtimeFactory = { runtime },
+                    reminderControllerFactory = { reminderController },
+                )
+            }
+        }
+        composeRule.onNodeWithTag("chat_input").performTextReplacement("Draft behind alarms")
+        composeRule.onNodeWithTag("nav_alarms").performClick()
+        composeRule.onNodeWithTag("reminder_alarm_screen").assertIsDisplayed()
+
+        restoration.emulateSavedInstanceStateRestore()
+
+        composeRule.onNodeWithTag("reminder_alarm_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_chat").performClick()
+        composeRule.onNodeWithTag("chat_input").assertTextContains("Draft behind alarms")
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -386,6 +448,7 @@ class RivenAppCompactTest {
         composeRule.onNodeWithTag("chat_input").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_send").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_settings").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_alarms").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_arcade").assertIsDisplayed()
     }
 }
@@ -552,6 +615,49 @@ private class FakeRivenRuntime(
     } else {
         success()
     }
+}
+
+private class FakeReminderController : ReminderController {
+    private val reminders = MutableStateFlow<List<ReminderSnapshot>>(emptyList())
+    private val settings = MutableStateFlow(
+        ReminderSettingsSnapshot(
+            quietHours = ReminderQuietHours(),
+            featureControls = ReminderFeature.entries.associateWith { feature ->
+                ReminderFeatureControl(
+                    feature = feature,
+                    enabled = true,
+                    allowDuringQuietHours = false,
+                )
+            },
+        ),
+    )
+
+    override fun observeReminders(): Flow<List<ReminderSnapshot>> = reminders
+
+    override fun observeSettings(): Flow<ReminderSettingsSnapshot> = settings
+
+    override suspend fun create(draft: ReminderDraft): ReminderOperationResult = unsupported()
+
+    override suspend fun edit(
+        reminderId: String,
+        draft: ReminderDraft,
+    ): ReminderOperationResult = unsupported()
+
+    override suspend fun complete(reminderId: String): ReminderOperationResult = unsupported()
+
+    override suspend fun cancel(reminderId: String): ReminderOperationResult = unsupported()
+
+    override suspend fun updateQuietHours(settings: ReminderQuietHours) = Unit
+
+    override suspend fun updateFeatureControl(control: ReminderFeatureControl) = Unit
+
+    override suspend fun rescheduleAll(reason: String) = ReminderRescheduleReport(
+        scheduled = 0,
+        permissionBlocked = 0,
+        failed = 0,
+    )
+
+    private fun unsupported(): Nothing = error("Reminder mutation was not expected in a navigation test.")
 }
 
 private fun configuredSnapshot(): RivenRuntimeSnapshot {

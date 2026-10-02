@@ -1,5 +1,6 @@
 package com.shai.riven.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
@@ -63,6 +64,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.reminder.ReminderController
+import com.shai.riven.data.reminder.platform.ReminderRuntime
 import com.shai.riven.data.provider.ProviderProfileSnapshot
 import com.shai.riven.data.provider.openrouter.OpenRouterModel
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
@@ -73,6 +76,7 @@ import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.ArcadeApp
+import com.shai.riven.ui.reminder.ReminderAlarmScreen
 import com.shai.riven.ui.theme.DeepInk
 import com.shai.riven.ui.theme.MistBlue
 import com.shai.riven.ui.theme.MutedGold
@@ -90,12 +94,16 @@ import kotlinx.coroutines.withContext
 
 enum class RivenDestination(val label: String) {
     CHAT("Chat"),
-    SETTINGS("Settings"),
+    ALARMS("Alarms"),
     ARCADE("Arcade"),
+    SETTINGS("Settings"),
 }
 
 @Composable
 fun RivenApp(
+    reminderControllerFactory: (android.content.Context) -> ReminderController = {
+        ReminderRuntime.from(it).repository
+    },
     runtimeFactory: (android.content.Context) -> RivenRuntimeController = {
         RivenConversationRuntime.fromContext(it)
     },
@@ -198,6 +206,10 @@ fun RivenApp(
         }
     }
 
+    BackHandler(enabled = destination == RivenDestination.ALARMS) {
+        navigateTo(RivenDestination.CHAT)
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize().testTag("riven_app"),
         containerColor = PenthouseNavy,
@@ -216,6 +228,10 @@ fun RivenApp(
         },
     ) { padding ->
         when {
+            destination == RivenDestination.ALARMS -> ReminderAlarmScreen(
+                modifier = Modifier.padding(padding),
+                controllerFactory = reminderControllerFactory,
+            )
             destination == RivenDestination.ARCADE -> ArcadeApp(modifier = Modifier.padding(padding))
             loading -> LoadingScreen(padding)
             destination == RivenDestination.SETTINGS -> SettingsScreen(
@@ -284,6 +300,37 @@ private fun DestinationIcon(destination: RivenDestination) {
                 drawCircle(gold, radius = 3.dp.toPx(), center = center, style = Stroke(thin))
                 drawLine(gold, Offset(center.x, center.y - 6.dp.toPx()), Offset(center.x, center.y + 6.dp.toPx()), thin)
                 drawLine(gold, Offset(center.x - 6.dp.toPx(), center.y), Offset(center.x + 6.dp.toPx(), center.y), thin)
+            }
+            RivenDestination.ALARMS -> {
+                val radius = 9.dp.toPx()
+                drawCircle(gold, radius = radius, center = center, style = Stroke(stroke))
+                drawCircle(gold, radius = 1.25.dp.toPx(), center = center)
+                drawLine(
+                    gold,
+                    Offset(center.x, center.y),
+                    Offset(center.x, center.y - 5.dp.toPx()),
+                    stroke,
+                )
+                drawLine(
+                    gold,
+                    Offset(center.x, center.y),
+                    Offset(center.x + 4.dp.toPx(), center.y + 2.dp.toPx()),
+                    stroke,
+                )
+                drawLine(
+                    gold,
+                    Offset(center.x - 7.dp.toPx(), 3.dp.toPx()),
+                    Offset(4.dp.toPx(), 7.dp.toPx()),
+                    thin,
+                )
+                drawLine(
+                    gold,
+                    Offset(center.x + 7.dp.toPx(), 3.dp.toPx()),
+                    Offset(24.dp.toPx(), 7.dp.toPx()),
+                    thin,
+                )
+                drawLine(gold, Offset(8.dp.toPx(), 22.dp.toPx()), Offset(6.dp.toPx(), 25.dp.toPx()), thin)
+                drawLine(gold, Offset(20.dp.toPx(), 22.dp.toPx()), Offset(22.dp.toPx(), 25.dp.toPx()), thin)
             }
             RivenDestination.SETTINGS -> {
                 val left = 3.dp.toPx()
