@@ -66,7 +66,7 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Celestial Spire, Starstruck, and Comet Trail are playable • Two table previews and live Riven replies remain unconnected.",
+            "Four solo tables are playable • Cosmic Mischief and live Riven replies remain unconnected.",
         ).assertIsDisplayed()
     }
 
@@ -153,6 +153,23 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText(
             "Endless play • Reaching the top refreshes the board at your selected speed.",
         ).assertIsDisplayed()
+    }
+
+    @Test
+    fun midnightSolitaireShowsThePlayableNoLossTable() {
+        composeRule.setContent {
+            RivenTheme {
+                ArcadeExperience(
+                    state = ArcadeUiState(selectedGameId = ArcadeGame.KLONDIKE.gameId),
+                    onAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("DRAW-ONE KLONDIKE").assertIsDisplayed()
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+        composeRule.onNodeWithTag("solitaire_stock").assertIsEnabled()
+        composeRule.onNodeWithContentDescription("Pause Midnight Solitaire").assertIsDisplayed()
     }
 
     @Test

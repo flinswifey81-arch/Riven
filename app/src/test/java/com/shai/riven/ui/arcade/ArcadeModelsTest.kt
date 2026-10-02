@@ -9,7 +9,7 @@ import org.junit.Test
 
 class ArcadeModelsTest {
     @Test
-    fun catalogContainsExactlyTheFiveApprovedHonestPreviews() {
+    fun catalogContainsExactlyTheFiveApprovedGames() {
         assertEquals(
             listOf(
                 "stacker",
@@ -23,7 +23,12 @@ class ArcadeModelsTest {
         assertEquals(4, ArcadeGame.entries.count { it.mode == ArcadeGameMode.SOLO })
         assertEquals(1, ArcadeGame.entries.count { it.mode == ArcadeGameMode.SHARED_WITH_RIVEN })
         assertEquals(
-            listOf(ArcadeGame.STACKER, ArcadeGame.HEART_MATCH, ArcadeGame.WRAPPING_SNAKE),
+            listOf(
+                ArcadeGame.STACKER,
+                ArcadeGame.KLONDIKE,
+                ArcadeGame.HEART_MATCH,
+                ArcadeGame.WRAPPING_SNAKE,
+            ),
             ArcadeGame.entries.filter(ArcadeGame::hasPlayableEngine),
         )
     }

@@ -78,6 +78,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
 import com.shai.riven.ui.arcade.comet.CometTrailGame
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireGame
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
 import com.shai.riven.ui.arcade.starstruck.StarstruckGame
 import com.shai.riven.ui.theme.AquaHeart
@@ -239,7 +240,7 @@ private fun ArcadeLobby(
                             text = if (state.quietMode) {
                                 "I will stay quiet, but you can tap me whenever you want to chat."
                             } else {
-                                "Five tables are being prepared. Tap my portrait to open conversation."
+                                "Four solo tables are ready. Tap my portrait to open conversation."
                             },
                             color = MistBlue,
                             style = MaterialTheme.typography.bodyMedium,
@@ -261,7 +262,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Celestial Spire, Starstruck, and Comet Trail are playable • Two table previews and live Riven replies remain unconnected.",
+                text = "Four solo tables are playable • Cosmic Mischief and live Riven replies remain unconnected.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -502,7 +503,10 @@ private fun GameBoardCard(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
             )
-            ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
+            ArcadeGame.KLONDIKE -> MidnightSolitaireGame(
+                externallyPaused = externallyPaused,
+                compactLayout = compactGameLayout,
+            )
             ArcadeGame.HEART_MATCH -> StarstruckGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
@@ -1491,7 +1495,8 @@ private fun PlayingCard(
 private fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.STACKER ->
         "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
-    ArcadeGame.KLONDIKE -> "Preview only • Draw-one Klondike engine and legal move handling are not implemented."
+    ArcadeGame.KLONDIKE ->
+        "Playable • Draw-one Klondike with unlimited recycling, undo, and confirmed fresh deals; no timer, lives, or loss state."
     ArcadeGame.HEART_MATCH ->
         "Playable defaults for review • Straight four creates a Row Burst; straight five or more creates a Color Nova. Dead boards reshuffle without loss."
     ArcadeGame.WRAPPING_SNAKE ->
