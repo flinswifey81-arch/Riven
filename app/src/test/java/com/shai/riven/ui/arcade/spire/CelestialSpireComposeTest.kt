@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalDensity
@@ -287,6 +288,73 @@ class CelestialSpireComposeTest {
         composeRule.runOnIdle { lifecycleOwner.moveTo(Lifecycle.State.RESUMED) }
         settleCompose()
         composeRule.onNodeWithContentDescription("Pause Celestial Spire").assertIsEnabled()
+    }
+
+    @Test
+    fun compactSettingsPauseGravityAndDismissalResumesPlay() {
+        composeRule.mainClock.autoAdvance = false
+        val initial = CelestialSpireEngine.newGame(seed = 92L)
+        val store = FakeSpireStore(session = initial)
+        composeRule.setContent {
+            RivenTheme {
+                CelestialSpireGame(
+                    externallyPaused = false,
+                    compactLayout = true,
+                    storeOverride = store,
+                    soundPlayerFactory = { FakeSpireSoundPlayer() },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open Celestial Spire settings").performClick()
+        settleCompose()
+        composeRule.mainClock.advanceTimeBy(2_000L)
+        composeRule.runOnIdle { }
+        assertEquals(initial, store.savedSession)
+
+        composeRule.onNodeWithText("DONE").performScrollTo().performClick()
+        settleCompose()
+        composeRule.mainClock.advanceTimeBy(700L)
+        composeRule.runOnIdle { }
+        assertEquals(initial.active.y + 1, store.savedSession?.active?.y)
+    }
+
+    @Test
+    fun dismissingCompactSettingsPreservesAnExistingManualPause() {
+        composeRule.mainClock.autoAdvance = false
+        val initial = CelestialSpireEngine.newGame(seed = 93L)
+        val store = FakeSpireStore(session = initial)
+        composeRule.setContent {
+            RivenTheme {
+                CelestialSpireGame(
+                    externallyPaused = false,
+                    compactLayout = true,
+                    storeOverride = store,
+                    soundPlayerFactory = { FakeSpireSoundPlayer() },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
+        settleCompose()
+        composeRule.onNodeWithContentDescription("Open Celestial Spire settings").performClick()
+        settleCompose()
+        composeRule.mainClock.advanceTimeBy(2_000L)
+        composeRule.runOnIdle { }
+        assertEquals(initial, store.savedSession)
+
+        composeRule.onNodeWithText("DONE").performScrollTo().performClick()
+        settleCompose()
+        composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
+        composeRule.mainClock.advanceTimeBy(1_000L)
+        composeRule.runOnIdle { }
+        assertEquals(initial, store.savedSession)
+
+        composeRule.onNodeWithContentDescription("Resume Celestial Spire").performClick()
+        settleCompose()
+        composeRule.mainClock.advanceTimeBy(700L)
+        composeRule.runOnIdle { }
+        assertEquals(initial.active.y + 1, store.savedSession?.active?.y)
     }
 
     private fun settleCompose() {

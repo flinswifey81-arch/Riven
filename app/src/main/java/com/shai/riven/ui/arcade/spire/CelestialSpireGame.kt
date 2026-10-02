@@ -130,7 +130,7 @@ fun CelestialSpireGame(
         soundPlayer.update(normalized.soundVolume, normalized.soundMuted)
     }
 
-    val paused = externallyPaused || manuallyPaused || !lifecycleResumed
+    val paused = externallyPaused || manuallyPaused || settingsOpen || !lifecycleResumed
     val performAction: (SpireAction) -> Unit = { action ->
         if (!paused) {
             val result = CelestialSpireEngine.step(state, action)
@@ -154,6 +154,7 @@ fun CelestialSpireGame(
         pauseLabel = when {
             externallyPaused -> "Paused for chat"
             manuallyPaused -> "Paused"
+            settingsOpen -> "Paused for settings"
             !lifecycleResumed -> "Paused while away"
             else -> "Playing"
         },
