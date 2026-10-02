@@ -98,7 +98,10 @@ class ProviderNeutralConversationEngine(
         ConversationEngineOwnerRegistry.register(ownerSessionToken)
     }
 
-    suspend fun execute(input: StartConversationRunInput): ConversationEngineResult {
+    suspend fun execute(
+        input: StartConversationRunInput,
+        onDelta: suspend (String) -> Unit = {},
+    ): ConversationEngineResult {
         check(!closed.get()) { "Conversation engine is closed" }
         var reserved: ConversationRunEntity? = null
         try {
@@ -114,7 +117,7 @@ class ProviderNeutralConversationEngine(
                 is ReserveConversationRunResult.Failure -> ConversationEngineResult.Failed(null, reservation.code)
                 is ReserveConversationRunResult.Reserved -> {
                     val limited = limiter.withPermitOrNull(limits.concurrencyWaitMillis) {
-                        executeReserved(reservation.run, reservation.userMessage.content)
+                        executeReserved(reservation.run, reservation.userMessage.content, onDelta)
                     }
                     limited ?: failRun(
                         reservation.run,
@@ -168,6 +171,7 @@ class ProviderNeutralConversationEngine(
     private suspend fun executeReserved(
         reserved: ConversationRunEntity,
         userContent: String,
+        onDelta: suspend (String) -> Unit,
     ): ConversationEngineResult {
         val job = coroutineContext[Job]
             ?: return failRun(reserved, ConversationEngineErrorCode.STORAGE_FAILURE, ConversationRunState.FAILED)
@@ -342,6 +346,7 @@ class ProviderNeutralConversationEngine(
                                 )
                             }
                         }
+                        if (event is ProviderStreamEvent.Delta) onDelta(event.content)
                     }
                 }
             } catch (_: TimeoutCancellationException) {

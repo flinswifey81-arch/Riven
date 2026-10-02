@@ -168,6 +168,9 @@ interface MemoryDao {
     @Query("SELECT COUNT(*) FROM memories")
     fun memoryCount(): Int
 
+    @Query("SELECT * FROM memories ORDER BY updated_at DESC, memory_id LIMIT :limit")
+    fun recentMemories(limit: Int): List<MemoryEntity>
+
     @Query("SELECT * FROM memory_evidence WHERE memory_id = :memoryId ORDER BY created_at, experience_id")
     fun evidenceForMemory(memoryId: String): List<MemoryEvidenceEntity>
 

@@ -37,6 +37,7 @@ import java.io.File
 import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -208,6 +209,14 @@ class ArcadeActivityScreenshotTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
 
+    @Before
+    fun openArcade() {
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTag("arcade_catalog").fetchSemanticsNodes().size == 1
+        }
+    }
+
     @Test
     fun rendersSharedCardTableToInspectablePng() {
         writeScreenshot("arcade-lobby.png")
@@ -265,7 +274,7 @@ class ArcadeActivityScreenshotTest {
         composeRule.runOnIdle {
             composeRule.activity.onBackPressedDispatcher.onBackPressed()
         }
-        composeRule.onNodeWithText("Arcade").assertIsDisplayed()
+        composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
     }
 
     @Test
@@ -316,6 +325,14 @@ class ArcadeActivityScreenshotTest {
 class ArcadeCompactActivityScreenshotTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<MainActivity>()
+
+    @Before
+    fun openArcade() {
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTag("arcade_catalog").fetchSemanticsNodes().size == 1
+        }
+    }
 
     @Test
     fun rendersCompactSharedCardTableToInspectablePng() {

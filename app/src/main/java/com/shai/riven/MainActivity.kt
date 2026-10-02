@@ -4,7 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import com.shai.riven.ui.arcade.ArcadeApp
+import com.shai.riven.ui.RivenApp
 import com.shai.riven.ui.theme.RivenTheme
 
 class MainActivity : ComponentActivity() {
@@ -13,7 +13,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             RivenTheme {
-                ArcadeApp()
+                RivenApp()
             }
         }
     }

@@ -18,6 +18,7 @@ import com.shai.riven.data.persistence.model.ConversationRunTrigger
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.validation.StaleValidationRecallGenerationException
+import com.shai.riven.data.validation.TARGETED_VALIDATION_RECALL_ALGORITHM_VERSION
 import com.shai.riven.data.validation.ValidationRecallGeneration
 import com.shai.riven.data.validation.validationRecallCorpusFence
 import java.security.MessageDigest
@@ -447,7 +448,7 @@ internal class ConversationRunPersistence(
                     ValidationRecallGeneration(
                         databaseSessionId = recall.databaseSessionId,
                         corpusGeneration = recall.corpusGeneration,
-                        algorithmVersion = recall.algorithmVersion,
+                        algorithmVersion = TARGETED_VALIDATION_RECALL_ALGORITHM_VERSION,
                     ),
                 ) { commit() }
             }
