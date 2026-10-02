@@ -334,7 +334,12 @@ private fun ArcadeGameScreen(
             .navigationBarsPadding(),
     ) {
         val useScrollableLayout = maxHeight < 700.dp || LocalDensity.current.fontScale >= 1.3f
-        if (useScrollableLayout) {
+        if (useScrollableLayout && game == ArcadeGame.STACKER) {
+            CompactCelestialSpireScreen(
+                state = state,
+                onAction = onAction,
+            )
+        } else if (useScrollableLayout) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -421,11 +426,67 @@ private fun ArcadeGameScreen(
 }
 
 @Composable
+private fun CompactCelestialSpireScreen(
+    state: ArcadeUiState,
+    onAction: (ArcadeAction) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .testTag("celestial_spire_compact_screen"),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            TextButton(
+                onClick = { onAction(ArcadeAction.ExitGame) },
+                modifier = Modifier.semantics { contentDescription = "Return to Arcade" },
+            ) {
+                Text("‹")
+            }
+            Text(
+                text = "Celestial Spire",
+                modifier = Modifier.weight(1f),
+                color = WarmIvory,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            QuietControl(
+                quiet = state.quietMode,
+                onToggle = { onAction(ArcadeAction.ToggleQuietMode) },
+                compact = true,
+            )
+            TextButton(
+                onClick = { onAction(ArcadeAction.OpenConversation) },
+                modifier = Modifier.semantics { contentDescription = "Open conversation with Riven" },
+            ) {
+                Text("CHAT", fontSize = 10.sp)
+            }
+        }
+        GameBoardCard(
+            game = ArcadeGame.STACKER,
+            externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
+            onAction = onAction,
+            compactSpire = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        )
+    }
+}
+
+@Composable
 private fun GameBoardCard(
     game: ArcadeGame,
     externallyPaused: Boolean,
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
+    compactSpire: Boolean = false,
 ) {
     Card(
         modifier = modifier,
@@ -434,7 +495,10 @@ private fun GameBoardCard(
         border = androidx.compose.foundation.BorderStroke(1.dp, MutedGold.copy(alpha = 0.42f)),
     ) {
         when (game) {
-            ArcadeGame.STACKER -> CelestialSpireGame(externallyPaused = externallyPaused)
+            ArcadeGame.STACKER -> CelestialSpireGame(
+                externallyPaused = externallyPaused,
+                compactLayout = compactSpire,
+            )
             ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
             ArcadeGame.HEART_MATCH -> HeartMatchPreview(onAction)
             ArcadeGame.WRAPPING_SNAKE -> SnakePreview(onAction)
@@ -460,7 +524,7 @@ private fun PendingRulesLabel(
 }
 
 private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
-    ArcadeGame.STACKER -> 760.dp
+    ArcadeGame.STACKER -> error("Celestial Spire uses the responsive compact layout")
     ArcadeGame.KLONDIKE -> 520.dp
     ArcadeGame.HEART_MATCH -> 520.dp
     ArcadeGame.WRAPPING_SNAKE -> 500.dp

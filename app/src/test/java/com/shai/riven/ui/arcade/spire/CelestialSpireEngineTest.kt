@@ -87,6 +87,32 @@ class CelestialSpireEngineTest {
     }
 
     @Test
+    fun ceilingKickLockOutRefreshesBeforeAnyMinoIsDiscarded() {
+        val board = emptyBoard().toMutableList().apply {
+            for (row in 3 until CELESTIAL_SPIRE_ROWS) {
+                for (column in 0..4) {
+                    this[row * CELESTIAL_SPIRE_COLUMNS + column] = SpirePieceType.J
+                }
+            }
+        }
+        val state = fixtureState(
+            board = board,
+            active = SpirePiece(SpirePieceType.I, rotation = 0, x = 0, y = 0),
+            next = SpirePieceType.O,
+        )
+
+        val rotated = CelestialSpireEngine.step(state, SpireAction.ROTATE_CLOCKWISE).state
+        assertEquals(SpirePiece(SpirePieceType.I, rotation = 1, x = 0, y = -1), rotated.active)
+
+        val result = CelestialSpireEngine.step(rotated, SpireAction.TICK)
+
+        assertTrue(result.state.board.all { it == null })
+        assertEquals(SpirePieceType.O, result.state.active.type)
+        assertEquals(1, result.state.boardRefreshes)
+        assertEquals(listOf(SpireSoundCue.PIECE_LANDED), result.sounds)
+    }
+
+    @Test
     fun hardDropLocksImmediatelyAndAdvancesTheQueue() {
         val state = CelestialSpireEngine.newGame(seed = 99L)
 

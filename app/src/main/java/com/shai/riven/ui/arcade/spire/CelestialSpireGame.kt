@@ -3,6 +3,8 @@ package com.shai.riven.ui.arcade.spire
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -50,6 +52,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -76,6 +79,7 @@ private val Rose = Color(0xFFB9758E)
 fun CelestialSpireGame(
     externallyPaused: Boolean,
     modifier: Modifier = Modifier,
+    compactLayout: Boolean = false,
     storeOverride: CelestialSpireStore? = null,
     soundPlayerFactory: () -> CelestialSpireSoundPlayer = { AndroidCelestialSpireSoundPlayer() },
     initialSeed: Long? = null,
@@ -83,35 +87,36 @@ fun CelestialSpireGame(
     val context = LocalContext.current
     val store = storeOverride ?: remember(context) { SharedPreferencesCelestialSpireStore(context) }
     val soundPlayer = remember(soundPlayerFactory) { soundPlayerFactory() }
-    var state by remember(store, initialSeed) {
+    val stateHolder = remember(store, initialSeed) {
         mutableStateOf(
             store.loadSession() ?: CelestialSpireEngine.newGame(
                 seed = initialSeed ?: System.currentTimeMillis(),
             ),
         )
     }
-    var settings by remember(store) { mutableStateOf(store.loadSettings()) }
+    var state by stateHolder
+    val settingsHolder = remember(store) { mutableStateOf(store.loadSettings()) }
+    var settings by settingsHolder
     var manuallyPaused by rememberSaveable { mutableStateOf(false) }
+    var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
     var lifecycleResumed by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
     }
-    val currentState by rememberUpdatedState(state)
-    val currentSettings by rememberUpdatedState(settings)
 
     DisposableEffect(lifecycleOwner, store, soundPlayer) {
         val observer = LifecycleEventObserver { _, _ ->
             lifecycleResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
             if (!lifecycleResumed) {
-                store.saveSession(currentState)
-                store.saveSettings(currentSettings)
+                store.saveSession(stateHolder.value)
+                store.saveSettings(settingsHolder.value)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            store.saveSession(currentState)
-            store.saveSettings(currentSettings)
+            store.saveSession(stateHolder.value)
+            store.saveSettings(settingsHolder.value)
             soundPlayer.release()
         }
     }
@@ -158,8 +163,21 @@ fun CelestialSpireGame(
         onToggleMute = { settings = settings.copy(soundMuted = !settings.soundMuted) },
         onVolumeDown = { settings = settings.copy(soundVolume = settings.soundVolume - 10).normalized() },
         onVolumeUp = { settings = settings.copy(soundVolume = settings.soundVolume + 10).normalized() },
+        compactLayout = compactLayout,
+        onOpenSettings = { settingsOpen = true },
         modifier = modifier,
     )
+    if (settingsOpen) {
+        CompactSpireSettingsDialog(
+            state = state,
+            settings = settings,
+            onDismiss = { settingsOpen = false },
+            onCycleSpeed = { settings = settings.copy(fallSpeed = settings.fallSpeed.next()) },
+            onToggleMute = { settings = settings.copy(soundMuted = !settings.soundMuted) },
+            onVolumeDown = { settings = settings.copy(soundVolume = settings.soundVolume - 10).normalized() },
+            onVolumeUp = { settings = settings.copy(soundVolume = settings.soundVolume + 10).normalized() },
+        )
+    }
 }
 
 @Composable
@@ -174,8 +192,23 @@ private fun CelestialSpireLayout(
     onToggleMute: () -> Unit,
     onVolumeDown: () -> Unit,
     onVolumeUp: () -> Unit,
+    compactLayout: Boolean,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    if (compactLayout) {
+        CompactCelestialSpireLayout(
+            state = state,
+            settings = settings,
+            paused = paused,
+            pauseLabel = pauseLabel,
+            onAction = onAction,
+            onTogglePause = onTogglePause,
+            onOpenSettings = onOpenSettings,
+            modifier = modifier,
+        )
+        return
+    }
     Column(modifier = modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
@@ -287,6 +320,225 @@ private fun CelestialSpireLayout(
                     modifier = Modifier.weight(1f),
                     accent = true,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactCelestialSpireLayout(
+    state: CelestialSpireState,
+    settings: CelestialSpireSettings,
+    paused: Boolean,
+    pauseLabel: String,
+    onAction: (SpireAction) -> Unit,
+    onTogglePause: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("celestial_spire_compact"),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TableNavyRaised.copy(alpha = 0.72f))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "FALLING BLOCKS",
+                color = MutedGold,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.6.sp,
+            )
+            Text(
+                text = if (paused) "PAUSED" else "${settings.fallSpeed.label} • fixed",
+                color = if (paused) SoftAmber else MistBlue,
+                fontSize = 10.sp,
+                maxLines = 1,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CelestialSpireBoard(
+                state = state,
+                paused = paused,
+                pauseLabel = pauseLabel,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+            )
+            Column(
+                modifier = Modifier
+                    .width(92.dp)
+                    .fillMaxHeight(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("LINES", color = MutedGold, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    text = state.linesCleared.toString(),
+                    color = WarmIvory,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                if (state.boardRefreshes > 0) {
+                    Text(
+                        text = "${state.boardRefreshes} fresh",
+                        color = MistBlue,
+                        fontSize = 9.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                Button(
+                    onClick = onOpenSettings,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 48.dp)
+                        .semantics { contentDescription = "Open Celestial Spire settings" },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SlateBlue.copy(alpha = 0.72f),
+                        contentColor = WarmIvory,
+                    ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp),
+                ) {
+                    Text("SETTINGS", fontSize = 9.sp, maxLines = 1)
+                }
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            SpireControlButton(
+                label = "←",
+                description = "Move piece left",
+                enabled = !paused,
+                onClick = { onAction(SpireAction.MOVE_LEFT) },
+                modifier = Modifier.weight(1f),
+            )
+            SpireControlButton(
+                label = "↻",
+                description = "Rotate piece clockwise",
+                enabled = !paused,
+                onClick = { onAction(SpireAction.ROTATE_CLOCKWISE) },
+                modifier = Modifier.weight(1f),
+            )
+            SpireControlButton(
+                label = "→",
+                description = "Move piece right",
+                enabled = !paused,
+                onClick = { onAction(SpireAction.MOVE_RIGHT) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 6.dp, end = 6.dp, bottom = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            SpireControlButton(
+                label = "↓",
+                description = "Soft drop piece",
+                enabled = !paused,
+                onClick = { onAction(SpireAction.SOFT_DROP) },
+                modifier = Modifier.weight(1f),
+            )
+            SpireControlButton(
+                label = "DROP",
+                description = "Hard drop piece",
+                enabled = !paused,
+                onClick = { onAction(SpireAction.HARD_DROP) },
+                modifier = Modifier.weight(1f),
+            )
+            SpireControlButton(
+                label = if (paused) "RESUME" else "PAUSE",
+                description = if (paused) "Resume Celestial Spire" else "Pause Celestial Spire",
+                enabled = !externallyBlocked(paused, pauseLabel),
+                onClick = onTogglePause,
+                modifier = Modifier.weight(1f),
+                accent = true,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactSpireSettingsDialog(
+    state: CelestialSpireState,
+    settings: CelestialSpireSettings,
+    onDismiss: () -> Unit,
+    onCycleSpeed: () -> Unit,
+    onToggleMute: () -> Unit,
+    onVolumeDown: () -> Unit,
+    onVolumeUp: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 320.dp)
+                .background(TableNavyRaised, RoundedCornerShape(20.dp))
+                .border(1.dp, MutedGold.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("CELESTIAL SPIRE SETTINGS", color = MutedGold, fontWeight = FontWeight.Bold)
+            Text("NEXT", color = MutedGold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            NextPiecePreview(type = state.next)
+            Button(
+                onClick = onCycleSpeed,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("celestial_spire_speed"),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SlateBlue.copy(alpha = 0.72f),
+                    contentColor = WarmIvory,
+                ),
+            ) {
+                Text("${settings.fallSpeed.label} • ${settings.fallSpeed.tickMillis} ms")
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("SOUND", color = MistBlue)
+                Switch(
+                    checked = !settings.soundMuted,
+                    onCheckedChange = { onToggleMute() },
+                    modifier = Modifier.semantics { contentDescription = "Celestial Spire sound" },
+                )
+            }
+            SpireVolumeControls(
+                settings = settings,
+                onVolumeDown = onVolumeDown,
+                onVolumeUp = onVolumeUp,
+            )
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp),
+            ) {
+                Text("DONE")
             }
         }
     }
@@ -466,24 +718,47 @@ private fun CelestialSpireSidePanel(
                     .testTag("celestial_spire_sound"),
             )
         }
+        SpireVolumeControls(
+            settings = settings,
+            onVolumeDown = onVolumeDown,
+            onVolumeUp = onVolumeUp,
+        )
+    }
+}
+
+@Composable
+private fun SpireVolumeControls(
+    settings: CelestialSpireSettings,
+    onVolumeDown: () -> Unit,
+    onVolumeUp: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "${settings.soundVolume}%",
+            modifier = Modifier.testTag("celestial_spire_volume"),
+            color = WarmIvory,
+            fontSize = 11.sp,
+        )
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             TextButton(
                 onClick = onVolumeDown,
-                modifier = Modifier.semantics { contentDescription = "Lower game sound volume" },
-            ) { Text("−") }
-            Text(
-                text = "${settings.soundVolume}%",
-                modifier = Modifier.testTag("celestial_spire_volume"),
-                color = WarmIvory,
-                fontSize = 11.sp,
-            )
+                modifier = Modifier
+                    .weight(1f)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .semantics { contentDescription = "Lower game sound volume" },
+            ) { Text("-") }
             TextButton(
                 onClick = onVolumeUp,
-                modifier = Modifier.semantics { contentDescription = "Raise game sound volume" },
+                modifier = Modifier
+                    .weight(1f)
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .semantics { contentDescription = "Raise game sound volume" },
             ) { Text("+") }
         }
     }

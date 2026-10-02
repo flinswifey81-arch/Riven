@@ -6,10 +6,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -27,6 +29,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.shai.riven.MainActivity
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
@@ -307,8 +310,10 @@ class ArcadeCompactActivityScreenshotTest {
     @Test
     fun rendersCompactCelestialSpireControlsToInspectablePng() {
         composeRule.onNodeWithText("Celestial Spire").performClick()
-        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(2)
-        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
+        composeRule.onNodeWithTag("celestial_spire_compact_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Move piece left").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Hard drop piece").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
         composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
         writeScreenshot("celestial-spire-compact.png")
@@ -341,6 +346,48 @@ class ArcadeCompactActivityScreenshotTest {
 class ArcadeCompactLayoutTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun shortLargeTextCelestialSpireKeepsTheFullBoardAndPlayControlsTogether() {
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(
+                        state = ArcadeUiState(selectedGameId = ArcadeGame.STACKER.gameId),
+                        onAction = {},
+                    )
+                }
+            }
+        }
+
+        composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
+        composeRule.onNodeWithTag("celestial_spire_compact_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
+        listOf(
+            "Move piece left",
+            "Rotate piece clockwise",
+            "Move piece right",
+            "Soft drop piece",
+            "Hard drop piece",
+            "Pause Celestial Spire",
+        ).forEach { description ->
+            composeRule.onNodeWithContentDescription(description)
+                .assertIsDisplayed()
+                .assertHeightIsAtLeast(48.dp)
+                .assertWidthIsAtLeast(48.dp)
+        }
+        composeRule.onNodeWithContentDescription("Open conversation with Riven").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Celestial Spire settings")
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
+        composeRule.onNodeWithContentDescription("Raise game sound volume")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
+            .assertWidthIsAtLeast(48.dp)
+            .performClick()
+    }
 
     @Test
     fun shortLargeTextGameLayoutScrollsFromHeaderThroughControlsAndRules() {

@@ -170,11 +170,24 @@ object CelestialSpireEngine {
     }
 
     private fun lock(state: CelestialSpireState): SpireStepResult {
+        val lockedCells = cells(state.active)
+        if (lockedCells.any { point -> point.y < 0 }) {
+            val draw = drawPiece(state.randomState, state.bag)
+            return SpireStepResult(
+                state = CelestialSpireState(
+                    board = emptyBoard(),
+                    active = spawn(state.next),
+                    next = draw.type,
+                    bag = draw.bag,
+                    randomState = draw.randomState,
+                    boardRefreshes = state.boardRefreshes + 1,
+                ),
+                sounds = listOf(SpireSoundCue.PIECE_LANDED),
+            )
+        }
         val merged = state.board.toMutableList()
-        cells(state.active).forEach { point ->
-            if (point.y in 0 until CELESTIAL_SPIRE_ROWS) {
-                merged[point.y * CELESTIAL_SPIRE_COLUMNS + point.x] = state.active.type
-            }
+        lockedCells.forEach { point ->
+            merged[point.y * CELESTIAL_SPIRE_COLUMNS + point.x] = state.active.type
         }
         val (clearedBoard, clearedLines) = clearCompleteLines(merged)
         val draw = drawPiece(state.randomState, state.bag)

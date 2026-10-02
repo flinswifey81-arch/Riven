@@ -3,6 +3,8 @@ package com.shai.riven.ui.arcade.spire
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -10,6 +12,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -84,15 +89,67 @@ class CelestialSpireComposeTest {
         composeRule.onNodeWithTag("celestial_spire_speed").performClick()
         settleCompose()
         composeRule.onNodeWithText("Steady\n650 ms").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Lower game sound volume").performClick()
+        composeRule.onNodeWithContentDescription("Lower game sound volume")
+            .assertIsDisplayed()
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
+        settleCompose()
+        assertEquals(40, store.savedSettings?.soundVolume)
+        composeRule.onNodeWithContentDescription("Raise game sound volume")
+            .assertIsDisplayed()
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
         settleCompose()
         composeRule.onNodeWithContentDescription("Celestial Spire sound").performClick()
         settleCompose()
 
         assertEquals(SpireFallSpeed.STEADY, store.savedSettings?.fallSpeed)
-        assertEquals(40, store.savedSettings?.soundVolume)
+        assertEquals(50, store.savedSettings?.soundVolume)
         assertTrue(store.savedSettings?.soundMuted == true)
-        assertEquals(40 to true, sound.updates.last())
+        assertEquals(50 to true, sound.updates.last())
+    }
+
+    @Test
+    fun largeTextKeepsBothVolumeDirectionsVisibleTappableAndFullSized() {
+        composeRule.mainClock.autoAdvance = false
+        val store = FakeSpireStore(
+            session = CelestialSpireEngine.newGame(seed = 23L),
+            settings = CelestialSpireSettings(soundVolume = 50),
+        )
+        composeRule.setContent {
+            val currentDensity = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = currentDensity.density,
+                    fontScale = 1.5f,
+                ),
+            ) {
+                RivenTheme {
+                    CelestialSpireGame(
+                        externallyPaused = true,
+                        storeOverride = store,
+                        soundPlayerFactory = { FakeSpireSoundPlayer() },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Lower game sound volume")
+            .assertIsDisplayed()
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
+        settleCompose()
+        assertEquals(40, store.savedSettings?.soundVolume)
+        composeRule.onNodeWithContentDescription("Raise game sound volume")
+            .assertIsDisplayed()
+            .assertWidthIsAtLeast(48.dp)
+            .assertHeightIsAtLeast(48.dp)
+            .performClick()
+        settleCompose()
+        assertEquals(50, store.savedSettings?.soundVolume)
     }
 
     @Test
@@ -146,6 +203,57 @@ class CelestialSpireComposeTest {
 
         assertEquals(1, store.savedSession?.piecesPlaced)
         assertTrue(sound.released)
+    }
+
+    @Test
+    fun sameFrameMoveThenDisposeCannotOverwriteTheNewSession() {
+        composeRule.mainClock.autoAdvance = false
+        val store = FakeSpireStore(session = CelestialSpireEngine.newGame(seed = 74L))
+        val showGame = mutableStateOf(true)
+        composeRule.setContent {
+            RivenTheme {
+                if (showGame.value) {
+                    CelestialSpireGame(
+                        externallyPaused = false,
+                        storeOverride = store,
+                        soundPlayerFactory = { FakeSpireSoundPlayer() },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Hard drop piece").performClick()
+        composeRule.runOnIdle { showGame.value = false }
+        settleCompose()
+
+        assertEquals(1, store.savedSession?.piecesPlaced)
+    }
+
+    @Test
+    fun sameFrameSettingChangeThenDisposeCannotOverwriteTheNewSettings() {
+        composeRule.mainClock.autoAdvance = false
+        val store = FakeSpireStore(
+            session = CelestialSpireEngine.newGame(seed = 75L),
+            settings = CelestialSpireSettings(fallSpeed = SpireFallSpeed.CALM),
+        )
+        val showGame = mutableStateOf(true)
+        composeRule.setContent {
+            RivenTheme {
+                if (showGame.value) {
+                    CelestialSpireGame(
+                        externallyPaused = false,
+                        storeOverride = store,
+                        soundPlayerFactory = { FakeSpireSoundPlayer() },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("celestial_spire_speed").performClick()
+        composeRule.runOnIdle { showGame.value = false }
+        settleCompose()
+
+        assertEquals(SpireFallSpeed.STEADY, store.savedSettings?.fallSpeed)
     }
 
     @Test
