@@ -16,19 +16,19 @@ internal fun sourceLineageHash(experienceId: String, lineageKey: String): String
 }
 
 /**
- * Minimal claim-scoped suppression key. Automatic candidate lineage v2 embeds only a source-order
- * claim ordinal plus a semantic digest; the ordinal keeps paraphrases in the same non-semantic
- * source slot while allowing unrelated claims from the same Experience to remain admissible.
- * Older/manual lineages fall back to their exact v1 hash.
+ * Minimal claim-scoped suppression key. Automatic candidate lineage v3 embeds a server-validated
+ * immutable source-claim ordinal plus a semantic digest. Only the source claim is retained in the
+ * suppression hash, so a paraphrase cannot evade Forget/Delete and deleted semantic content is not
+ * retained. Older positional/model-derived and manual lineages fall back to their exact hash.
  */
 internal fun sourceClaimSuppressionHash(experienceId: String, lineageKey: String): String {
-    val automaticClaimOrdinal = AUTO_CANDIDATE_V2_PATTERN.matchEntire(lineageKey)
+    val automaticClaimOrdinal = AUTO_CANDIDATE_V3_PATTERN.matchEntire(lineageKey)
         ?.groupValues
         ?.get(1)
         ?.toIntOrNull()
     if (automaticClaimOrdinal == null) return sourceLineageHash(experienceId, lineageKey)
     val canonicalSource = buildString {
-        append("riven-source-claim-v1:")
+        append("riven-source-claim-v2:")
         append(experienceId.toByteArray(Charsets.UTF_8).size)
         append(':')
         append(experienceId)
@@ -40,4 +40,4 @@ internal fun sourceClaimSuppressionHash(experienceId: String, lineageKey: String
         .joinToString("") { byte -> "%02x".format(byte) }
 }
 
-private val AUTO_CANDIDATE_V2_PATTERN = Regex("AUTO_CANDIDATE_V2:(\\d+):[0-9a-f]{64}")
+private val AUTO_CANDIDATE_V3_PATTERN = Regex("AUTO_CANDIDATE_V3:(\\d+):[0-9a-f]{64}")

@@ -227,6 +227,8 @@ class CandidateExtractionService(
                 ),
             )
         }
+        val sourceClaimIds = candidateSourceClaims(snapshot.sourceContent)
+            .mapTo(mutableSetOf()) { it.id }
         val firstIndexByClaim = mutableMapOf<String, Int>()
         return proposal.candidates.mapIndexed { index, candidate ->
             when {
@@ -248,13 +250,25 @@ class CandidateExtractionService(
                         InvalidCandidateProposalReason.DISALLOWED_STATE,
                     ),
                 )
+                candidate.sourceClaimId.isBlank() -> abort(
+                    CandidateExtractionError.InvalidCandidateProposal(
+                        index,
+                        InvalidCandidateProposalReason.MISSING_SOURCE_CLAIM_ID,
+                    ),
+                )
+                candidate.sourceClaimId !in sourceClaimIds -> abort(
+                    CandidateExtractionError.InvalidCandidateProposal(
+                        index,
+                        InvalidCandidateProposalReason.UNKNOWN_SOURCE_CLAIM_ID,
+                    ),
+                )
             }
             validateEpistemicBasis(snapshot, candidate, index)
-            val semanticClaimKey = candidateClaimLineageKey(snapshot.experienceId, candidate, 0)
+            val semanticClaimKey = candidateSemanticClaimKey(snapshot.experienceId, candidate)
             firstIndexByClaim.putIfAbsent(semanticClaimKey, index)?.let { firstIndex ->
                 abort(CandidateExtractionError.DuplicateCandidateProposal(firstIndex, index))
             }
-            val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate, index)
+            val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate)
             PreparedCandidate(index, candidate, lineageKey)
         }
     }

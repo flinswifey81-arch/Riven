@@ -58,7 +58,8 @@ class OpenRouterAutomaticMemoryModelTest {
                 .put("epistemicBasis", "DIRECT_USER_STATEMENT")
                 .put("certainty", "CERTAIN")
                 .put("state", "READY_FOR_VALIDATION")
-                .put("sensitivity", "STANDARD")))
+                .put("sensitivity", "STANDARD")
+                .put("sourceClaimId", "SOURCE_CLAIM_V1:0")))
         val http = RecordingHttpClient(response)
         val model = OpenRouterAutomaticMemoryModel(runtimeProfile(), http)
 
@@ -87,6 +88,7 @@ class OpenRouterAutomaticMemoryModelTest {
         assertEquals(AttentionOutcome.FORWARD_FOR_INTERPRETATION, attention.outcome)
         assertEquals(listOf(PositiveAttentionSignal.PREFERENCE), attention.positiveSignals)
         assertEquals("Shai loves sardines.", extraction.candidates.single().proposedMeaning)
+        assertEquals("SOURCE_CLAIM_V1:0", extraction.candidates.single().sourceClaimId)
         assertEquals(1, http.requests.size)
         val request = http.requests.single()
         assertEquals("https://openrouter.ai/api/v1/chat/completions", request.url)
@@ -96,7 +98,12 @@ class OpenRouterAutomaticMemoryModelTest {
         assertEquals(false, body.getBoolean("stream"))
         assertEquals(OpenRouterAutomaticMemoryModel.MAX_COMPLETION_TOKENS, body.getInt("max_completion_tokens"))
         assertEquals("json_object", body.getJSONObject("response_format").getString("type"))
-        assertTrue(body.getJSONArray("messages").getJSONObject(1).getString("content").contains("Noted."))
+        val payload = JSONObject(body.getJSONArray("messages").getJSONObject(1).getString("content"))
+        assertTrue(payload.toString().contains("Noted."))
+        assertEquals("SOURCE_CLAIM_V1:0", payload.getJSONArray("sourceClaims").getJSONObject(0)
+            .getString("sourceClaimId"))
+        assertEquals("I love sardines.", payload.getJSONArray("sourceClaims").getJSONObject(0)
+            .getString("text"))
     }
 
     @Test

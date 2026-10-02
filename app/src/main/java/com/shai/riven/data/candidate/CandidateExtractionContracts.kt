@@ -42,6 +42,7 @@ data class CandidateMemoryProposal(
     val proposedCertainty: MemoryCertainty,
     val proposedState: CandidateMemoryState,
     val proposedSensitivity: SensitivityLevel,
+    val sourceClaimId: String,
 )
 
 data class CandidateExtractionProposal(
@@ -106,6 +107,8 @@ enum class InvalidCandidateProposalReason {
     BLANK_MEANING,
     MEANING_TOO_LONG,
     DISALLOWED_STATE,
+    MISSING_SOURCE_CLAIM_ID,
+    UNKNOWN_SOURCE_CLAIM_ID,
 }
 
 enum class InvalidEpistemicBasisReason {

@@ -110,11 +110,19 @@ class CandidateExtractionServiceTest {
 
     @Test
     fun multipleCandidatesFromOneExperienceEachGetDistinctSeedLineage() = runBlocking {
-        forwardExperience()
+        forwardExperience(content = "Childhood eggs. Current ramen eggs. Current fried eggs.")
         extractor.proposal = extraction(
-            proposal("Shai disliked eggs during childhood."),
-            proposal("Shai currently likes ramen eggs.", kind = MemoryKind.EPISODIC),
-            proposal("Shai currently likes runny fried eggs.", kind = MemoryKind.RELATIONSHIP),
+            proposal("Shai disliked eggs during childhood.", sourceClaimId = sourceClaimId(0)),
+            proposal(
+                "Shai currently likes ramen eggs.",
+                kind = MemoryKind.EPISODIC,
+                sourceClaimId = sourceClaimId(1),
+            ),
+            proposal(
+                "Shai currently likes runny fried eggs.",
+                kind = MemoryKind.RELATIONSHIP,
+                sourceClaimId = sourceClaimId(2),
+            ),
         )
 
         val result = extracted(extract())
@@ -429,13 +437,63 @@ class CandidateExtractionServiceTest {
 
     @Test
     fun multiClaimExperienceHasDistinctLineages() = runBlocking {
-        forwardExperience()
-        extractor.proposal = extraction(proposal("Claim A"), proposal("Claim B"))
+        forwardExperience(content = "Claim A. Claim B.")
+        extractor.proposal = extraction(
+            proposal("Claim A", sourceClaimId = sourceClaimId(0)),
+            proposal("Claim B", sourceClaimId = sourceClaimId(1)),
+        )
         val ids = extracted(extract()).createdCandidateIds
         val lineages = ids.map { database.memoryDao().candidateEvidence(it).single().lineageKey }
         assertNotEquals(lineages[0], lineages[1])
         assertEquals(listOf("0", "1"), lineages.map { it.split(':')[1] })
-        assertTrue(lineages.all { it.matches(Regex("AUTO_CANDIDATE_V2:\\d+:[0-9a-f]{64}")) })
+        assertTrue(lineages.all { it.matches(Regex("AUTO_CANDIDATE_V3:\\d+:[0-9a-f]{64}")) })
+    }
+
+    @Test
+    fun modelOutputReorderKeepsServerSourceClaimIdentityStable() = runBlocking {
+        forwardExperience(content = "Claim A. Claim B.")
+        val first = proposal("Claim A", sourceClaimId = sourceClaimId(0))
+        val second = proposal("Claim B", sourceClaimId = sourceClaimId(1))
+        extractor.proposal = extraction(first, second)
+        val created = extracted(extract()).createdCandidateIds
+
+        extractor.proposal = extraction(second, first)
+        val replay = extracted(extract(extractedAt = 100))
+
+        assertTrue(replay.createdCandidateIds.isEmpty())
+        assertEquals(created.reversed(), replay.existingCandidateIds)
+        assertEquals(2, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun modelCannotInventSourceClaimIdentity() = runBlocking {
+        forwardExperience(content = "Only one grounded claim.")
+        extractor.proposal = extraction(proposal(sourceClaimId = sourceClaimId(1)))
+
+        assertEquals(
+            CandidateExtractionError.InvalidCandidateProposal(
+                0,
+                InvalidCandidateProposalReason.UNKNOWN_SOURCE_CLAIM_ID,
+            ),
+            failure(extract()),
+        )
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun immutableSourceSegmentationSeparatesSentenceAndCoordinatingClauses() {
+        val claims = candidateSourceClaims(
+            "I love sardines, and my dog's name is Pixel. My favorite tea is oolong.",
+        )
+
+        assertEquals(
+            listOf(sourceClaimId(0), sourceClaimId(1), sourceClaimId(2)),
+            claims.map { it.id },
+        )
+        assertEquals(
+            listOf("I love sardines", "and my dog's name is Pixel.", "My favorite tea is oolong."),
+            claims.map { it.text },
+        )
     }
 
     @Test
@@ -507,9 +565,13 @@ class CandidateExtractionServiceTest {
 
     @Test
     fun suppressingOneClaimDoesNotBlockOtherClaimFromSameExperience() = runBlocking {
-        forwardExperience()
-        val blocked = proposal("Blocked claim")
-        val allowed = proposal("Independent claim", kind = MemoryKind.EPISODIC)
+        forwardExperience(content = "Blocked claim. Independent claim.")
+        val blocked = proposal("Blocked claim", sourceClaimId = sourceClaimId(0))
+        val allowed = proposal(
+            "Independent claim",
+            kind = MemoryKind.EPISODIC,
+            sourceClaimId = sourceClaimId(1),
+        )
         insertTombstone("experience", blocked, SuppressionKind.DELETE, isActive = true)
         extractor.proposal = extraction(blocked, allowed)
 
@@ -521,18 +583,21 @@ class CandidateExtractionServiceTest {
     }
 
     @Test
-    fun claimSlotTombstoneBlocksParaphraseWithoutBlockingSecondClaim() = runBlocking {
-        forwardExperience()
+    fun serverSourceClaimTombstoneBlocksParaphraseWithoutBlockingSecondClaim() = runBlocking {
+        forwardExperience(content = "Forgotten source claim. Independent source claim.")
         insertTombstone(
             "experience",
-            proposal("Original forgotten phrasing"),
+            proposal("Original forgotten phrasing", sourceClaimId = sourceClaimId(0)),
             SuppressionKind.FORGET,
             isActive = true,
-            claimOrdinal = 0,
         )
         extractor.proposal = extraction(
-            proposal("Paraphrased forgotten meaning"),
-            proposal("Unrelated fact from the same source", kind = MemoryKind.EPISODIC),
+            proposal("Paraphrased forgotten meaning", sourceClaimId = sourceClaimId(0)),
+            proposal(
+                "Unrelated fact from the same source",
+                kind = MemoryKind.EPISODIC,
+                sourceClaimId = sourceClaimId(1),
+            ),
         )
 
         val result = extracted(extract())
@@ -586,23 +651,37 @@ class CandidateExtractionServiceTest {
     }
 
     @Test
-    fun claimSuppressionHashIgnoresSemanticDigestButKeepsSourceSlotNarrow() {
+    fun claimSuppressionHashUsesServerSourceClaimAndIgnoresSemanticDigest() {
         val original = sourceClaimSuppressionHash(
             "experience",
-            "AUTO_CANDIDATE_V2:0:${"a".repeat(64)}",
+            "AUTO_CANDIDATE_V3:0:${"a".repeat(64)}",
         )
         val paraphrase = sourceClaimSuppressionHash(
             "experience",
-            "AUTO_CANDIDATE_V2:0:${"b".repeat(64)}",
+            "AUTO_CANDIDATE_V3:0:${"b".repeat(64)}",
         )
         val sibling = sourceClaimSuppressionHash(
             "experience",
-            "AUTO_CANDIDATE_V2:1:${"b".repeat(64)}",
+            "AUTO_CANDIDATE_V3:1:${"b".repeat(64)}",
         )
 
         assertEquals(original, paraphrase)
         assertNotEquals(original, sibling)
         assertEquals(64, original.length)
+    }
+
+    @Test
+    fun legacyModelOutputOrdinalIsNotTreatedAsStableClaimIdentity() {
+        val firstWording = sourceClaimSuppressionHash(
+            "experience",
+            "AUTO_CANDIDATE_V2:0:${"a".repeat(64)}",
+        )
+        val secondWording = sourceClaimSuppressionHash(
+            "experience",
+            "AUTO_CANDIDATE_V2:0:${"b".repeat(64)}",
+        )
+
+        assertNotEquals(firstWording, secondWording)
     }
 
     @Test
@@ -940,16 +1019,19 @@ class CandidateExtractionServiceTest {
             as ReadCandidatesForExperienceResult.Candidates
         assertEquals(listOf(id), result.candidates.map { it.candidateId })
         assertEquals("Retained meaning", result.candidates.single().proposedMeaning)
-        assertTrue(result.candidates.single().lineageKey.startsWith("AUTO_CANDIDATE_V2:0:"))
+        assertTrue(result.candidates.single().lineageKey.startsWith("AUTO_CANDIDATE_V3:0:"))
     }
 
     @Test
     fun candidateIdCollisionIsTypedAndRollsBackWholeExtraction() = runBlocking {
-        forwardExperience()
+        forwardExperience(content = "First new claim. Second new claim.")
         database.memoryDao().insertCandidateMemory(candidateEntity("collision", proposal("Unrelated existing")))
         var call = 0
         service = candidateService(CandidateIdGenerator { if (call++ == 0) "first-new" else "collision" })
-        extractor.proposal = extraction(proposal("First new"), proposal("Second new"))
+        extractor.proposal = extraction(
+            proposal("First new", sourceClaimId = sourceClaimId(0)),
+            proposal("Second new", sourceClaimId = sourceClaimId(1)),
+        )
 
         assertEquals(CandidateExtractionError.CandidateIdCollision("collision"), failure(extract()))
         assertNull(database.memoryDao().candidateMemory("first-new"))
@@ -1086,7 +1168,8 @@ class CandidateExtractionServiceTest {
         certainty: MemoryCertainty = MemoryCertainty.CERTAIN,
         state: CandidateMemoryState = CandidateMemoryState.READY_FOR_VALIDATION,
         sensitivity: SensitivityLevel = SensitivityLevel.SENSITIVE,
-    ) = CandidateMemoryProposal(meaning, kind, scope, basis, certainty, state, sensitivity)
+        sourceClaimId: String = sourceClaimId(0),
+    ) = CandidateMemoryProposal(meaning, kind, scope, basis, certainty, state, sensitivity, sourceClaimId)
 
     private fun extraction(vararg candidates: CandidateMemoryProposal) =
         CandidateExtractionProposal(candidates.toList())
@@ -1135,9 +1218,8 @@ class CandidateExtractionServiceTest {
         candidate: CandidateMemoryProposal,
         kind: SuppressionKind,
         isActive: Boolean,
-        claimOrdinal: Int = 0,
     ): SuppressionTombstoneEntity {
-        val lineage = candidateClaimLineageKey(experienceId, candidate, claimOrdinal)
+        val lineage = candidateClaimLineageKey(experienceId, candidate)
         val row = SuppressionTombstoneEntity(
             id = "tombstone-${rowCount("suppression_tombstones") + 1}",
             kind = kind,
@@ -1162,11 +1244,13 @@ class CandidateExtractionServiceTest {
                 experienceId = "experience",
                 evidenceOrder = 0,
                 role = CandidateEvidenceRole.SEED,
-                lineageKey = candidateClaimLineageKey("experience", requested, 0),
+                lineageKey = candidateClaimLineageKey("experience", requested),
                 createdAt = 1,
             ),
         )
     }
+
+    private fun sourceClaimId(ordinal: Int): String = "$SOURCE_CLAIM_ID_PREFIX$ordinal"
 
     private fun candidateEntity(
         id: String,

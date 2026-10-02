@@ -9,6 +9,7 @@ import com.shai.riven.data.attention.PositiveAttentionSignal
 import com.shai.riven.data.candidate.CandidateExtractionProposal
 import com.shai.riven.data.candidate.CandidateExtractionSnapshot
 import com.shai.riven.data.candidate.CandidateMemoryProposal
+import com.shai.riven.data.candidate.candidateSourceClaims
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
 import com.shai.riven.data.memory.RefinementDisposition
@@ -268,6 +269,11 @@ class OpenRouterAutomaticMemoryModel(
             .put("occurredAt", occurredAt)
             .put("sensitivity", sensitivity)
             .put("source", source)
+            .put("sourceClaims", JSONArray(candidateSourceClaims(source).map { claim ->
+                JSONObject()
+                    .put("sourceClaimId", claim.id)
+                    .put("text", claim.text)
+            }))
             .put("sourceMessage", sourceMessage)
             .put("precedingContext", JSONArray(preceding))
             .put("followingContext", JSONArray(following))
@@ -382,6 +388,7 @@ class OpenRouterAutomaticMemoryModel(
                             proposedCertainty = candidate.requireEnum("certainty", MemoryCertainty::valueOf),
                             proposedState = candidate.requireEnum("state", CandidateMemoryState::valueOf),
                             proposedSensitivity = candidate.requireEnum("sensitivity", SensitivityLevel::valueOf),
+                            sourceClaimId = candidate.requireString("sourceClaimId"),
                         ),
                     )
                 }
@@ -569,9 +576,11 @@ class OpenRouterAutomaticMemoryModel(
             assistant said them. The locked Riven personality canon is immutable authority for
             Riven identity; never admit a conflicting self-assertion. A broad new Riven
             SELF_DEVELOPMENT claim requires repeated independent evidence. Use completed-turn
-            followingContext as short-window hindsight. Emit candidates in source order and keep
-            each claim in the same array position during short-window reanalysis, even if its
-            retained meaning is rephrased; array position is a non-semantic source-claim slot.
+            followingContext as short-window hindsight. sourceClaims contains server-issued opaque
+            identifiers for deterministic immutable segments of the source Experience. Every
+            candidate must copy exactly one supplied sourceClaimId that directly grounds the claim.
+            Never invent or modify an id. Reordering, omission, insertion, paraphrase, or splitting
+            in your output must not change the sourceClaimId for the same grounded source segment.
 
             Schema:
             {"attention":{"outcome":"FORWARD_FOR_INTERPRETATION|NO_CANDIDATE|DEFER_FOR_CONTEXT",
@@ -580,7 +589,7 @@ class OpenRouterAutomaticMemoryModel(
             "meaning":"bounded human-readable retained meaning","kind":"SEMANTIC|EPISODIC|RELATIONSHIP|SELF_DEVELOPMENT",
             "scope":"SHAI|RIVEN|SHARED|OTHER|MULTI_SCOPE","epistemicBasis":"DIRECT_USER_STATEMENT|DIRECT_RIVEN_EXPERIENCE|TOOL_OBSERVATION|EXPLICIT_CORRECTION|INFERENCE",
             "certainty":"CERTAIN|PROBABLE|UNCERTAIN|DISPUTED","state":"PENDING_CONTEXT|TENTATIVE|READY_FOR_VALIDATION",
-            "sensitivity":"STANDARD|SENSITIVE|HIGHLY_SENSITIVE"}]}
+            "sensitivity":"STANDARD|SENSITIVE|HIGHLY_SENSITIVE","sourceClaimId":"one exact supplied sourceClaims id"}]}
         """.trimIndent()
 
         private val VALIDATION_SYSTEM_PROMPT = """

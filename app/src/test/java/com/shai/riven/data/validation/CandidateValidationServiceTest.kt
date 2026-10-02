@@ -123,8 +123,8 @@ class CandidateValidationServiceTest {
 
     @Test
     fun acceptNewReplayWithSameStableSourceClaimIsDiscardedBeforeModelDecision() = runBlocking {
-        val admittedLineage = "AUTO_CANDIDATE_V2:0:${"a".repeat(64)}"
-        val replayLineage = "AUTO_CANDIDATE_V2:0:${"b".repeat(64)}"
+        val admittedLineage = "AUTO_CANDIDATE_V3:0:${"a".repeat(64)}"
+        val replayLineage = "AUTO_CANDIDATE_V3:0:${"b".repeat(64)}"
         database.openHelper.writableDatabase.execSQL(
             "UPDATE candidate_memory_evidence SET lineage_key = ? WHERE candidate_memory_id = ?",
             arrayOf(replayLineage, CANDIDATE),

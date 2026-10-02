@@ -9,6 +9,7 @@ import com.shai.riven.data.candidate.CandidateExtractionService
 import com.shai.riven.data.candidate.CandidateIdGenerator
 import com.shai.riven.data.candidate.CandidateMemoryExtractor
 import com.shai.riven.data.candidate.CandidateMemoryProposal
+import com.shai.riven.data.candidate.candidateSourceClaims
 import com.shai.riven.data.candidate.ExtractCandidateMemoriesInput
 import com.shai.riven.data.context.ActiveConversationContextSource
 import com.shai.riven.data.context.ConversationalContextAssembler
@@ -977,7 +978,7 @@ class ProviderNeutralConversationEngineTest {
         createConversationAndUser()
         createProfile()
         val providerResult = engine(FakeAdapter { _, emit ->
-            emit(ProviderStreamEvent.Delta("Riven grounded the chain source."))
+            emit(ProviderStreamEvent.Delta("Forget source. Delete source."))
             emit(ProviderStreamEvent.Completed("chain-source-request"))
         }).execute(input())
         assertTrue(providerResult is ConversationEngineResult.Succeeded)
@@ -1007,6 +1008,7 @@ class ProviderNeutralConversationEngineTest {
             database = database,
             extractor = CandidateMemoryExtractor { snapshot ->
                 assertEquals(experience.id, snapshot.experienceId)
+                val sourceClaims = candidateSourceClaims(snapshot.sourceContent)
                 CandidateExtractionProposal(
                     listOf(
                         CandidateMemoryProposal(
@@ -1017,6 +1019,7 @@ class ProviderNeutralConversationEngineTest {
                             proposedCertainty = MemoryCertainty.CERTAIN,
                             proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
                             proposedSensitivity = SensitivityLevel.STANDARD,
+                            sourceClaimId = sourceClaims[0].id,
                         ),
                         CandidateMemoryProposal(
                             proposedMeaning = "Hello Riven chain delete marker",
@@ -1026,6 +1029,7 @@ class ProviderNeutralConversationEngineTest {
                             proposedCertainty = MemoryCertainty.CERTAIN,
                             proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
                             proposedSensitivity = SensitivityLevel.STANDARD,
+                            sourceClaimId = sourceClaims[1].id,
                         ),
                     ),
                 )
