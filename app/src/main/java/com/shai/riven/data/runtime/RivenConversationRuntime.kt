@@ -3,6 +3,8 @@ package com.shai.riven.data.runtime
 import android.content.Context
 import androidx.core.content.edit
 import androidx.work.WorkManager
+import com.shai.riven.data.automaticmemory.AutomaticMemoryQueueService
+import com.shai.riven.data.automaticmemory.AutomaticMemoryStatusSnapshot
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.WorkManagerRivenBackgroundWorkScheduler
 import com.shai.riven.data.context.ActiveConversationContextSource
@@ -116,6 +118,14 @@ data class RivenRuntimeSnapshot(
     val selectedProfileHasCredential: Boolean,
     val instructions: ShaiSystemInstructionsSnapshot,
     val memories: List<RivenMemoryItem>,
+    val automaticMemoryStatus: AutomaticMemoryStatusSnapshot = AutomaticMemoryStatusSnapshot(
+        pending = 0,
+        running = 0,
+        succeeded = 0,
+        excluded = 0,
+        failed = 0,
+        latestErrorCode = null,
+    ),
 )
 
 interface RivenRuntimeController : AutoCloseable {
@@ -211,6 +221,7 @@ class RivenConversationRuntime(
         attachmentCleanupScheduler = backgroundScheduler::enqueueAttachmentCleanup,
     )
     private val memoryIntents = ManualMemoryIntentService(database, backgroundScheduler)
+    private val automaticMemoryQueue = AutomaticMemoryQueueService(database, backgroundScheduler)
     private val adapter = OpenRouterConversationAdapter(httpClient)
     private val modelCatalog = OpenRouterModelCatalog(httpClient)
     private val contextBudgetPolicy = OpenRouterContextBudgetPolicy()
@@ -245,6 +256,13 @@ class RivenConversationRuntime(
     override suspend fun initialize(): RivenRuntimeResult = actionMutex.withLock {
         engine.recoverInterruptedRuns()
         ensureConversation()
+        withContext(ioDispatcher) {
+            automaticMemoryQueue.reconcileSucceededRuns(
+                limit = AUTOMATIC_MEMORY_RECONCILIATION_LIMIT,
+                occurredAt = clock(),
+            )
+            automaticMemoryQueue.schedulePending(AUTOMATIC_MEMORY_RECONCILIATION_LIMIT)
+        }
         snapshotResult()
     }
 
@@ -656,15 +674,36 @@ class RivenConversationRuntime(
                 ),
                 onDelta = onDelta,
             )
-            val snapshot = snapshotOrNull()
             when (result) {
-                is ConversationEngineResult.Succeeded,
-                is ConversationEngineResult.Existing,
-                -> RivenRuntimeResult.Success(checkNotNull(snapshot), result)
+                is ConversationEngineResult.Succeeded -> {
+                    withContext(ioDispatcher) {
+                        automaticMemoryQueue.ensureForSucceededRun(
+                            runId = result.run.runId,
+                            sourceTimelineRevision = result.timelineRevision,
+                            occurredAt = clock(),
+                        )
+                    }
+                    RivenRuntimeResult.Success(checkNotNull(snapshotOrNull()), result)
+                }
+                is ConversationEngineResult.Existing -> {
+                    if (result.run.state == ConversationRunState.SUCCEEDED) {
+                        val currentRevision = activeTimelineOrNull()?.timelineRevision
+                        if (currentRevision != null) {
+                            withContext(ioDispatcher) {
+                                automaticMemoryQueue.ensureForSucceededRun(
+                                    runId = result.run.runId,
+                                    sourceTimelineRevision = currentRevision,
+                                    occurredAt = clock(),
+                                )
+                            }
+                        }
+                    }
+                    RivenRuntimeResult.Success(checkNotNull(snapshotOrNull()), result)
+                }
                 is ConversationEngineResult.Failed -> RivenRuntimeResult.Failure(
                     message = result.code.userMessage(),
                     engineCode = result.code,
-                    snapshot = snapshot,
+                    snapshot = snapshotOrNull(),
                 )
             }
         } catch (cancelled: CancellationException) {
@@ -750,6 +789,7 @@ class RivenConversationRuntime(
         val memories = withContext(ioDispatcher) {
             database.memoryDao().recentMemories(MAX_VISIBLE_MEMORIES).map { it.toRuntimeItem() }
         }
+        val automaticMemoryStatus = withContext(ioDispatcher) { automaticMemoryQueue.status() }
         return RivenRuntimeSnapshot(
             conversationId = CONVERSATION_ID,
             timelineRevision = active.timelineRevision,
@@ -760,6 +800,7 @@ class RivenConversationRuntime(
             selectedProfileHasCredential = (credential as? HasProviderCredentialResult.Success)?.exists == true,
             instructions = instructions,
             memories = memories,
+            automaticMemoryStatus = automaticMemoryStatus,
         )
     }
 
@@ -854,6 +895,7 @@ class RivenConversationRuntime(
         const val OPENROUTER_CREDENTIAL_SLOT = "openrouter-account-key"
         const val CONTINUE_MESSAGE = "Continue."
         const val MAX_VISIBLE_MEMORIES = 100
+        const val AUTOMATIC_MEMORY_RECONCILIATION_LIMIT = 25
         val OPENROUTER_CAPABILITIES = listOf(
             ProviderCapability.TEXT_CHAT,
             ProviderCapability.STREAMING,

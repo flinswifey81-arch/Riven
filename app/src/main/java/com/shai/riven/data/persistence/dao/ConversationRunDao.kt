@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
+import com.shai.riven.data.persistence.model.ConversationRunState
 
 @Dao
 interface ConversationRunDao {
@@ -38,4 +39,27 @@ interface ConversationRunDao {
 
     @Query("SELECT COUNT(*) FROM conversation_runs")
     fun count(): Int
+
+    @Query(
+        """
+        SELECT * FROM conversation_runs
+        WHERE state = :succeededState
+          AND (
+              NOT EXISTS (
+                  SELECT 1 FROM automatic_memory_jobs
+                  WHERE automatic_memory_jobs.source_message_id = conversation_runs.user_message_id
+              )
+              OR NOT EXISTS (
+                  SELECT 1 FROM automatic_memory_jobs
+                  WHERE automatic_memory_jobs.source_message_id = conversation_runs.assistant_message_id
+              )
+          )
+        ORDER BY finished_at, run_id
+        LIMIT :limit
+        """,
+    )
+    fun succeededRunsMissingAutomaticMemoryJobs(
+        succeededState: ConversationRunState,
+        limit: Int,
+    ): List<ConversationRunEntity>
 }

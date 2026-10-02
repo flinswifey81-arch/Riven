@@ -68,6 +68,31 @@ class WorkManagerRivenBackgroundWorkSchedulerTest {
     }
 
     @Test
+    fun targetedAutomaticMemoryUsesOneUniqueActiveWorkChainAndNoSemanticInput() {
+        scheduler.enqueueAutomaticMemoryJob("automatic-memory-opaque-id")
+        scheduler.enqueueAutomaticMemoryJob("automatic-memory-opaque-id")
+
+        val name = scheduler.uniqueNameFor(
+            RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB,
+            "automatic-memory-opaque-id",
+        )
+        val work = workManager.getWorkInfosForUniqueWork(name).get(10, TimeUnit.SECONDS)
+        assertEquals(1, work.count { !it.state.isFinished })
+        val request = scheduler.createOneTimeRequest(
+            RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB,
+            "automatic-memory-opaque-id",
+        )
+        assertEquals(
+            setOf(RivenBackgroundWorkData.KIND, RivenBackgroundWorkData.TARGET_ID),
+            request.workSpec.input.keyValueMap.keys,
+        )
+        assertEquals(
+            setOf(RivenBackgroundWorkTags.BACKGROUND, RivenBackgroundWorkTags.AUTOMATIC_MEMORY),
+            request.tags - RivenBackgroundWorker::class.java.name,
+        )
+    }
+
+    @Test
     fun workInputContainsOnlyKindAndOpaqueTargetId() {
         val request = scheduler.createOneTimeRequest(
             RivenBackgroundWorkKind.ATTACHMENT_CLEANUP,
@@ -120,8 +145,12 @@ class WorkManagerRivenBackgroundWorkSchedulerTest {
         val repair = workManager
             .getWorkInfosForUniqueWork(RivenBackgroundWorkNames.PERIODIC_REPAIR_SWEEP)
             .get(10, TimeUnit.SECONDS)
+        val automaticMemory = workManager
+            .getWorkInfosForUniqueWork(RivenBackgroundWorkNames.PERIODIC_AUTOMATIC_MEMORY_SWEEP)
+            .get(10, TimeUnit.SECONDS)
         assertEquals(1, attachment.count { !it.state.isFinished })
         assertEquals(1, repair.count { !it.state.isFinished })
+        assertEquals(1, automaticMemory.count { !it.state.isFinished })
     }
 
     @Test

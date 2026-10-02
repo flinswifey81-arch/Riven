@@ -75,6 +75,7 @@ internal class ImmediateAttentionGrounding(
         val sources = memoryDao.messageSourcesForExperience(experienceId)
         var sourceMessage: AttentionSourceMessage? = null
         var context = emptyList<AttentionContextMessage>()
+        var followingContext = emptyList<AttentionContextMessage>()
         var timelineRevision: Long? = null
         if (experience.experienceType == ExperienceType.CONVERSATION_MESSAGE && sources.isEmpty()) {
             abort(ImmediateAttentionError.InvalidConversationSourceProvenance(experienceId))
@@ -102,6 +103,7 @@ internal class ImmediateAttentionGrounding(
                 },
             )
             context = boundedContext(timeline.messages.take(sourceIndex))
+            followingContext = boundedFollowingContext(timeline.messages.drop(sourceIndex + 1))
             timelineRevision = timeline.timelineRevision
         }
 
@@ -114,6 +116,7 @@ internal class ImmediateAttentionGrounding(
             sensitivity = experience.sensitivity,
             sourceMessage = sourceMessage,
             precedingActiveContext = context,
+            followingActiveContext = followingContext,
             groundedEntityLinks = memoryDao.entityLinksForExperience(experienceId).map { link ->
                 AttentionEntityLink(link.entityId, link.role)
             },
@@ -225,6 +228,26 @@ internal class ImmediateAttentionGrounding(
             characterCount += message.content.length
         }
         return selected.toList()
+    }
+
+    private fun boundedFollowingContext(
+        messages: List<com.shai.riven.data.persistence.entity.MessageEntity>,
+    ): List<AttentionContextMessage> {
+        val selected = mutableListOf<AttentionContextMessage>()
+        var characterCount = 0
+        for (message in messages) {
+            if (message.role == MessageRole.SYSTEM) continue
+            if (selected.size == MAX_ATTENTION_FOLLOWING_MESSAGES) break
+            if (characterCount + message.content.length > MAX_ATTENTION_FOLLOWING_CHARS) break
+            selected += AttentionContextMessage(
+                messageId = message.id,
+                role = message.role,
+                content = message.content,
+                createdAt = message.createdAt,
+            )
+            characterCount += message.content.length
+        }
+        return selected
     }
 
     private fun abort(error: ImmediateAttentionError): Nothing = throw ImmediateAttentionAbort(error)

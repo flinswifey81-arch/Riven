@@ -80,6 +80,12 @@ interface MemoryDao {
     @Query("SELECT * FROM experiences WHERE experience_id = :experienceId")
     fun experience(experienceId: String): ExperienceEntity?
 
+    @Query("UPDATE experiences SET availability = :availability WHERE experience_id = :experienceId")
+    fun updateExperienceAvailability(
+        experienceId: String,
+        availability: ExperienceAvailability,
+    ): Int
+
     @Query("SELECT MAX(event_order) FROM experiences")
     fun maximumEventOrder(): Long?
 
@@ -174,6 +180,9 @@ interface MemoryDao {
     @Query("SELECT * FROM memory_evidence WHERE memory_id = :memoryId ORDER BY created_at, experience_id")
     fun evidenceForMemory(memoryId: String): List<MemoryEvidenceEntity>
 
+    @Query("SELECT DISTINCT memory_id FROM memory_evidence WHERE experience_id = :experienceId ORDER BY memory_id")
+    fun memoryIdsForExperience(experienceId: String): List<String>
+
     @Query(
         """
         SELECT * FROM memory_relationships
@@ -241,6 +250,13 @@ interface MemoryDao {
                updated_at AS updatedAt
         FROM memories
         WHERE memory_id > :afterMemoryId
+          AND EXISTS (
+              SELECT 1 FROM memory_evidence
+              INNER JOIN experiences
+                  ON experiences.experience_id = memory_evidence.experience_id
+              WHERE memory_evidence.memory_id = memories.memory_id
+                AND experiences.availability = 'AVAILABLE'
+          )
         ORDER BY memory_id
         LIMIT :limit
         """,
@@ -277,6 +293,13 @@ interface MemoryDao {
                updated_at AS updatedAt
         FROM memories
         WHERE memory_id IN (:memoryIds)
+          AND EXISTS (
+              SELECT 1 FROM memory_evidence
+              INNER JOIN experiences
+                  ON experiences.experience_id = memory_evidence.experience_id
+              WHERE memory_evidence.memory_id = memories.memory_id
+                AND experiences.availability = 'AVAILABLE'
+          )
         ORDER BY memory_id
         """,
     )
@@ -302,6 +325,13 @@ interface MemoryDao {
                sensitivity
         FROM memories
         WHERE memory_id > :afterMemoryId
+          AND EXISTS (
+              SELECT 1 FROM memory_evidence
+              INNER JOIN experiences
+                  ON experiences.experience_id = memory_evidence.experience_id
+              WHERE memory_evidence.memory_id = memories.memory_id
+                AND experiences.availability = 'AVAILABLE'
+          )
         ORDER BY memory_id
         LIMIT :limit
         """,
@@ -325,6 +355,13 @@ interface MemoryDao {
                sensitivity
         FROM memories
         WHERE memory_id IN (:memoryIds)
+          AND EXISTS (
+              SELECT 1 FROM memory_evidence
+              INNER JOIN experiences
+                  ON experiences.experience_id = memory_evidence.experience_id
+              WHERE memory_evidence.memory_id = memories.memory_id
+                AND experiences.availability = 'AVAILABLE'
+          )
         ORDER BY memory_id
         """,
     )

@@ -2,9 +2,17 @@ package com.shai.riven.data.background
 
 import android.content.Context
 import androidx.work.WorkManager
+import com.shai.riven.data.automaticmemory.AutomaticMemoryJobRunner
+import com.shai.riven.data.automaticmemory.AutomaticMemoryQueueService
+import com.shai.riven.data.automaticmemory.AutomaticMemorySweepService
+import com.shai.riven.data.automaticmemory.OpenRouterAutomaticMemoryModelFactory
 import com.shai.riven.data.attachment.AttachmentService
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.credential.ProviderCredentialStore
 import com.shai.riven.data.persistence.RivenDatabase
+import com.shai.riven.data.provider.ProviderProfileService
+import com.shai.riven.data.provider.ProviderRuntimeProfileResolver
+import com.shai.riven.data.provider.openrouter.HttpUrlConnectionOpenRouterHttpClient
 import java.io.Closeable
 
 class RivenBackgroundWorkRuntime private constructor(
@@ -42,12 +50,26 @@ class RivenBackgroundWorkRuntime private constructor(
                     handlerRegistry = repairRegistry,
                     scheduler = scheduler,
                 )
+                val automaticMemoryQueue = AutomaticMemoryQueueService(database, scheduler)
+                val automaticMemoryJobRunner = AutomaticMemoryJobRunner(
+                    database = database,
+                    modelFactory = OpenRouterAutomaticMemoryModelFactory(
+                        profileResolver = ProviderRuntimeProfileResolver(
+                            ProviderProfileService(database),
+                            ProviderCredentialStore.fromContext(context),
+                        ),
+                        httpClient = HttpUrlConnectionOpenRouterHttpClient(),
+                    ),
+                )
+                val automaticMemorySweep = AutomaticMemorySweepService(automaticMemoryQueue)
                 return RivenBackgroundWorkRuntime(
                     database = database,
                     executor = RivenBackgroundWorkExecutor(
                         attachmentMaintenance = attachmentMaintenance,
                         repairJobRunner = repairRunner,
                         repairSweep = repairSweep,
+                        automaticMemoryJobRunner = automaticMemoryJobRunner,
+                        automaticMemorySweep = automaticMemorySweep,
                     ),
                 )
             } catch (failure: Exception) {

@@ -892,10 +892,39 @@ private fun SettingsScreen(
             ) { Text("Save instructions") }
         }
         item { HorizontalDivider(color = MutedGold.copy(alpha = 0.3f)) }
+        item { SectionTitle("Automatic memory") }
+        item {
+            val status = snapshot?.automaticMemoryStatus
+            Card(
+                colors = CardDefaults.cardColors(containerColor = TableNavy),
+                modifier = Modifier.fillMaxWidth().testTag("automatic_memory_status"),
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Pending ${status?.pending ?: 0}  •  Running ${status?.running ?: 0}  •  Failed ${status?.failed ?: 0}",
+                        color = WarmIvory,
+                    )
+                    Text(
+                        "Completed ${status?.succeeded ?: 0}  •  Excluded ${status?.excluded ?: 0}",
+                        color = MistBlue,
+                    )
+                    status?.latestErrorCode?.let { code ->
+                        Text("Latest processing status: $code", color = RubyHeart)
+                    }
+                }
+            }
+        }
+        item {
+            Text(
+                "Completed canonical turns are processed through grounded attention, candidate validation, and provenance checks. Retry and regeneration do not reuse discarded reply evidence.",
+                color = MistBlue,
+            )
+        }
+        item { HorizontalDivider(color = MutedGold.copy(alpha = 0.3f)) }
         item { SectionTitle("Manual memory controls") }
         item {
             Text(
-                "These explicit controls use the canonical Remember / Correct / Forget / Delete services. Automatic extraction is not enabled yet.",
+                "Remember / Correct / Forget / Delete remain explicit canonical controls. Forget and Delete also suppress automatic resurrection from their old evidence.",
                 color = MistBlue,
             )
         }

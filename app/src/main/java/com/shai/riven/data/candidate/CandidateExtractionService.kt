@@ -430,6 +430,7 @@ class CandidateExtractionService(
             sensitivity = snapshot.sensitivity,
             sourceMessage = snapshot.sourceMessage,
             precedingActiveContext = snapshot.precedingActiveContext,
+            followingActiveContext = snapshot.followingActiveContext,
             groundedEntityLinks = snapshot.groundedEntityLinks,
             attentionRevision = assessment.revision,
             attentionOutcome = assessment.outcome,

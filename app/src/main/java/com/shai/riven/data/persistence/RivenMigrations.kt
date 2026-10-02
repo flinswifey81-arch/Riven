@@ -377,3 +377,45 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
         )
     }
 }
+
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `automatic_memory_jobs` (
+                `automatic_memory_job_id` TEXT NOT NULL,
+                `originating_run_id` TEXT NOT NULL,
+                `source_message_id` TEXT NOT NULL,
+                `source_experience_id` TEXT NOT NULL,
+                `source_timeline_revision` INTEGER NOT NULL,
+                `state` TEXT NOT NULL,
+                `next_stage` TEXT NOT NULL,
+                `attempt_count` INTEGER NOT NULL,
+                `created_at` INTEGER NOT NULL,
+                `updated_at` INTEGER NOT NULL,
+                `last_error_code` TEXT,
+                PRIMARY KEY(`automatic_memory_job_id`),
+                FOREIGN KEY(`originating_run_id`) REFERENCES `conversation_runs`(`run_id`) ON UPDATE CASCADE ON DELETE CASCADE,
+                FOREIGN KEY(`source_message_id`) REFERENCES `messages`(`message_id`) ON UPDATE CASCADE ON DELETE CASCADE,
+                FOREIGN KEY(`source_experience_id`) REFERENCES `experiences`(`experience_id`) ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_automatic_memory_jobs_originating_run_id` " +
+                "ON `automatic_memory_jobs` (`originating_run_id`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_automatic_memory_jobs_source_message_id` " +
+                "ON `automatic_memory_jobs` (`source_message_id`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_automatic_memory_jobs_source_experience_id` " +
+                "ON `automatic_memory_jobs` (`source_experience_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_automatic_memory_jobs_state_updated_at` " +
+                "ON `automatic_memory_jobs` (`state`, `updated_at`)",
+        )
+    }
+}

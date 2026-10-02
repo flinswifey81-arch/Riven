@@ -11,6 +11,8 @@ import com.shai.riven.data.persistence.model.SensitivityLevel
 
 const val MAX_ATTENTION_CONTEXT_MESSAGES = 12
 const val MAX_ATTENTION_CONTEXT_CHARS = 32_768
+const val MAX_ATTENTION_FOLLOWING_MESSAGES = 4
+const val MAX_ATTENTION_FOLLOWING_CHARS = 8_192
 
 enum class PositiveAttentionSignal {
     IDENTITY,
@@ -70,6 +72,8 @@ data class ImmediateAttentionSnapshot(
     val sensitivity: SensitivityLevel,
     val sourceMessage: AttentionSourceMessage?,
     val precedingActiveContext: List<AttentionContextMessage>,
+    /** Completed-turn hindsight after the source; empty for non-conversation Experiences. */
+    val followingActiveContext: List<AttentionContextMessage>,
     val groundedEntityLinks: List<AttentionEntityLink>,
     val timelineRevision: Long?,
 )

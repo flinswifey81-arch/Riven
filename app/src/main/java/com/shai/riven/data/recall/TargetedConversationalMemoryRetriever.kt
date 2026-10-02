@@ -85,6 +85,7 @@ class TargetedConversationalMemoryRetriever internal constructor(
     private val invalidationObserver = ConversationalRecallInvalidationObserver(
         this,
         "memories",
+        "memory_evidence",
         "memory_relationships",
         "memory_entity_links",
     )

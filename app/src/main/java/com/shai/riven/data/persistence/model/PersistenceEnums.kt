@@ -87,7 +87,28 @@ enum class ExperienceActor {
 
 enum class ExperienceAvailability {
     AVAILABLE,
+    /**
+     * The source remains part of historical transcript state but is not on the canonical active
+     * branch (for example, a regenerated assistant reply). It must not ground candidates or
+     * ordinary recall.
+     */
+    EXCLUDED,
     DELETED,
+}
+
+enum class AutomaticMemoryJobState {
+    PENDING,
+    RUNNING,
+    SUCCEEDED,
+    EXCLUDED,
+    FAILED,
+}
+
+enum class AutomaticMemoryJobStage {
+    ATTENTION,
+    EXTRACTION,
+    VALIDATION,
+    COMPLETE,
 }
 
 enum class ExperienceMessageSourceRole {

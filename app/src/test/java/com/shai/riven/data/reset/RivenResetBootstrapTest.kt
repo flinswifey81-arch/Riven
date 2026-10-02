@@ -73,7 +73,7 @@ class RivenResetBootstrapTest {
         val fresh = openCanonicalDatabase()
         try {
             val counts = applicationTableCounts(fresh)
-            assertEquals(37, counts.size)
+            assertEquals(38, counts.size)
             assertTrue(counts.values.all { it == 0L })
         } finally {
             fresh.close()
@@ -104,7 +104,7 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun emptyDatabaseVerifierAcceptsFreshThirtySevenTableVersionEightDatabase() {
+    fun emptyDatabaseVerifierAcceptsFreshThirtyEightTableVersionNineDatabase() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         fresh.close()
@@ -140,13 +140,13 @@ class RivenResetBootstrapTest {
     }
 
     @Test
-    fun freshVersionEightResetDatabaseHasExactlyThirtySevenEmptyApplicationTables() {
+    fun freshVersionNineResetDatabaseHasExactlyThirtyEightEmptyApplicationTables() {
         val fresh = openCanonicalDatabase()
         fresh.openHelper.writableDatabase
         val counts = applicationTableCounts(fresh)
         fresh.close()
 
-        assertEquals(37, counts.size)
+        assertEquals(38, counts.size)
         assertTrue(counts.values.all { it == 0L })
         assertTrue(
             RivenEmptyDatabaseVerifier.verify(

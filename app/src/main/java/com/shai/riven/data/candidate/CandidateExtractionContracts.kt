@@ -26,6 +26,7 @@ data class CandidateExtractionSnapshot(
     val sensitivity: SensitivityLevel,
     val sourceMessage: AttentionSourceMessage?,
     val precedingActiveContext: List<AttentionContextMessage>,
+    val followingActiveContext: List<AttentionContextMessage>,
     val groundedEntityLinks: List<AttentionEntityLink>,
     val attentionRevision: Long,
     val attentionOutcome: AttentionOutcome,

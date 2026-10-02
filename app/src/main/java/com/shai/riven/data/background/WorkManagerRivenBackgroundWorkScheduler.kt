@@ -40,12 +40,28 @@ class WorkManagerRivenBackgroundWorkScheduler(
             uniqueWorkName = RivenBackgroundWorkNames.REPAIR_SWEEP,
         )
 
+    override fun enqueueAutomaticMemoryJob(
+        automaticMemoryJobId: String,
+    ): RivenBackgroundScheduleResult = enqueueTargeted(
+        kind = RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB,
+        targetId = automaticMemoryJobId,
+        uniqueWorkName = RivenBackgroundWorkNames::automaticMemoryJob,
+    )
+
+    override fun enqueueAutomaticMemorySweep(): RivenBackgroundScheduleResult =
+        enqueueSweep(
+            kind = RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
+            uniqueWorkName = RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SWEEP,
+        )
+
     override fun ensurePeriodicMaintenance(): RivenBackgroundScheduleResult = try {
         val requests = listOf(
             RivenBackgroundWorkNames.PERIODIC_ATTACHMENT_MAINTENANCE to
                 createPeriodicRequest(RivenBackgroundWorkKind.ATTACHMENT_MAINTENANCE_SWEEP),
             RivenBackgroundWorkNames.PERIODIC_REPAIR_SWEEP to
                 createPeriodicRequest(RivenBackgroundWorkKind.REPAIR_SWEEP),
+            RivenBackgroundWorkNames.PERIODIC_AUTOMATIC_MEMORY_SWEEP to
+                createPeriodicRequest(RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP),
         )
         requests.forEach { (name, request) ->
             workManager.enqueueUniquePeriodicWork(
@@ -99,6 +115,10 @@ class WorkManagerRivenBackgroundWorkScheduler(
         RivenBackgroundWorkKind.REPAIR_JOB ->
             RivenBackgroundWorkNames.repairJob(checkNotNull(targetId))
         RivenBackgroundWorkKind.REPAIR_SWEEP -> RivenBackgroundWorkNames.REPAIR_SWEEP
+        RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB ->
+            RivenBackgroundWorkNames.automaticMemoryJob(checkNotNull(targetId))
+        RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP ->
+            RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SWEEP
     }
 
     private fun enqueueTargeted(
@@ -165,6 +185,9 @@ class WorkManagerRivenBackgroundWorkScheduler(
                 RivenBackgroundWorkKind.REPAIR_JOB,
                 RivenBackgroundWorkKind.REPAIR_SWEEP,
                 -> RivenBackgroundWorkTags.REPAIR
+                RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB,
+                RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
+                -> RivenBackgroundWorkTags.AUTOMATIC_MEMORY
             },
         )
     }
