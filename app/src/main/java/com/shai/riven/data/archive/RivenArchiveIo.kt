@@ -22,6 +22,7 @@ internal object RivenArchivePath {
     fun isAllowlistedEntry(path: String): Boolean = when {
         path == ARCHIVE_MANIFEST_PATH -> true
         path == ARCHIVE_DATABASE_PATH -> true
+        path == ARCHIVE_REMINDER_DATABASE_PATH -> true
         path.startsWith(ARCHIVE_ATTACHMENT_PREFIX) -> {
             val name = path.removePrefix(ARCHIVE_ATTACHMENT_PREFIX)
             name.matches(Regex("[0-9a-f]{64}\\.blob"))

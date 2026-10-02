@@ -26,5 +26,14 @@ abstract class ReminderDatabase : RoomDatabase() {
             ReminderDatabase::class.java,
             DATABASE_NAME,
         ).build()
+
+        fun buildNamedForRestoreValidation(
+            context: Context,
+            databaseNameOrAbsolutePath: String,
+        ): ReminderDatabase = Room.databaseBuilder(
+            context.applicationContext,
+            ReminderDatabase::class.java,
+            databaseNameOrAbsolutePath,
+        ).build()
     }
 }

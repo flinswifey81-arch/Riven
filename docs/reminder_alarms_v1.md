@@ -17,11 +17,11 @@ The store is canonical for local reminder title, note, requested wall time, time
 
 ## Restore and reset boundary
 
-The existing main-database restore flow does not replace or delete `riven-reminders.db`. After restore settles, normal application startup enqueues reminder recovery, so reminders on the current installation remain present and are rescheduled.
+Portable archive format v2 includes a self-contained `riven-reminders.db` snapshot with an independent schema version and SHA-256. Restore validates both databases, normalizes `RINGING` and `DELIVERED` rows to terminal `DISMISSED` state, and clears nonterminal delivery tokens. Before the atomic database swap it cancels existing app alarm/notification/audio delivery state. After restore or a successful rollback, normal application startup enqueues reminder recovery; active rows are rescheduled through the current notification and exact-alarm permission checks.
+
+Legacy archive format v1 remains supported and never replaces the installation's reminder database. Restore journal v1 is likewise read compatibly and upgraded without opting it into reminder replacement.
 
 Factory Reset explicitly cancels every app-owned `AlarmManager` entry, cancels notifications, stops alarm playback, deletes the reminder database and sidecars, and creates a fresh empty reminder database. This prevents ghost alarms after reset.
-
-Portable archive inclusion is not implemented in this isolated slice. The existing archive format v1 contains only `riven.db` and attachment blobs, so reminders do not travel to a new installation and do not return after Factory Reset followed by archive restore. Product integration must either extend the versioned archive atomically to include and validate `riven-reminders.db`, or present this exclusion clearly before export/reset. It must not imply reminder portability until that work lands.
 
 ## Audio asset status
 

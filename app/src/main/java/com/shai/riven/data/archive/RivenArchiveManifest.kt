@@ -5,13 +5,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal object RivenArchiveManifestJson {
-    private val manifestKeys = setOf(
+    private val versionOneManifestKeys = setOf(
         "archiveFormatVersion",
         "exportedAt",
         "databaseSchemaVersion",
         "databaseSha256",
         "secretsIncluded",
         "attachments",
+    )
+    private val versionTwoManifestKeys = versionOneManifestKeys + setOf(
+        "reminderDatabaseSchemaVersion",
+        "reminderDatabaseSha256",
     )
     private val attachmentKeys = setOf(
         "attachmentId",
@@ -37,20 +41,36 @@ internal object RivenArchiveManifestJson {
                     .put("contentSha256", record.contentSha256 ?: JSONObject.NULL),
             )
         }
-        return JSONObject()
+        val root = JSONObject()
             .put("archiveFormatVersion", manifest.archiveFormatVersion)
             .put("exportedAt", manifest.exportedAt)
             .put("databaseSchemaVersion", manifest.databaseSchemaVersion)
             .put("databaseSha256", manifest.databaseSha256)
             .put("secretsIncluded", manifest.secretsIncluded)
             .put("attachments", attachments)
-            .toString()
+        if (manifest.archiveFormatVersion >= 2) {
+            root.put(
+                "reminderDatabaseSchemaVersion",
+                manifest.reminderDatabaseSchemaVersion ?: JSONObject.NULL,
+            )
+            root.put(
+                "reminderDatabaseSha256",
+                manifest.reminderDatabaseSha256 ?: JSONObject.NULL,
+            )
+        }
+        return root.toString()
             .toByteArray(Charsets.UTF_8)
     }
 
     fun decode(bytes: ByteArray): RivenArchiveManifest? = runCatching {
         val root = JSONObject(bytes.toString(Charsets.UTF_8))
-        require(root.keysSet() == manifestKeys)
+        val archiveFormatVersion = root.strictInt("archiveFormatVersion")
+        val expectedKeys = if (archiveFormatVersion == 1) {
+            versionOneManifestKeys
+        } else {
+            versionTwoManifestKeys
+        }
+        require(root.keysSet() == expectedKeys)
         val array = root.get("attachments") as? JSONArray ?: error("attachments")
         val records = buildList {
             repeat(array.length()) { index ->
@@ -70,12 +90,22 @@ internal object RivenArchiveManifestJson {
             }
         }
         RivenArchiveManifest(
-            archiveFormatVersion = root.strictInt("archiveFormatVersion"),
+            archiveFormatVersion = archiveFormatVersion,
             exportedAt = root.strictLong("exportedAt"),
             databaseSchemaVersion = root.strictInt("databaseSchemaVersion"),
             databaseSha256 = root.strictString("databaseSha256"),
             secretsIncluded = root.strictBoolean("secretsIncluded"),
             attachments = records,
+            reminderDatabaseSchemaVersion = if (archiveFormatVersion >= 2) {
+                root.optionalInt("reminderDatabaseSchemaVersion")
+            } else {
+                null
+            },
+            reminderDatabaseSha256 = if (archiveFormatVersion >= 2) {
+                root.optionalString("reminderDatabaseSha256")
+            } else {
+                null
+            },
         )
     }.getOrNull()
 
@@ -84,6 +114,9 @@ internal object RivenArchiveManifestJson {
 
     private fun JSONObject.optionalLong(key: String): Long? =
         if (isNull(key)) null else strictLong(key)
+
+    private fun JSONObject.optionalInt(key: String): Int? =
+        if (isNull(key)) null else strictInt(key)
 
     private fun JSONObject.strictString(key: String): String =
         (get(key) as? String) ?: error(key)

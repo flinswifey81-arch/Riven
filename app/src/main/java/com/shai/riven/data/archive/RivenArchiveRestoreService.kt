@@ -8,6 +8,7 @@ import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.reset.RivenResetGate
 import com.shai.riven.data.reset.RivenResetPaths
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
 import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
@@ -62,7 +63,8 @@ class RivenArchiveRestoreService(
                 ?: abort(RivenArchiveRestoreError.ArchiveIntegrityFailure("MISSING_DATABASE"))
             val manifest = RivenArchiveManifestJson.decode(manifestEntry.file.readBytes())
                 ?: abort(RivenArchiveRestoreError.MalformedManifest)
-            validateManifestAndEntries(manifest, databaseEntry, extracted)
+            val reminderDatabaseEntry = extracted[ARCHIVE_REMINDER_DATABASE_PATH]
+            validateManifestAndEntries(manifest, databaseEntry, reminderDatabaseEntry, extracted)
 
             val sourceVersion = databaseVersion(databaseEntry.file)
             if (sourceVersion != manifest.databaseSchemaVersion) {
@@ -86,6 +88,19 @@ class RivenArchiveRestoreService(
                 abort(RivenArchiveRestoreError.DatabaseMigrationFailure("UnexpectedResultVersion"))
             }
             verifySqlite(databaseEntry.file)
+            if (manifest.archiveFormatVersion >= 2) {
+                val reminderEntry = reminderDatabaseEntry
+                    ?: abort(
+                        RivenArchiveRestoreError.ArchiveIntegrityFailure(
+                            "MISSING_REMINDER_DATABASE",
+                        ),
+                    )
+                prepareReminderDatabase(
+                    file = reminderEntry.file,
+                    expectedVersion = checkNotNull(manifest.reminderDatabaseSchemaVersion),
+                    occurredAt = input.occurredAt,
+                )
+            }
             materializeAndValidateAttachments(
                 manifest = manifest,
                 databaseAttachments = attachments,
@@ -108,6 +123,10 @@ class RivenArchiveRestoreService(
                     hadShm = paths.canonicalShm.isFile,
                     hadAttachments = paths.canonicalAttachments.exists(),
                     hadCredentials = paths.canonicalCredentials.exists(),
+                    includesReminderDatabase = manifest.archiveFormatVersion >= 2,
+                    hadReminderDatabase = paths.canonicalReminderDatabase.isFile,
+                    hadReminderWal = paths.canonicalReminderWal.isFile,
+                    hadReminderShm = paths.canonicalReminderShm.isFile,
                 ),
             )
             StageRivenRestoreResult.RestoreStaged(
@@ -155,12 +174,13 @@ class RivenArchiveRestoreService(
                 }
                 val perEntryLimit = when (entry.name) {
                     ARCHIVE_MANIFEST_PATH -> limits.maximumManifestBytes
-                    ARCHIVE_DATABASE_PATH -> limits.maximumDatabaseBytes
+                    ARCHIVE_DATABASE_PATH, ARCHIVE_REMINDER_DATABASE_PATH -> limits.maximumDatabaseBytes
                     else -> limits.maximumAttachmentBytes
                 }
                 val destination = when (entry.name) {
                     ARCHIVE_MANIFEST_PATH -> File(working, ARCHIVE_MANIFEST_PATH)
                     ARCHIVE_DATABASE_PATH -> File(working, ARCHIVE_DATABASE_PATH)
+                    ARCHIVE_REMINDER_DATABASE_PATH -> File(working, ARCHIVE_REMINDER_DATABASE_PATH)
                     else -> File(working, "archive_blobs/${entry.name.removePrefix(ARCHIVE_ATTACHMENT_PREFIX)}")
                 }
                 destination.parentFile?.mkdirs()
@@ -176,7 +196,7 @@ class RivenArchiveRestoreService(
                         if (entryBytes > perEntryLimit) {
                             val limit = when (entry.name) {
                                 ARCHIVE_MANIFEST_PATH -> ArchiveLimit.MANIFEST_BYTES
-                                ARCHIVE_DATABASE_PATH -> ArchiveLimit.DATABASE_BYTES
+                                ARCHIVE_DATABASE_PATH, ARCHIVE_REMINDER_DATABASE_PATH -> ArchiveLimit.DATABASE_BYTES
                                 else -> ArchiveLimit.ATTACHMENT_BYTES
                             }
                             abort(RivenArchiveRestoreError.ArchiveLimitExceeded(limit))
@@ -207,9 +227,12 @@ class RivenArchiveRestoreService(
     private fun validateManifestAndEntries(
         manifest: RivenArchiveManifest,
         database: ExtractedEntry,
+        reminderDatabase: ExtractedEntry?,
         extracted: Map<String, ExtractedEntry>,
     ) {
-        if (manifest.archiveFormatVersion != RIVEN_ARCHIVE_FORMAT_VERSION) {
+        if (manifest.archiveFormatVersion !in
+            MINIMUM_SUPPORTED_RIVEN_ARCHIVE_FORMAT_VERSION..RIVEN_ARCHIVE_FORMAT_VERSION
+        ) {
             abort(RivenArchiveRestoreError.UnsupportedArchiveVersion)
         }
         if (manifest.secretsIncluded || !LOWERCASE_SHA256.matches(manifest.databaseSha256)) {
@@ -217,6 +240,36 @@ class RivenArchiveRestoreService(
         }
         if (database.sha256 != manifest.databaseSha256) {
             abort(RivenArchiveRestoreError.ArchiveIntegrityFailure("DATABASE_HASH"))
+        }
+        val expectedCoreEntries = mutableSetOf(ARCHIVE_MANIFEST_PATH, ARCHIVE_DATABASE_PATH)
+        if (manifest.archiveFormatVersion >= 2) {
+            val reminderVersion = manifest.reminderDatabaseSchemaVersion
+                ?: abort(RivenArchiveRestoreError.MalformedManifest)
+            val reminderHash = manifest.reminderDatabaseSha256
+                ?: abort(RivenArchiveRestoreError.MalformedManifest)
+            if (reminderVersion < 1 || !LOWERCASE_SHA256.matches(reminderHash)) {
+                abort(RivenArchiveRestoreError.MalformedManifest)
+            }
+            val reminder = reminderDatabase
+                ?: abort(
+                    RivenArchiveRestoreError.ArchiveIntegrityFailure(
+                        "MISSING_REMINDER_DATABASE",
+                    ),
+                )
+            if (reminder.sha256 != reminderHash) {
+                abort(RivenArchiveRestoreError.ArchiveIntegrityFailure("REMINDER_DATABASE_HASH"))
+            }
+            expectedCoreEntries += ARCHIVE_REMINDER_DATABASE_PATH
+        } else if (manifest.reminderDatabaseSchemaVersion != null ||
+            manifest.reminderDatabaseSha256 != null
+        ) {
+            abort(RivenArchiveRestoreError.MalformedManifest)
+        }
+        val actualCoreEntries = extracted.keys
+            .filterNot { it.startsWith(ARCHIVE_ATTACHMENT_PREFIX) }
+            .toSet()
+        if (actualCoreEntries != expectedCoreEntries) {
+            abort(RivenArchiveRestoreError.ArchiveIntegrityFailure("DATABASE_SET"))
         }
         val ids = mutableSetOf<String>()
         val declaredPaths = mutableSetOf<String>()
@@ -356,6 +409,65 @@ class RivenArchiveRestoreService(
             abort(RivenArchiveRestoreError.DatabaseMigrationFailure(failure.safeCauseType()))
         }
         return attachments
+    }
+
+    private fun prepareReminderDatabase(
+        file: File,
+        expectedVersion: Int,
+        occurredAt: Long,
+    ) {
+        val sourceVersion = databaseVersion(file)
+        if (sourceVersion != expectedVersion) {
+            abort(RivenArchiveRestoreError.ArchiveIntegrityFailure("REMINDER_DATABASE_VERSION"))
+        }
+        if (sourceVersion > CURRENT_REMINDER_DATABASE_VERSION) {
+            abort(
+                RivenArchiveRestoreError.DatabaseTooNew(
+                    sourceVersion,
+                    CURRENT_REMINDER_DATABASE_VERSION,
+                ),
+            )
+        }
+        if (sourceVersion < 1) {
+            abort(RivenArchiveRestoreError.DatabaseMigrationFailure("UnsupportedReminderDatabaseVersion"))
+        }
+        verifySqlite(file)
+        val restored = try {
+            ReminderDatabase.buildNamedForRestoreValidation(appContext, file.absolutePath)
+        } catch (failure: Exception) {
+            abort(RivenArchiveRestoreError.DatabaseMigrationFailure(failure.safeCauseType()))
+        }
+        try {
+            val sqlite = restored.openHelper.writableDatabase
+            // A portable archive cannot resume a notification or audio session. Terminalizing
+            // in-flight deliveries prevents a restored alarm from ringing or nagging again.
+            sqlite.execSQL(
+                "UPDATE local_reminders SET status = 'DISMISSED', delivery_token = NULL, " +
+                    "finished_at = ?, updated_at = ?, last_failure_code = NULL, " +
+                    "last_failure_detail = NULL WHERE status IN ('RINGING', 'DELIVERED')",
+                arrayOf(occurredAt, occurredAt),
+            )
+            // Scheduled, snoozed, and failed rows are recreated by startup recovery through the
+            // normal AlarmManager and notification permission checks.
+            sqlite.execSQL(
+                "UPDATE local_reminders SET delivery_token = NULL " +
+                    "WHERE status IN ('SCHEDULED', 'SNOOZED', 'FAILED')",
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            abort(RivenArchiveRestoreError.DatabaseMigrationFailure(failure.safeCauseType()))
+        } finally {
+            restored.close()
+        }
+        try {
+            checkpointSelfContainedDatabase(file)
+            verifySqlite(file)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            abort(RivenArchiveRestoreError.DatabaseMigrationFailure(failure.safeCauseType()))
+        }
     }
 
     private fun materializeAndValidateAttachments(
