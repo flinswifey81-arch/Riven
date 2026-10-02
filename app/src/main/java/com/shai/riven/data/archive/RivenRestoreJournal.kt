@@ -2,6 +2,7 @@ package com.shai.riven.data.archive
 
 import android.content.Context
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
 import com.shai.riven.data.attachment.RIVEN_ATTACHMENT_DIRECTORY_NAME
 import com.shai.riven.data.credential.PROVIDER_CREDENTIAL_DIRECTORY_NAME
 import com.shai.riven.data.persistence.RivenDatabase
@@ -89,6 +90,7 @@ internal class RivenRestorePaths(
         canonicalReminderDatabase.name + "-shm",
     )
     val canonicalAttachments = FileAttachmentBlobStore.rootForContext(appContext)
+    val canonicalAttachmentThumbnails = FileAttachmentThumbnailStore.rootForContext(appContext)
     val canonicalCredentials = File(
         appContext.noBackupFilesDir,
         PROVIDER_CREDENTIAL_DIRECTORY_NAME,

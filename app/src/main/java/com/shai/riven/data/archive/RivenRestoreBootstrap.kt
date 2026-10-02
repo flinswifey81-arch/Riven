@@ -481,6 +481,10 @@ class RivenRestoreBootstrap(
             paths.rollbackCredentials.exists()
 
     private fun finishSuccessfulRestore() {
+        // Thumbnails are derived from canonical originals and are intentionally not archived.
+        // Clear them only after the installed database and originals are verified, so rollback
+        // paths retain the pre-restore cache while interrupted successful cleanup is retryable.
+        deletePath(paths.canonicalAttachmentThumbnails)
         deletePath(paths.rollbackRoot)
         deletePath(paths.pendingRoot)
         journal.delete()

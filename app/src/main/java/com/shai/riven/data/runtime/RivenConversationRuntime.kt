@@ -289,6 +289,7 @@ class RivenConversationRuntime(
     private val clock: () -> Long = System::currentTimeMillis,
     private val databaseLease: RivenDatabaseLease? = null,
     private val afterImageImportedBeforeDraftLink: suspend (String) -> Unit = {},
+    private val beforeDraftContentFlush: suspend () -> Unit = {},
 ) : RivenRuntimeController {
     private val timeline = ConversationTimelineService(database)
     private val profileService = ProviderProfileService(database)
@@ -434,7 +435,6 @@ class RivenConversationRuntime(
         if (!flushDraftContentWithinLock(content)) {
             return@withLock RivenRuntimeResult.Failure(
                 "Draft could not be saved.",
-                snapshot = snapshotOrNull(),
             )
         }
         val resolver = contentResolver
@@ -458,7 +458,6 @@ class RivenConversationRuntime(
         if (!flushDraftContentWithinLock(content)) {
             return@withLock RivenRuntimeResult.Failure(
                 "Draft could not be saved.",
-                snapshot = snapshotOrNull(),
             )
         }
         addDraftImageWithinLock(selected, content)
@@ -519,7 +518,6 @@ class RivenConversationRuntime(
             if (!flushDraftContentWithinLock(content)) {
                 return@withLock RivenRuntimeResult.Failure(
                     "Draft could not be saved.",
-                    snapshot = snapshotOrNull(),
                 )
             }
             val current = readDraft()
@@ -1150,19 +1148,26 @@ class RivenConversationRuntime(
     private suspend fun flushDraftContentWithinLock(content: String): Boolean {
         val current = readDraft()
         if (current.content == content) return true
-        return when (
-            draftService.saveDraft(
-                SaveConversationDraftInput(
-                    conversationId = CONVERSATION_ID,
-                    content = content,
-                    attachmentIds = current.attachmentIds,
-                    expectedRevision = current.revision,
-                    occurredAt = clock(),
-                ),
-            )
-        ) {
-            is SaveConversationDraftResult.Saved -> true
-            is SaveConversationDraftResult.Failure -> false
+        return try {
+            beforeDraftContentFlush()
+            when (
+                draftService.saveDraft(
+                    SaveConversationDraftInput(
+                        conversationId = CONVERSATION_ID,
+                        content = content,
+                        attachmentIds = current.attachmentIds,
+                        expectedRevision = current.revision,
+                        occurredAt = clock(),
+                    ),
+                )
+            ) {
+                is SaveConversationDraftResult.Saved -> true
+                is SaveConversationDraftResult.Failure -> false
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
         }
     }
 

@@ -11,6 +11,7 @@ import androidx.work.testing.TestListenableWorkerBuilder
 import com.shai.riven.RivenApplication
 import com.shai.riven.data.attachment.AttachmentByteSource
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.FileAttachmentThumbnailStore
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.RivenBackgroundWorker
@@ -135,6 +136,20 @@ class RivenRestoreBootstrapTest {
             "restored attachment bytes".toByteArray(),
             File(paths.canonicalAttachments, "attachments/new-attachment.blob").readBytes(),
         )
+    }
+
+    @Test
+    fun successfulRestoreClearsObsoleteDerivedThumbnails() {
+        prepareOldState()
+        val obsolete = FileAttachmentThumbnailStore.rootForContext(context).resolve("obsolete.thumb")
+        obsolete.parentFile?.mkdirs()
+        obsolete.writeText("old derived bytes")
+        stageValidArchive()
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertFalse(FileAttachmentThumbnailStore.rootForContext(context).exists())
     }
 
     @Test
@@ -483,6 +498,9 @@ class RivenRestoreBootstrapTest {
         prepareOldState()
         stageValidArchive()
         simulateInstalledState(RivenRestoreJournalStage.VERIFIED)
+        val obsolete = FileAttachmentThumbnailStore.rootForContext(context).resolve("obsolete.thumb")
+        obsolete.parentFile?.mkdirs()
+        obsolete.writeText("old derived bytes")
 
         val result = bootstrap().recoverAndApply()
 
@@ -490,6 +508,7 @@ class RivenRestoreBootstrapTest {
         assertFalse(paths.rollbackRoot.exists())
         assertFalse(paths.pendingRoot.exists())
         assertFalse(paths.journalFile.exists())
+        assertFalse(FileAttachmentThumbnailStore.rootForContext(context).exists())
     }
 
     @Test
@@ -970,6 +989,7 @@ class RivenRestoreBootstrapTest {
         context.deleteDatabase(RivenDatabase.DATABASE_NAME)
         context.deleteDatabase(ReminderDatabase.DATABASE_NAME)
         File(context.filesDir, "riven_attachments").deleteRecursively()
+        FileAttachmentThumbnailStore.rootForContext(context).deleteRecursively()
         File(context.noBackupFilesDir, "riven_provider_credentials").deleteRecursively()
         File(context.noBackupFilesDir, RivenRestorePaths.RESTORE_DIRECTORY).deleteRecursively()
     }

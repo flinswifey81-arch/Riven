@@ -139,6 +139,24 @@ class RivenAppNormalTest {
     }
 
     @Test
+    fun failedImagePreflightDoesNotReplaceLiveCaptionWithPersistedDraft() {
+        val runtime = FakeRivenRuntime(
+            configuredSnapshot().withImageDraft().copy(draft = "older persisted caption"),
+            failImagePreflight = true,
+        )
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+
+        composeRule.onNodeWithTag("chat_input").performTextReplacement("live caption")
+        composeRule.onNodeWithTag("chat_remove_image").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.removeImageCalls == 1 }
+
+        composeRule.onNodeWithTag("chat_input").assertTextContains("live caption")
+        composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+    }
+
+    @Test
     fun visibleDeferredImageLoadsBeforeItIsReportedUnavailable() {
         val runtime = FakeRivenRuntime(configuredSnapshot().withDeferredImageDraft())
         composeRule.runOnIdle {
@@ -521,6 +539,7 @@ private class FakeRivenRuntime(
     private val cancelReturnsFailure: Boolean = false,
     private val failUnconfiguredSend: Boolean = false,
     delayDraftSave: Boolean = false,
+    private val failImagePreflight: Boolean = false,
 ) : RivenRuntimeController {
     private var current = initial
     private var holdNextSend = holdSend
@@ -585,6 +604,9 @@ private class FakeRivenRuntime(
 
     override suspend fun removeDraftImage(attachmentId: String, content: String): RivenRuntimeResult {
         removeImageCalls += 1
+        if (failImagePreflight) {
+            return RivenRuntimeResult.Failure("Draft could not be saved.")
+        }
         current = current.copy(
             draft = content,
             draftImages = current.draftImages.filterNot { it.attachmentId == attachmentId },

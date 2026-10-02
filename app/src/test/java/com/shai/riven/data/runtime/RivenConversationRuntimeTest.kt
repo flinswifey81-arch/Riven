@@ -62,6 +62,7 @@ import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -474,6 +475,56 @@ class RivenConversationRuntimeTest {
     }
 
     @Test
+    fun imagePreflightFlushFailuresNeverReturnAnOlderDraftSnapshot() = runBlocking {
+        val first = runtime(QueueHttpClient())
+        first.initialize()
+        first.saveDraft("older persisted caption")
+        val oversizedCaption = "x".repeat(com.shai.riven.data.draft.MAX_DRAFT_CONTENT_CHARS + 1)
+
+        val oversized = first.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = pngBytes().size.toLong(),
+                openStream = { ByteArrayInputStream(pngBytes()) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = oversizedCaption,
+        ) as RivenRuntimeResult.Failure
+
+        assertNull(oversized.snapshot)
+        assertEquals(
+            "older persisted caption",
+            (first.snapshot() as RivenRuntimeResult.Success).snapshot.draft,
+        )
+
+        val attached = first.addDraftImageSelection(
+            SelectedImageInput(
+                declaredMimeType = "image/png",
+                declaredByteSize = pngBytes().size.toLong(),
+                openStream = { ByteArrayInputStream(pngBytes()) },
+                occurredAt = clock.incrementAndGet(),
+            ),
+            content = "caption with image",
+        ) as RivenRuntimeResult.Success
+        val attachmentId = attached.snapshot.draftImages.single().attachmentId
+        first.close()
+        runtimes.remove(first)
+
+        val failing = runtime(
+            QueueHttpClient(),
+            beforeDraftContentFlush = { error("injected storage failure") },
+        )
+        failing.initialize()
+        val remove = failing.removeDraftImage(attachmentId, "live caption not yet persisted")
+            as RivenRuntimeResult.Failure
+
+        assertNull(remove.snapshot)
+        val persisted = (failing.snapshot() as RivenRuntimeResult.Success).snapshot
+        assertEquals("caption with image", persisted.draft)
+        assertEquals(attachmentId, persisted.draftImages.single().attachmentId)
+    }
+
+    @Test
     fun imageDraftRelaunchFollowupRegenerateAndContinueUseOnlyBoundedCanonicalImage() = runBlocking {
         val http = QueueHttpClient(
             success("I can see it."),
@@ -824,6 +875,7 @@ class RivenConversationRuntimeTest {
             bytes.take(64).toByteArray()
         },
         afterImageImportedBeforeDraftLink: suspend (String) -> Unit = {},
+        beforeDraftContentFlush: suspend () -> Unit = {},
     ) = RivenConversationRuntime(
         database = database,
         credentialStore = credentials,
@@ -839,6 +891,7 @@ class RivenConversationRuntimeTest {
         ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
         clock = { clock.incrementAndGet() },
         afterImageImportedBeforeDraftLink = afterImageImportedBeforeDraftLink,
+        beforeDraftContentFlush = beforeDraftContentFlush,
     ).also(runtimes::add)
 
     private suspend fun attachImageDraft(caption: String): String {
