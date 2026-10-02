@@ -41,7 +41,9 @@ import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -192,6 +194,31 @@ class RivenAppNormalTest {
     }
 
     @Test
+    fun cancelDuringSecondaryDraftFlushStopsTheOriginatingJobBeforeProviderDispatch() {
+        val runtime = FakeRivenRuntime(
+            configuredSnapshot(),
+            delayDraftSave = true,
+            cancelReturnsFailure = true,
+        )
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+
+        composeRule.onNodeWithText("Retry").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.saveDraftEntered.isCompleted }
+        composeRule.onNodeWithText("Cancel").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.cancelCompleted }
+        composeRule.onNodeWithTag("chat_input").assertIsNotEnabled()
+
+        runtime.releaseDraftSave()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithTag("chat_input").assertIsEnabled()
+        assertTrue(runtime.retryCalls == 0)
+    }
+
+    @Test
     fun fastSendWithoutAConfiguredProfileKeepsDraftAcrossNavigationAndRelaunch() {
         val runtime = FakeRivenRuntime(unconfiguredSnapshot(), failUnconfiguredSend = true)
         composeRule.runOnIdle {
@@ -277,6 +304,37 @@ class RivenAppSavedStateTest {
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.savedApiKeys.isNotEmpty() }
         assertTrue(runtime.savedApiKeys.last().isEmpty())
     }
+
+    @Test
+    fun recreationDuringCommittedUserTurnDoesNotResurrectOrDuplicateSubmittedDraft() {
+        val submitted = "Committed across recreation"
+        val runtime = FakeRivenRuntime(configuredSnapshot(), holdSend = true)
+        val restoration = StateRestorationTester(composeRule)
+        restoration.setContent { RivenTheme { RivenApp { runtime } } }
+        composeRule.onNodeWithTag("chat_input").performTextReplacement(submitted)
+        composeRule.onNodeWithTag("chat_send").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.sendCalls == 1 }
+
+        restoration.emulateSavedInstanceStateRestore()
+
+        composeRule.onAllNodesWithText(submitted).assertCountEquals(1)
+        composeRule.mainClock.advanceTimeBy(1_000)
+        composeRule.waitForIdle()
+        assertTrue(runtime.currentDraft.isEmpty())
+        composeRule.onAllNodesWithText(submitted).assertCountEquals(1)
+    }
+
+    @Test
+    fun recreationRestoresAnUnsentComposerDraft() {
+        val runtime = FakeRivenRuntime(configuredSnapshot())
+        val restoration = StateRestorationTester(composeRule)
+        restoration.setContent { RivenTheme { RivenApp { runtime } } }
+        composeRule.onNodeWithTag("chat_input").performTextReplacement("Unsent across recreation")
+
+        restoration.emulateSavedInstanceStateRestore()
+
+        composeRule.onNodeWithTag("chat_input").assertTextContains("Unsent across recreation")
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -308,10 +366,14 @@ private class FakeRivenRuntime(
     private val delayCancel: Boolean = false,
     private val cancelReturnsFailure: Boolean = false,
     private val failUnconfiguredSend: Boolean = false,
+    delayDraftSave: Boolean = false,
 ) : RivenRuntimeController {
     private var current = initial
     private var holdNextSend = holdSend
+    private var delayNextDraftSave = delayDraftSave
     private var activeSendJob: Job? = null
+    val currentDraft: String
+        get() = current.draft
     var sendCalls = 0
         private set
     val sentContents = mutableListOf<String>()
@@ -324,7 +386,11 @@ private class FakeRivenRuntime(
         private set
     val cancelEntered = CompletableDeferred<Unit>()
     private val cancelRelease = CompletableDeferred<Unit>()
+    val saveDraftEntered = CompletableDeferred<Unit>()
+    private val saveDraftRelease = CompletableDeferred<Unit>()
     var cancelCompleted = false
+        private set
+    var retryCalls = 0
         private set
     var failMemoryWrites = false
     val savedApiKeys = mutableListOf<String>()
@@ -333,6 +399,11 @@ private class FakeRivenRuntime(
     override suspend fun snapshot() = success()
 
     override suspend fun saveDraft(content: String): RivenRuntimeResult {
+        if (delayNextDraftSave) {
+            delayNextDraftSave = false
+            saveDraftEntered.complete(Unit)
+            withContext(NonCancellable) { saveDraftRelease.await() }
+        }
         savedDrafts += content
         current = current.copy(draft = content)
         return success()
@@ -390,7 +461,10 @@ private class FakeRivenRuntime(
         return success()
     }
 
-    override suspend fun retry(onDelta: suspend (String) -> Unit) = success()
+    override suspend fun retry(onDelta: suspend (String) -> Unit): RivenRuntimeResult {
+        retryCalls++
+        return success()
+    }
     override suspend fun regenerate(onDelta: suspend (String) -> Unit) = success()
     override suspend fun continueConversation(onDelta: suspend (String) -> Unit): RivenRuntimeResult {
         continueCalls += 1
@@ -413,6 +487,10 @@ private class FakeRivenRuntime(
 
     fun releaseCancel() {
         cancelRelease.complete(Unit)
+    }
+
+    fun releaseDraftSave() {
+        saveDraftRelease.complete(Unit)
     }
 
     override suspend fun saveProfile(
