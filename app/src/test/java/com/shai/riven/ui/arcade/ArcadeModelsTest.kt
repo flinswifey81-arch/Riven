@@ -23,7 +23,7 @@ class ArcadeModelsTest {
         assertEquals(4, ArcadeGame.entries.count { it.mode == ArcadeGameMode.SOLO })
         assertEquals(1, ArcadeGame.entries.count { it.mode == ArcadeGameMode.SHARED_WITH_RIVEN })
         assertEquals(
-            listOf(ArcadeGame.STACKER, ArcadeGame.WRAPPING_SNAKE),
+            listOf(ArcadeGame.STACKER, ArcadeGame.HEART_MATCH, ArcadeGame.WRAPPING_SNAKE),
             ArcadeGame.entries.filter(ArcadeGame::hasPlayableEngine),
         )
     }

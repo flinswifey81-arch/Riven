@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertContentDescriptionContains
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
@@ -64,7 +65,7 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Celestial Spire and Comet Trail are playable • Three table previews and live Riven replies remain unconnected.",
+            "Celestial Spire, Starstruck, and Comet Trail are playable • Two table previews and live Riven replies remain unconnected.",
         ).assertIsDisplayed()
     }
 
@@ -186,21 +187,16 @@ class ArcadeComposeTest {
         }
 
         composeRule.onNodeWithText("Starstruck").assertIsDisplayed()
-        composeRule.onNodeWithText("Moons • hearts • stars").assertIsDisplayed()
-        listOf("Aqua moon tile", "Ruby heart tile", "Gold star tile").forEach { label ->
-            composeRule.onAllNodesWithContentDescription(label)[0]
-                .assertHasClickAction()
-                .performClick()
-        }
+        composeRule.onNodeWithTag("starstruck_board").assertIsDisplayed()
+        composeRule.onNodeWithTag("starstruck_tile_0_0")
+            .assertHasClickAction()
+            .assertContentDescriptionContains("tile, row 1, column 1", substring = true)
+            .performClick()
+        composeRule.onNodeWithTag("starstruck_tile_1_0")
+            .assertHasClickAction()
+            .assertContentDescriptionContains("tile, row 1, column 2", substring = true)
         composeRule.runOnIdle {
-            assertEquals(
-                listOf(
-                    ArcadeAction.PreviewControl("Celestial tile swap"),
-                    ArcadeAction.PreviewControl("Celestial tile swap"),
-                    ArcadeAction.PreviewControl("Celestial tile swap"),
-                ),
-                actions,
-            )
+            assertTrue(actions.none { it is ArcadeAction.PreviewControl })
         }
     }
 }
@@ -225,8 +221,10 @@ class ArcadeActivityScreenshotTest {
     fun rendersStarstruckGridToInspectablePng() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(4)
         composeRule.onNodeWithText("Starstruck").performClick()
-        composeRule.onNodeWithText("CELESTIAL GRID").assertIsDisplayed()
-        writeScreenshot("starstruck-grid.png")
+        composeRule.onNodeWithTag("starstruck_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Starstruck").performClick()
+        composeRule.onNodeWithContentDescription("Resume Starstruck").assertIsEnabled()
+        writeScreenshot("starstruck.png")
     }
 
     @Test
@@ -361,6 +359,18 @@ class ArcadeCompactActivityScreenshotTest {
         writeScreenshot("comet-trail-compact.png")
     }
 
+    @Test
+    fun rendersCompactStarstruckControlsToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(4)
+        composeRule.onNodeWithText("Starstruck").performClick()
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("starstruck_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Starstruck settings").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Starstruck").performClick()
+        composeRule.onNodeWithContentDescription("Resume Starstruck").assertIsEnabled()
+        writeScreenshot("starstruck-compact.png")
+    }
+
     private fun writeScreenshot(fileName: String) {
         val output = File(
             System.getProperty("user.dir"),
@@ -462,6 +472,33 @@ class ArcadeCompactLayoutTest {
         composeRule.onNodeWithContentDescription("Open Comet Trail settings")
             .assertIsDisplayed()
             .assertHeightIsAtLeast(48.dp)
+        composeRule.onNodeWithContentDescription("Open conversation with Riven").assertIsDisplayed()
+    }
+
+    @Test
+    fun shortLargeTextStarstruckKeepsBoardAndControlsTogether() {
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(
+                        state = ArcadeUiState(selectedGameId = ArcadeGame.HEART_MATCH.gameId),
+                        onAction = {},
+                    )
+                }
+            }
+        }
+
+        composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("starstruck_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open Starstruck settings")
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
+            .assertWidthIsAtLeast(48.dp)
+        composeRule.onNodeWithContentDescription("Pause Starstruck")
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
+            .assertWidthIsAtLeast(48.dp)
         composeRule.onNodeWithContentDescription("Open conversation with Riven").assertIsDisplayed()
     }
 

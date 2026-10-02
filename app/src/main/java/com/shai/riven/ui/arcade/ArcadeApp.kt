@@ -79,6 +79,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
 import com.shai.riven.ui.arcade.comet.CometTrailGame
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
+import com.shai.riven.ui.arcade.starstruck.StarstruckGame
 import com.shai.riven.ui.theme.AquaHeart
 import com.shai.riven.ui.theme.DeepInk
 import com.shai.riven.ui.theme.LimeHeart
@@ -260,7 +261,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Celestial Spire and Comet Trail are playable • Three table previews and live Riven replies remain unconnected.",
+                text = "Celestial Spire, Starstruck, and Comet Trail are playable • Two table previews and live Riven replies remain unconnected.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -502,7 +503,10 @@ private fun GameBoardCard(
                 compactLayout = compactGameLayout,
             )
             ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
-            ArcadeGame.HEART_MATCH -> HeartMatchPreview(onAction)
+            ArcadeGame.HEART_MATCH -> StarstruckGame(
+                externallyPaused = externallyPaused,
+                compactLayout = compactGameLayout,
+            )
             ArcadeGame.WRAPPING_SNAKE -> CometTrailGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
@@ -531,7 +535,7 @@ private fun PendingRulesLabel(
 private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
     ArcadeGame.STACKER -> error("Celestial Spire uses the responsive compact layout")
     ArcadeGame.KLONDIKE -> 520.dp
-    ArcadeGame.HEART_MATCH -> 520.dp
+    ArcadeGame.HEART_MATCH -> error("Starstruck uses the responsive compact layout")
     ArcadeGame.WRAPPING_SNAKE -> error("Comet Trail uses the responsive compact layout")
     ArcadeGame.RIVEN_CARD_TABLE -> 640.dp
 }
@@ -1488,7 +1492,8 @@ private fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.STACKER ->
         "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
     ArcadeGame.KLONDIKE -> "Preview only • Draw-one Klondike engine and legal move handling are not implemented."
-    ArcadeGame.HEART_MATCH -> "Preview only • Cascade, sound, and power-up thresholds/effects remain to be finalized."
+    ArcadeGame.HEART_MATCH ->
+        "Playable defaults for review • Straight four creates a Row Burst; straight five or more creates a Color Nova. Dead boards reshuffle without loss."
     ArcadeGame.WRAPPING_SNAKE ->
         "Playable default for review • Predicted self-contact pauses before impact so another safe direction can be chosen without losing progress."
     ArcadeGame.RIVEN_CARD_TABLE ->
