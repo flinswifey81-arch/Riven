@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -23,14 +24,24 @@ class RivenArchiveExportService(
         context.applicationContext.noBackupFilesDir,
         RIVEN_ARCHIVE_STAGING_DIRECTORY_NAME,
     ),
+    private val reminderDatabase: ReminderDatabase? = null,
 ) {
+    private val appContext = context.applicationContext
+
     fun export(input: ExportRivenArchiveInput): ExportRivenArchiveResult {
         val working = File(stagingRoot, UUID.randomUUID().toString())
+        var ownedReminderDatabase: ReminderDatabase? = null
         return try {
             check(working.mkdirs())
             val snapshot = File(working, "snapshot.db")
-            createSnapshot(snapshot)
+            createSnapshot(database.openHelper.writableDatabase, snapshot)
             val databaseVersion = databaseVersion(snapshot)
+            val reminderSource = reminderDatabase ?: ReminderDatabase.build(appContext).also {
+                ownedReminderDatabase = it
+            }
+            val reminderSnapshot = File(working, "reminder-snapshot.db")
+            createSnapshot(reminderSource.openHelper.writableDatabase, reminderSnapshot)
+            val reminderDatabaseVersion = databaseVersion(reminderSnapshot)
             val records = readAttachmentRows(snapshot).map { row -> exportAttachment(row, working) }
             val manifest = RivenArchiveManifest(
                 archiveFormatVersion = RIVEN_ARCHIVE_FORMAT_VERSION,
@@ -39,9 +50,11 @@ class RivenArchiveExportService(
                 databaseSha256 = sha256Hex(snapshot),
                 secretsIncluded = false,
                 attachments = records.map { it.record },
+                reminderDatabaseSchemaVersion = reminderDatabaseVersion,
+                reminderDatabaseSha256 = sha256Hex(reminderSnapshot),
             )
             val archive = File(working, "riven-archive.zip")
-            writeArchive(archive, manifest, snapshot, records)
+            writeArchive(archive, manifest, snapshot, reminderSnapshot, records)
             FileInputStream(archive).use { source -> source.copyTo(input.output) }
             input.output.flush()
             ExportRivenArchiveResult.Exported(
@@ -59,15 +72,19 @@ class RivenArchiveExportService(
                 RivenArchiveExportError.ExportIoFailure(failure.safeCauseType()),
             )
         } finally {
+            ownedReminderDatabase?.close()
             working.deleteRecursively()
         }
     }
 
-    private fun createSnapshot(target: File) {
+    private fun createSnapshot(
+        source: androidx.sqlite.db.SupportSQLiteDatabase,
+        target: File,
+    ) {
         try {
             target.delete()
             val safePath = target.absolutePath.replace("'", "''")
-            database.openHelper.writableDatabase.execSQL("VACUUM INTO '$safePath'")
+            source.execSQL("VACUUM INTO '$safePath'")
             check(target.isFile && target.length() > 0)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -170,6 +187,7 @@ class RivenArchiveExportService(
         archive: File,
         manifest: RivenArchiveManifest,
         snapshot: File,
+        reminderSnapshot: File,
         attachments: List<ExportedAttachment>,
     ) {
         ZipOutputStream(FileOutputStream(archive)).use { zip ->
@@ -179,6 +197,10 @@ class RivenArchiveExportService(
 
             zip.putNextEntry(ZipEntry(ARCHIVE_DATABASE_PATH))
             FileInputStream(snapshot).use { it.copyTo(zip) }
+            zip.closeEntry()
+
+            zip.putNextEntry(ZipEntry(ARCHIVE_REMINDER_DATABASE_PATH))
+            FileInputStream(reminderSnapshot).use { it.copyTo(zip) }
             zip.closeEntry()
 
             attachments.forEach { attachment ->

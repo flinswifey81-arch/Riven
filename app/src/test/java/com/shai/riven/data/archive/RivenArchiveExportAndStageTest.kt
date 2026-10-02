@@ -59,6 +59,7 @@ import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.TemporalState
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -103,6 +104,7 @@ class RivenArchiveExportAndStageTest {
     private lateinit var root: File
     private lateinit var database: RivenDatabase
     private lateinit var blobStore: FileAttachmentBlobStore
+    private lateinit var reminderDatabase: ReminderDatabase
     private lateinit var exporter: RivenArchiveExportService
 
     @Before
@@ -112,16 +114,23 @@ class RivenArchiveExportAndStageTest {
         database = RivenDatabase.buildNamedForRestoreValidation(context, File(root, "source.db").absolutePath)
         database.openHelper.writableDatabase
         blobStore = FileAttachmentBlobStore(File(root, "source-attachments"))
+        reminderDatabase = ReminderDatabase.buildNamedForRestoreValidation(
+            context,
+            File(root, "source-reminders.db").absolutePath,
+        )
+        reminderDatabase.openHelper.writableDatabase
         exporter = RivenArchiveExportService(
             context = context,
             database = database,
             blobStore = blobStore,
             stagingRoot = File(root, "export-staging"),
+            reminderDatabase = reminderDatabase,
         )
     }
 
     @After
     fun tearDown() {
+        reminderDatabase.close()
         database.close()
         context.deleteDatabase(MIGRATION_DATABASE_NAME)
     }
@@ -135,11 +144,23 @@ class RivenArchiveExportAndStageTest {
         assertTrue(result is ExportRivenArchiveResult.Exported)
         assertFalse(output.closed)
         val entries = readZip(output.bytes())
-        assertEquals(setOf(ARCHIVE_MANIFEST_PATH, ARCHIVE_DATABASE_PATH), entries.map { it.first }.toSet())
+        assertEquals(
+            setOf(
+                ARCHIVE_MANIFEST_PATH,
+                ARCHIVE_DATABASE_PATH,
+                ARCHIVE_REMINDER_DATABASE_PATH,
+            ),
+            entries.map { it.first }.toSet(),
+        )
         val manifest = checkNotNull(RivenArchiveManifestJson.decode(entries.single { it.first == ARCHIVE_MANIFEST_PATH }.second))
         assertEquals(RIVEN_ARCHIVE_FORMAT_VERSION, manifest.archiveFormatVersion)
         assertEquals(101, manifest.exportedAt)
         assertEquals(8, manifest.databaseSchemaVersion)
+        assertEquals(1, manifest.reminderDatabaseSchemaVersion)
+        assertEquals(
+            sha256Hex(entries.single { it.first == ARCHIVE_REMINDER_DATABASE_PATH }.second),
+            manifest.reminderDatabaseSha256,
+        )
         assertFalse(manifest.secretsIncluded)
     }
 
@@ -163,6 +184,67 @@ class RivenArchiveExportAndStageTest {
             assertEquals("Snapshot title", title)
         }
         assertFalse(readZip(validArchive()).any { it.first.endsWith("-wal") || it.first.endsWith("-shm") })
+    }
+
+    @Test
+    fun exportAndStageRoundTripsReminderDatabaseAndTerminalizesInFlightDelivery() {
+        insertReminder("scheduled", "SCHEDULED", "stale-scheduled-token")
+        insertReminder("ringing", "RINGING", "ringing-token")
+
+        val result = stage(validArchive(), occurredAt = 777)
+
+        assertTrue(result is StageRivenRestoreResult.RestoreStaged)
+        val stagedFile = RivenRestorePaths(context, File(root, "restore")).pendingReminderDatabase
+        SQLiteDatabase.openDatabase(
+            stagedFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        ).use { sqlite ->
+            sqlite.rawQuery(
+                "SELECT status, delivery_token, finished_at FROM local_reminders " +
+                    "WHERE reminder_id = 'scheduled'",
+                null,
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("SCHEDULED", cursor.getString(0))
+                assertTrue(cursor.isNull(1))
+                assertTrue(cursor.isNull(2))
+            }
+            sqlite.rawQuery(
+                "SELECT status, delivery_token, finished_at FROM local_reminders " +
+                    "WHERE reminder_id = 'ringing'",
+                null,
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("DISMISSED", cursor.getString(0))
+                assertTrue(cursor.isNull(1))
+                assertEquals(777, cursor.getLong(2))
+            }
+        }
+    }
+
+    @Test
+    fun stageAcceptsLegacyV1ArchiveWithoutReplacingReminderDatabase() {
+        val entries = readZip(validArchive())
+            .filterNot { it.first == ARCHIVE_REMINDER_DATABASE_PATH }
+            .map { (name, bytes) ->
+                if (name == ARCHIVE_MANIFEST_PATH) {
+                    val json = JSONObject(bytes.toString(Charsets.UTF_8))
+                        .put("archiveFormatVersion", 1)
+                    json.remove("reminderDatabaseSchemaVersion")
+                    json.remove("reminderDatabaseSha256")
+                    name to json.toString().toByteArray()
+                } else {
+                    name to bytes
+                }
+            }
+
+        val result = stage(zip(entries))
+
+        assertTrue(result is StageRivenRestoreResult.RestoreStaged)
+        val stagedPaths = RivenRestorePaths(context, File(root, "restore"))
+        assertFalse(stagedPaths.pendingReminderDatabase.exists())
+        assertFalse(checkNotNull(RivenRestoreJournal(stagedPaths.journalFile).read()).includesReminderDatabase)
     }
 
     @Test
@@ -313,7 +395,9 @@ class RivenArchiveExportAndStageTest {
 
     @Test
     fun stageRejectsUnknownFutureArchiveVersion() {
-        val archive = rewriteManifest(validArchive()) { it.put("archiveFormatVersion", 2) }
+        val archive = rewriteManifest(validArchive()) {
+            it.put("archiveFormatVersion", RIVEN_ARCHIVE_FORMAT_VERSION + 1)
+        }
 
         assertRestoreError(archive, RivenArchiveRestoreError.UnsupportedArchiveVersion)
     }
@@ -331,6 +415,32 @@ class RivenArchiveExportAndStageTest {
         assertEquals(
             RivenArchiveRestoreError.ArchiveIntegrityFailure("DATABASE_HASH"),
             (result as StageRivenRestoreResult.Failure).error,
+        )
+    }
+
+    @Test
+    fun stageRejectsTamperedReminderDatabase() {
+        val entries = readZip(validArchive()).map { (name, bytes) ->
+            if (name == ARCHIVE_REMINDER_DATABASE_PATH) {
+                name to bytes.copyOf().also { it[it.lastIndex] = (it.last() + 1).toByte() }
+            } else {
+                name to bytes
+            }
+        }
+
+        assertRestoreError(
+            zip(entries),
+            RivenArchiveRestoreError.ArchiveIntegrityFailure("REMINDER_DATABASE_HASH"),
+        )
+    }
+
+    @Test
+    fun stageRejectsV2ArchiveMissingReminderDatabase() {
+        val entries = readZip(validArchive()).filterNot { it.first == ARCHIVE_REMINDER_DATABASE_PATH }
+
+        assertRestoreError(
+            zip(entries),
+            RivenArchiveRestoreError.ArchiveIntegrityFailure("MISSING_REMINDER_DATABASE"),
         )
     }
 
@@ -961,6 +1071,24 @@ class RivenArchiveExportAndStageTest {
                 createdAt = 1,
                 updatedAt = 1,
             ),
+        )
+    }
+
+    private fun insertReminder(
+        id: String,
+        status: String,
+        deliveryToken: String?,
+    ) {
+        reminderDatabase.openHelper.writableDatabase.execSQL(
+            "INSERT INTO local_reminders (reminder_id, title, note, feature_key, " +
+                "delivery_mode, sound_kind, custom_sound_uri, requested_local_date_time, " +
+                "time_zone_id, time_zone_policy, requested_trigger_at, scheduled_trigger_at, " +
+                "status, schedule_revision, delivery_token, last_failure_code, " +
+                "last_failure_detail, created_at, updated_at, finished_at) " +
+                "VALUES (?, ?, NULL, 'REMINDERS', 'AUDIBLE_ALARM', 'SYSTEM_DEFAULT', NULL, " +
+                "'2026-10-04T09:00', 'UTC', 'FIXED_ZONE', 1000, 1000, ?, 1, ?, NULL, " +
+                "NULL, 1, 1, NULL)",
+            arrayOf(id, id, status, deliveryToken),
         )
     }
 

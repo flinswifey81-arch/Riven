@@ -6,6 +6,8 @@ import com.shai.riven.data.attachment.AttachmentStorageKey
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.AttachmentEntity
 import com.shai.riven.data.persistence.model.AttachmentState
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
+import com.shai.riven.data.reminder.platform.ReminderResetCoordinator
 import java.io.File
 import kotlinx.coroutines.CancellationException
 
@@ -52,6 +54,9 @@ class RivenRestoreBootstrap(
                 RivenArchiveRestoreError.RecoveryFailure("MALFORMED_JOURNAL"),
             )
         return try {
+            if (record.includesReminderDatabase) {
+                ReminderResetCoordinator(appContext).cancelDeliveries()
+            }
             when (record.stage) {
                 RivenRestoreJournalStage.STAGED -> recoverStaged(record)
                 RivenRestoreJournalStage.CURRENT_MOVED_ASIDE,
@@ -79,7 +84,12 @@ class RivenRestoreBootstrap(
                 RivenArchiveRestoreError.RecoveryFailure("PARTIAL_MOVE_FROM_STAGED"),
             )
         }
-        if (!verifyState(paths.pendingDatabase, paths.pendingAttachmentRoot)) {
+        if (!verifyState(
+                paths.pendingDatabase,
+                paths.pendingAttachmentRoot,
+                record.reminderDatabaseOrNull(paths.pendingReminderDatabase),
+            )
+        ) {
             return RivenRestoreBootstrapResult.Failure(
                 RivenArchiveRestoreError.RecoveryFailure("INVALID_STAGED_STATE"),
             )
@@ -96,6 +106,21 @@ class RivenRestoreBootstrap(
             hadShm = paths.canonicalShm.isFile,
             hadAttachments = paths.canonicalAttachments.exists(),
             hadCredentials = paths.canonicalCredentials.exists(),
+            hadReminderDatabase = if (record.includesReminderDatabase) {
+                paths.canonicalReminderDatabase.isFile
+            } else {
+                record.hadReminderDatabase
+            },
+            hadReminderWal = if (record.includesReminderDatabase) {
+                paths.canonicalReminderWal.isFile
+            } else {
+                record.hadReminderWal
+            },
+            hadReminderShm = if (record.includesReminderDatabase) {
+                paths.canonicalReminderShm.isFile
+            } else {
+                record.hadReminderShm
+            },
         )
         try {
             journal.write(activeRecord)
@@ -103,6 +128,11 @@ class RivenRestoreBootstrap(
             moveIfExists(paths.canonicalDatabase, paths.rollbackDatabase)
             moveIfExists(paths.canonicalWal, paths.rollbackWal)
             moveIfExists(paths.canonicalShm, paths.rollbackShm)
+            if (activeRecord.includesReminderDatabase) {
+                moveIfExists(paths.canonicalReminderDatabase, paths.rollbackReminderDatabase)
+                moveIfExists(paths.canonicalReminderWal, paths.rollbackReminderWal)
+                moveIfExists(paths.canonicalReminderShm, paths.rollbackReminderShm)
+            }
             moveIfExists(paths.canonicalAttachments, paths.rollbackAttachments)
             moveIfExists(paths.canonicalCredentials, paths.rollbackCredentials)
             journal.write(activeRecord.copy(stage = RivenRestoreJournalStage.CURRENT_MOVED_ASIDE))
@@ -112,6 +142,12 @@ class RivenRestoreBootstrap(
             moveReplacing(paths.pendingDatabase, paths.canonicalDatabase)
             deletePath(paths.canonicalWal)
             deletePath(paths.canonicalShm)
+            if (activeRecord.includesReminderDatabase) {
+                paths.canonicalReminderDatabase.parentFile?.mkdirs()
+                moveReplacing(paths.pendingReminderDatabase, paths.canonicalReminderDatabase)
+                deletePath(paths.canonicalReminderWal)
+                deletePath(paths.canonicalReminderShm)
+            }
 
             hooks.beforeAttachmentInstall()
             deletePath(paths.canonicalAttachments)
@@ -121,7 +157,11 @@ class RivenRestoreBootstrap(
 
             verifying = true
             hooks.beforePostInstallVerification()
-            if (!verifyState(paths.canonicalDatabase, paths.canonicalAttachments) ||
+            if (!verifyState(
+                    paths.canonicalDatabase,
+                    paths.canonicalAttachments,
+                    activeRecord.reminderDatabaseOrNull(paths.canonicalReminderDatabase),
+                ) ||
                 paths.canonicalCredentials.exists()
             ) {
                 if (!activeRecord.hadDatabase) {
@@ -172,7 +212,11 @@ class RivenRestoreBootstrap(
         if (record.stage == RivenRestoreJournalStage.CURRENT_MOVED_ASIDE && !record.hadDatabase) {
             return resumeFreshInstall(record)
         }
-        if (verifyState(paths.canonicalDatabase, paths.canonicalAttachments) &&
+        if (verifyState(
+                paths.canonicalDatabase,
+                paths.canonicalAttachments,
+                record.reminderDatabaseOrNull(paths.canonicalReminderDatabase),
+            ) &&
             !paths.canonicalCredentials.exists()
         ) {
             journal.write(record.copy(stage = RivenRestoreJournalStage.VERIFIED))
@@ -204,12 +248,29 @@ class RivenRestoreBootstrap(
         }
         deletePath(paths.canonicalWal)
         deletePath(paths.canonicalShm)
+        if (record.includesReminderDatabase && !paths.canonicalReminderDatabase.isFile) {
+            if (!paths.pendingReminderDatabase.isFile) {
+                return RivenRestoreBootstrapResult.Failure(
+                    RivenArchiveRestoreError.RecoveryFailure("FRESH_INSTALL_REMINDER_DATABASE_MISSING"),
+                )
+            }
+            paths.canonicalReminderDatabase.parentFile?.mkdirs()
+            moveReplacing(paths.pendingReminderDatabase, paths.canonicalReminderDatabase)
+        }
+        if (record.includesReminderDatabase) {
+            deletePath(paths.canonicalReminderWal)
+            deletePath(paths.canonicalReminderShm)
+        }
         if (!paths.canonicalAttachments.exists() && paths.pendingAttachmentRoot.exists()) {
             moveReplacing(paths.pendingAttachmentRoot, paths.canonicalAttachments)
         }
         deletePath(paths.canonicalCredentials)
         journal.write(record.copy(stage = RivenRestoreJournalStage.NEW_INSTALLED))
-        if (!verifyState(paths.canonicalDatabase, paths.canonicalAttachments) ||
+        if (!verifyState(
+                paths.canonicalDatabase,
+                paths.canonicalAttachments,
+                record.reminderDatabaseOrNull(paths.canonicalReminderDatabase),
+            ) ||
             paths.canonicalCredentials.exists()
         ) {
             return RivenRestoreBootstrapResult.Failure(
@@ -235,10 +296,34 @@ class RivenRestoreBootstrap(
             restoreComponent(record.hadDatabase, paths.rollbackDatabase, paths.canonicalDatabase)
             restoreComponent(record.hadWal, paths.rollbackWal, paths.canonicalWal)
             restoreComponent(record.hadShm, paths.rollbackShm, paths.canonicalShm)
+            if (record.includesReminderDatabase) {
+                restoreComponent(
+                    record.hadReminderDatabase,
+                    paths.rollbackReminderDatabase,
+                    paths.canonicalReminderDatabase,
+                )
+                restoreComponent(
+                    record.hadReminderWal,
+                    paths.rollbackReminderWal,
+                    paths.canonicalReminderWal,
+                )
+                restoreComponent(
+                    record.hadReminderShm,
+                    paths.rollbackReminderShm,
+                    paths.canonicalReminderShm,
+                )
+            }
             restoreComponent(record.hadAttachments, paths.rollbackAttachments, paths.canonicalAttachments)
             hooks.afterRollbackAttachmentsRestored()
             restoreComponent(record.hadCredentials, paths.rollbackCredentials, paths.canonicalCredentials)
-            if (!verifyState(paths.canonicalDatabase, paths.canonicalAttachments)) {
+            if (!verifyState(
+                    paths.canonicalDatabase,
+                    paths.canonicalAttachments,
+                    paths.canonicalReminderDatabase.takeIf {
+                        record.includesReminderDatabase && record.hadReminderDatabase
+                    },
+                )
+            ) {
                 return RivenRestoreBootstrapResult.Failure(
                     RivenArchiveRestoreError.RollbackFailure("ROLLBACK_VERIFICATION"),
                 )
@@ -269,7 +354,11 @@ class RivenRestoreBootstrap(
         }
     }
 
-    private fun verifyState(databaseFile: File, attachmentRoot: File): Boolean = runCatching {
+    private fun verifyState(
+        databaseFile: File,
+        attachmentRoot: File,
+        reminderDatabaseFile: File?,
+    ): Boolean = runCatching {
         require(databaseFile.isFile)
         SQLiteDatabase.openDatabase(
             databaseFile.absolutePath,
@@ -297,8 +386,42 @@ class RivenRestoreBootstrap(
         }
         checkpointSelfContainedDatabase(databaseFile)
         verifyAttachments(attachments, attachmentRoot)
+        reminderDatabaseFile?.let(::verifyReminderDatabase)
         true
     }.getOrDefault(false)
+
+    private fun verifyReminderDatabase(databaseFile: File) {
+        require(databaseFile.isFile)
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        ).use { sqlite ->
+            val version = sqlite.rawQuery("PRAGMA user_version", null).use { cursor ->
+                check(cursor.moveToFirst())
+                cursor.getInt(0)
+            }
+            require(version == CURRENT_REMINDER_DATABASE_VERSION)
+            val quick = sqlite.rawQuery("PRAGMA quick_check", null).use { cursor ->
+                cursor.moveToFirst() && cursor.count == 1 && cursor.getString(0) == "ok"
+            }
+            require(quick)
+            val foreignKeyViolation = sqlite.rawQuery("PRAGMA foreign_key_check", null).use {
+                it.moveToFirst()
+            }
+            require(!foreignKeyViolation)
+        }
+        val restored = ReminderDatabase.buildNamedForRestoreValidation(
+            appContext,
+            databaseFile.absolutePath,
+        )
+        try {
+            restored.openHelper.writableDatabase
+        } finally {
+            restored.close()
+        }
+        checkpointSelfContainedDatabase(databaseFile)
+    }
 
     private fun verifyAttachments(
         attachments: List<AttachmentEntity>,
@@ -327,6 +450,9 @@ class RivenRestoreBootstrap(
         paths.rollbackDatabase.exists() ||
             paths.rollbackWal.exists() ||
             paths.rollbackShm.exists() ||
+            paths.rollbackReminderDatabase.exists() ||
+            paths.rollbackReminderWal.exists() ||
+            paths.rollbackReminderShm.exists() ||
             paths.rollbackAttachments.exists() ||
             paths.rollbackCredentials.exists()
 
@@ -339,4 +465,7 @@ class RivenRestoreBootstrap(
     private fun deletePath(file: File) {
         check(!file.exists() || file.deleteRecursively())
     }
+
+    private fun RivenRestoreJournalRecord.reminderDatabaseOrNull(file: File): File? =
+        file.takeIf { includesReminderDatabase }
 }

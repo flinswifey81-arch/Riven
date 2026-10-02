@@ -41,6 +41,8 @@ class LockedRivenPersonalityContextSourceTest {
         val crlf = context.assets.open(LockedRivenPersonalityContextSource.ASSET_NAME)
             .bufferedReader()
             .use { it.readText() }
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
             .replace("\n", "\r\n")
 
         val result = LockedRivenPersonalityContextSource { crlf }.read(request())

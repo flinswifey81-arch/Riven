@@ -4,7 +4,7 @@ import com.shai.riven.data.persistence.model.AttachmentState
 import java.io.InputStream
 import java.io.OutputStream
 
-const val RIVEN_ARCHIVE_FORMAT_VERSION = 1
+const val RIVEN_ARCHIVE_FORMAT_VERSION = 2
 
 data class ExportRivenArchiveInput(
     val output: OutputStream,
@@ -49,6 +49,8 @@ data class RivenArchiveManifest(
     val databaseSha256: String,
     val secretsIncluded: Boolean,
     val attachments: List<RivenArchiveAttachmentRecord>,
+    val reminderDatabaseSchemaVersion: Int? = null,
+    val reminderDatabaseSha256: String? = null,
 )
 
 enum class ArchiveLimit {
@@ -123,7 +125,10 @@ sealed interface RivenRestoreBootstrapResult {
 }
 
 internal const val CURRENT_RIVEN_DATABASE_VERSION = 8
+internal const val CURRENT_REMINDER_DATABASE_VERSION = 1
+internal const val MINIMUM_SUPPORTED_RIVEN_ARCHIVE_FORMAT_VERSION = 1
 internal const val ARCHIVE_MANIFEST_PATH = "manifest.json"
 internal const val ARCHIVE_DATABASE_PATH = "database/riven.db"
+internal const val ARCHIVE_REMINDER_DATABASE_PATH = "database/riven-reminders.db"
 internal const val ARCHIVE_ATTACHMENT_PREFIX = "attachments/"
 internal val LOWERCASE_SHA256 = Regex("[0-9a-f]{64}")

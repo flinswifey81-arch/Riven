@@ -39,6 +39,7 @@ import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.TemporalState
+import com.shai.riven.data.reminder.persistence.ReminderDatabase
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -69,6 +70,7 @@ class RivenRestoreBootstrapTest {
     private lateinit var restoreRoot: File
     private lateinit var sourceDatabase: RivenDatabase
     private lateinit var sourceBlobStore: FileAttachmentBlobStore
+    private lateinit var sourceReminderDatabase: ReminderDatabase
     private lateinit var paths: RivenRestorePaths
 
     @Before
@@ -86,11 +88,17 @@ class RivenRestoreBootstrapTest {
             "INSERT INTO conversations VALUES ('new-conversation', 2, 2, 'ACTIVE', 'Restored')",
         )
         sourceBlobStore = FileAttachmentBlobStore(File(root, "source-attachments"))
+        sourceReminderDatabase = ReminderDatabase.buildNamedForRestoreValidation(
+            context,
+            File(root, "source-reminders.db").absolutePath,
+        )
+        sourceReminderDatabase.openHelper.writableDatabase
         insertSourceAttachment("new-attachment", "restored attachment bytes".toByteArray())
     }
 
     @After
     fun tearDown() {
+        sourceReminderDatabase.close()
         sourceDatabase.close()
         clearCanonicalState()
     }
@@ -109,6 +117,47 @@ class RivenRestoreBootstrapTest {
             "restored attachment bytes".toByteArray(),
             File(paths.canonicalAttachments, "attachments/new-attachment.blob").readBytes(),
         )
+    }
+
+    @Test
+    fun applyValidRestoreReplacesReminderDatabaseWithoutReplayingRingingAlarm() {
+        prepareOldState()
+        insertCanonicalReminder("old-reminder", "SCHEDULED", null)
+        insertSourceReminder("new-scheduled", "SCHEDULED", null)
+        insertSourceReminder("new-ringing", "RINGING", "delivery-token")
+        stageValidArchive()
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertNull(canonicalReminderStatus("old-reminder"))
+        assertEquals("SCHEDULED", canonicalReminderStatus("new-scheduled"))
+        assertEquals("DISMISSED", canonicalReminderStatus("new-ringing"))
+        assertFalse(paths.canonicalReminderWal.exists())
+        assertFalse(paths.canonicalReminderShm.exists())
+    }
+
+    @Test
+    fun legacyV1RestoreLeavesCurrentReminderDatabaseUntouched() {
+        prepareOldState()
+        insertCanonicalReminder("local-reminder", "SCHEDULED", null)
+        stageValidArchive()
+        val staged = checkNotNull(journal().read())
+        // A v1 staged package has no reminder snapshot and its journal never opts into replacing it.
+        assertTrue(paths.pendingReminderDatabase.delete())
+        journal().write(
+            staged.copy(
+                includesReminderDatabase = false,
+                hadReminderDatabase = false,
+                hadReminderWal = false,
+                hadReminderShm = false,
+            ),
+        )
+
+        val result = bootstrap().recoverAndApply()
+
+        assertEquals(RivenRestoreBootstrapResult.RestoreApplied, result)
+        assertEquals("SCHEDULED", canonicalReminderStatus("local-reminder"))
     }
 
     @Test
@@ -237,6 +286,8 @@ class RivenRestoreBootstrapTest {
     @Test
     fun postInstallVerificationFailureRollsBackOldState() {
         prepareOldState()
+        insertCanonicalReminder("old-reminder", "SCHEDULED", null)
+        insertSourceReminder("new-reminder", "SCHEDULED", null)
         stageValidArchive()
         val bootstrap = bootstrap().apply {
             hooks = RivenRestoreBootstrapHooks(beforePostInstallVerification = { error("controlled") })
@@ -250,6 +301,8 @@ class RivenRestoreBootstrapTest {
                 RivenArchiveRestoreError.RestoreVerificationFailure,
         )
         assertTrue(canonicalConversationExists("old-conversation"))
+        assertEquals("SCHEDULED", canonicalReminderStatus("old-reminder"))
+        assertNull(canonicalReminderStatus("new-reminder"))
     }
 
     @Test
@@ -649,6 +702,7 @@ class RivenRestoreBootstrapTest {
             sourceDatabase,
             sourceBlobStore,
             File(root, "export-staging"),
+            sourceReminderDatabase,
         ).export(ExportRivenArchiveInput(output, 10))
         assertTrue(export is ExportRivenArchiveResult.Exported)
         val staged = RivenArchiveRestoreService(
@@ -662,6 +716,9 @@ class RivenRestoreBootstrapTest {
         val record = checkNotNull(journal().read())
         moveOldStateToRollback()
         moveReplacing(paths.pendingDatabase, paths.canonicalDatabase)
+        if (record.includesReminderDatabase) {
+            moveReplacing(paths.pendingReminderDatabase, paths.canonicalReminderDatabase)
+        }
         paths.canonicalAttachments.deleteRecursively()
         moveReplacing(paths.pendingAttachmentRoot, paths.canonicalAttachments)
         paths.canonicalCredentials.deleteRecursively()
@@ -672,6 +729,11 @@ class RivenRestoreBootstrapTest {
         moveIfExists(paths.canonicalDatabase, paths.rollbackDatabase)
         moveIfExists(paths.canonicalWal, paths.rollbackWal)
         moveIfExists(paths.canonicalShm, paths.rollbackShm)
+        if (journal().read()?.includesReminderDatabase == true) {
+            moveIfExists(paths.canonicalReminderDatabase, paths.rollbackReminderDatabase)
+            moveIfExists(paths.canonicalReminderWal, paths.rollbackReminderWal)
+            moveIfExists(paths.canonicalReminderShm, paths.rollbackReminderShm)
+        }
         moveIfExists(paths.canonicalAttachments, paths.rollbackAttachments)
         moveIfExists(paths.canonicalCredentials, paths.rollbackCredentials)
     }
@@ -695,12 +757,60 @@ class RivenRestoreBootstrapTest {
         }
     }
 
+    private fun insertSourceReminder(id: String, status: String, deliveryToken: String?) {
+        insertReminder(sourceReminderDatabase, id, status, deliveryToken)
+    }
+
+    private fun insertCanonicalReminder(id: String, status: String, deliveryToken: String?) {
+        val current = ReminderDatabase.build(context)
+        try {
+            current.openHelper.writableDatabase
+            insertReminder(current, id, status, deliveryToken)
+        } finally {
+            current.close()
+        }
+    }
+
+    private fun insertReminder(
+        target: ReminderDatabase,
+        id: String,
+        status: String,
+        deliveryToken: String?,
+    ) {
+        target.openHelper.writableDatabase.execSQL(
+            "INSERT INTO local_reminders (reminder_id, title, note, feature_key, " +
+                "delivery_mode, sound_kind, custom_sound_uri, requested_local_date_time, " +
+                "time_zone_id, time_zone_policy, requested_trigger_at, scheduled_trigger_at, " +
+                "status, schedule_revision, delivery_token, last_failure_code, " +
+                "last_failure_detail, created_at, updated_at, finished_at) " +
+                "VALUES (?, ?, NULL, 'REMINDERS', 'AUDIBLE_ALARM', 'SYSTEM_DEFAULT', NULL, " +
+                "'2026-10-04T09:00', 'UTC', 'FIXED_ZONE', 1000, 1000, ?, 1, ?, NULL, " +
+                "NULL, 1, 1, NULL)",
+            arrayOf(id, id, status, deliveryToken),
+        )
+    }
+
+    private fun canonicalReminderStatus(id: String): String? {
+        val current = ReminderDatabase.build(context)
+        return try {
+            current.openHelper.writableDatabase.query(
+                "SELECT status FROM local_reminders WHERE reminder_id = ?",
+                arrayOf(id),
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        } finally {
+            current.close()
+        }
+    }
+
     private fun bootstrap(): RivenRestoreBootstrap = RivenRestoreBootstrap(context, restoreRoot)
 
     private fun journal(): RivenRestoreJournal = RivenRestoreJournal(paths.journalFile)
 
     private fun clearCanonicalState() {
         context.deleteDatabase(RivenDatabase.DATABASE_NAME)
+        context.deleteDatabase(ReminderDatabase.DATABASE_NAME)
         File(context.filesDir, "riven_attachments").deleteRecursively()
         File(context.noBackupFilesDir, "riven_provider_credentials").deleteRecursively()
         File(context.noBackupFilesDir, RivenRestorePaths.RESTORE_DIRECTORY).deleteRecursively()
