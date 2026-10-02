@@ -182,6 +182,9 @@ class RivenAppNormalTest {
 
         runtime.releaseCancel()
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.cancelCompleted }
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
+        }
         composeRule.onNodeWithTag("chat_input").assertIsEnabled().assertTextContains("Cancelled draft")
         composeRule.waitUntil(timeoutMillis = 5_000) {
             runtime.savedDrafts.lastOrNull() == "Cancelled draft"
@@ -215,6 +218,34 @@ class RivenAppNormalTest {
             composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
         }
         composeRule.onNodeWithTag("chat_input").assertIsEnabled()
+        assertTrue(runtime.retryCalls == 0)
+    }
+
+    @Test
+    fun cancelDuringSecondaryDraftFlushPreservesAndPersistsFreshComposerText() {
+        val freshDraft = "Keep this secondary-action draft"
+        val runtime = FakeRivenRuntime(
+            configuredSnapshot(),
+            delayDraftSave = true,
+            cancelReturnsFailure = true,
+        )
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+        composeRule.onNodeWithTag("chat_input").performTextReplacement(freshDraft)
+        composeRule.onNodeWithText("Retry").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.saveDraftEntered.isCompleted }
+
+        composeRule.onNodeWithText("Cancel").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.cancelCompleted }
+        composeRule.onNodeWithTag("chat_input").assertIsNotEnabled()
+        runtime.releaseDraftSave()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
+        }
+
+        composeRule.onNodeWithTag("chat_input").assertIsEnabled().assertTextContains(freshDraft)
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.savedDrafts.lastOrNull() == freshDraft }
         assertTrue(runtime.retryCalls == 0)
     }
 

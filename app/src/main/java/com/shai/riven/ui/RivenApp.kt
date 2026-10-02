@@ -345,19 +345,23 @@ private fun ChatScreen(
         onDispose { latestConversationJob?.cancel(CancellationException("Chat screen left")) }
     }
 
-    fun apply(result: RivenRuntimeResult, submissionId: Long? = null) {
+    fun apply(
+        result: RivenRuntimeResult,
+        submissionId: Long? = null,
+        preserveComposerDraft: Boolean = false,
+    ) {
         when (result) {
             is RivenRuntimeResult.Success -> {
                 snapshot = result.snapshot
                 if (submissionId != null) onSubmissionSettled(submissionId, result.snapshot)
-                else onRuntimeDraft(result.snapshot.draft)
+                else if (!preserveComposerDraft) onRuntimeDraft(result.snapshot.draft)
                 notice = null
                 onSnapshot(result.snapshot)
             }
             is RivenRuntimeResult.Failure -> {
                 result.snapshot?.let {
                     snapshot = it
-                    if (submissionId == null) onRuntimeDraft(it.draft)
+                    if (submissionId == null && !preserveComposerDraft) onRuntimeDraft(it.draft)
                     onSnapshot(it)
                 }
                 if (submissionId != null) onSubmissionSettled(submissionId, result.snapshot)
@@ -510,7 +514,7 @@ private fun ChatScreen(
                                     jobToCancel?.cancel(CancellationException("Conversation cancelled by user"))
                                     scope.launch {
                                         try {
-                                            val result = try {
+                                            val cancellationResult = try {
                                                 runtimeIo { runtime.cancel() }
                                             } catch (cancelled: CancellationException) {
                                                 throw cancelled
@@ -518,8 +522,19 @@ private fun ChatScreen(
                                                 null
                                             }
                                             jobToCancel?.join()
-                                            if (result != null) {
-                                                apply(result, submissionId)
+                                            val reconciled = try {
+                                                runtimeIo { runtime.snapshot() }
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (_: Exception) {
+                                                cancellationResult
+                                            }
+                                            if (reconciled != null) {
+                                                apply(
+                                                    result = reconciled,
+                                                    submissionId = submissionId,
+                                                    preserveComposerDraft = submissionId == null,
+                                                )
                                             } else {
                                                 submissionId?.let { onSubmissionSettled(it, null) }
                                                 notice = "Riven could not confirm cancellation. Your draft is still saved."
