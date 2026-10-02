@@ -2,14 +2,17 @@ package com.shai.riven.data.candidate
 
 import java.security.MessageDigest
 
-internal const val AUTO_CANDIDATE_LINEAGE_PREFIX = "AUTO_CANDIDATE_V1:"
+internal const val AUTO_CANDIDATE_LINEAGE_PREFIX = "AUTO_CANDIDATE_V2:"
 
 internal fun candidateClaimLineageKey(
     experienceId: String,
     proposal: CandidateMemoryProposal,
+    claimOrdinal: Int,
 ): String {
+    require(claimOrdinal >= 0)
     val canonical = listOf(
         experienceId,
+        claimOrdinal.toString(),
         proposal.proposedKind.name,
         proposal.proposedScope.name,
         proposal.proposedEpistemicBasis.name,
@@ -21,5 +24,5 @@ internal fun candidateClaimLineageKey(
     val digest = MessageDigest.getInstance("SHA-256")
         .digest(canonical.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
-    return "$AUTO_CANDIDATE_LINEAGE_PREFIX$digest"
+    return "$AUTO_CANDIDATE_LINEAGE_PREFIX$claimOrdinal:$digest"
 }

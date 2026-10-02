@@ -14,6 +14,8 @@ import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.SensitivityLevel
+import com.shai.riven.data.persistence.model.SignificanceLevel
+import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.provider.ProviderCapability
 import com.shai.riven.data.provider.ProviderProfileSnapshot
 import com.shai.riven.data.provider.ResolvedProviderRuntimeProfile
@@ -23,8 +25,11 @@ import com.shai.riven.data.provider.openrouter.OpenRouterHttpRequest
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpResponse
 import com.shai.riven.data.validation.CandidateValidationOutcome
 import com.shai.riven.data.validation.CandidateValidationSnapshot
+import com.shai.riven.data.validation.ClassificationChangeReason
 import com.shai.riven.data.validation.ValidationAttentionSignals
 import com.shai.riven.data.validation.ValidationCandidateSnapshot
+import com.shai.riven.data.memory.RefinementDisposition
+import java.math.BigDecimal
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -147,6 +152,20 @@ class OpenRouterAutomaticMemoryModelTest {
     }
 
     @Test
+    fun unauthorizedProviderResponseIsClassifiedAsRecoverableCredentialBlock() = runBlocking {
+        val http = RecordingHttpClient(JSONObject(), statusCode = 401)
+        val model = OpenRouterAutomaticMemoryModel(runtimeProfile(), http)
+
+        val failure = runCatching { model.analyze(snapshot()) }.exceptionOrNull()
+
+        assertTrue(failure is AutomaticMemoryModelFailure)
+        failure as AutomaticMemoryModelFailure
+        assertEquals("INVALID_CREDENTIAL", failure.errorCode)
+        assertTrue(failure.blocked)
+        assertFalse(failure.retryable)
+    }
+
+    @Test
     fun nonStringAnalysisEnumsAreRejectedAsBoundedProviderFailure() = runBlocking {
         val response = JSONObject()
             .put("attention", JSONObject()
@@ -212,6 +231,72 @@ class OpenRouterAutomaticMemoryModelTest {
         assertEquals(3, payload.getJSONObject("seedAttention").getLong("revision"))
     }
 
+    @Test
+    fun validationParsesTimeBoundsAllSignificanceDimensionsAndEntityLinks() = runBlocking {
+        val response = acceptanceResponse(validFrom = 1_000L, validUntil = 2_000L)
+        response.getJSONObject("admission")
+            .put("significance", JSONObject()
+                .put("autobiographical", "CORE")
+                .put("relationship", "HIGH")
+                .put("emotional", "MODERATE")
+                .put("practical", "LOW")
+                .put("identity", "NONE"))
+            .put("entityLinks", JSONArray().put(JSONObject()
+                .put("entityId", "grounded-person")
+                .put("role", "ABOUT")))
+        val http = RecordingHttpClient(response)
+        val model = OpenRouterAutomaticMemoryModel(runtimeProfile(), http)
+
+        val decision = model.decide(validationSnapshot())
+
+        val admission = checkNotNull(decision.admission)
+        assertEquals(TemporalState.TIME_BOUNDED, admission.temporalState)
+        assertEquals(1_000L, admission.validFrom)
+        assertEquals(2_000L, admission.validUntil)
+        assertEquals(SignificanceLevel.CORE, admission.significance.autobiographical)
+        assertEquals(SignificanceLevel.HIGH, admission.significance.relationship)
+        assertEquals(SignificanceLevel.MODERATE, admission.significance.emotional)
+        assertEquals(SignificanceLevel.LOW, admission.significance.practical)
+        assertEquals(SignificanceLevel.NONE, admission.significance.identity)
+        assertEquals("grounded-person", admission.entityLinks.single().entityId)
+        val systemPrompt = JSONObject(http.requests.single().body.orEmpty())
+            .getJSONArray("messages").getJSONObject(0).getString("content")
+        assertTrue(systemPrompt.contains("validFrom <= validUntil"))
+        assertTrue(systemPrompt.contains("classificationChangeReason is required"))
+    }
+
+    @Test
+    fun validationParsesKindChangeReasonForRefinement() = runBlocking {
+        val response = acceptanceResponse().apply {
+            put("outcome", "REFINE_EXISTING")
+            put("targetMemoryIds", JSONArray().put("target-memory"))
+            put("refinementDisposition", "KEEP_BROADER_CURRENT")
+            put("classificationChangeReason", "IMPRECISE_CLASSIFICATION")
+        }
+        val model = OpenRouterAutomaticMemoryModel(runtimeProfile(), RecordingHttpClient(response))
+
+        val decision = model.decide(validationSnapshot())
+
+        assertEquals(CandidateValidationOutcome.REFINE_EXISTING, decision.outcome)
+        assertEquals(RefinementDisposition.KEEP_BROADER_CURRENT, decision.refinementDisposition)
+        assertEquals(ClassificationChangeReason.IMPRECISE_CLASSIFICATION, decision.classificationChangeReason)
+    }
+
+    @Test
+    fun validationRejectsFractionalAndOutOfRangeTimestamps() = runBlocking {
+        listOf<Number>(1.5, BigDecimal("9223372036854775808")).forEach { invalidTimestamp ->
+            val model = OpenRouterAutomaticMemoryModel(
+                runtimeProfile(),
+                RecordingHttpClient(acceptanceResponse(validFrom = invalidTimestamp, validUntil = 2_000L)),
+            )
+
+            val failure = runCatching { model.decide(validationSnapshot()) }.exceptionOrNull()
+
+            assertTrue(failure is AutomaticMemoryModelFailure)
+            assertEquals("INVALID_VALIDATION_RESPONSE", (failure as AutomaticMemoryModelFailure).errorCode)
+        }
+    }
+
     private fun snapshot() = ImmediateAttentionSnapshot(
         experienceId = "experience-1",
         experienceType = ExperienceType.CONVERSATION_MESSAGE,
@@ -227,6 +312,53 @@ class OpenRouterAutomaticMemoryModelTest {
         groundedEntityLinks = emptyList(),
         timelineRevision = 2,
     )
+
+    private fun validationSnapshot() = CandidateValidationSnapshot(
+        candidate = ValidationCandidateSnapshot(
+            candidateId = "candidate",
+            proposedKind = MemoryKind.SEMANTIC,
+            proposedScope = MemoryScope.SHAI,
+            proposedMeaning = "A grounded candidate.",
+            proposedEpistemicBasis = EpistemicBasis.DIRECT_USER_STATEMENT,
+            proposedCertainty = MemoryCertainty.CERTAIN,
+            state = CandidateMemoryState.READY_FOR_VALIDATION,
+            sensitivity = SensitivityLevel.STANDARD,
+            createdAt = 1,
+            updatedAt = 1,
+        ),
+        evidence = emptyList(),
+        seedAttention = ValidationAttentionSignals(
+            outcome = AttentionOutcome.FORWARD_FOR_INTERPRETATION,
+            revision = 1,
+            positiveSignals = setOf(PositiveAttentionSignal.PREFERENCE),
+            antiSignals = emptySet(),
+        ),
+        relatedMemories = emptyList(),
+    )
+
+    private fun acceptanceResponse(
+        validFrom: Any? = null,
+        validUntil: Any? = null,
+    ) = JSONObject()
+        .put("outcome", "ACCEPT_NEW")
+        .put("targetMemoryIds", JSONArray())
+        .put("admission", JSONObject()
+            .put("temporalState", if (validFrom == null && validUntil == null) "CURRENT" else "TIME_BOUNDED")
+            .put("validFrom", validFrom ?: JSONObject.NULL)
+            .put("validUntil", validUntil ?: JSONObject.NULL)
+            .put("sensitivity", JSONObject.NULL)
+            .put("significance", JSONObject()
+                .put("autobiographical", JSONObject.NULL)
+                .put("relationship", JSONObject.NULL)
+                .put("emotional", JSONObject.NULL)
+                .put("practical", JSONObject.NULL)
+                .put("identity", JSONObject.NULL))
+            .put("entityLinks", JSONArray()))
+        .put("refinementDisposition", JSONObject.NULL)
+        .put("deferState", JSONObject.NULL)
+        .put("deferReason", JSONObject.NULL)
+        .put("rejectReason", JSONObject.NULL)
+        .put("classificationChangeReason", JSONObject.NULL)
 
     private fun runtimeProfile() = ResolvedProviderRuntimeProfile(
         profile = ProviderProfileSnapshot(
@@ -247,6 +379,7 @@ class OpenRouterAutomaticMemoryModelTest {
 
     private class RecordingHttpClient(
         private val content: JSONObject,
+        private val statusCode: Int = 200,
     ) : OpenRouterHttpClient {
         val requests = mutableListOf<OpenRouterHttpRequest>()
 
@@ -259,7 +392,7 @@ class OpenRouterAutomaticMemoryModelTest {
                 .put("choices", JSONArray().put(JSONObject()
                     .put("message", JSONObject().put("content", content.toString()))))
             onLine(envelope.toString())
-            return OpenRouterHttpResponse(200, emptyMap())
+            return OpenRouterHttpResponse(statusCode, emptyMap())
         }
     }
 }

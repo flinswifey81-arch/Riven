@@ -2,6 +2,7 @@ package com.shai.riven.data.candidate
 
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
+import com.shai.riven.data.automaticmemory.AutomaticMemoryModelFailure
 import com.shai.riven.data.attention.ImmediateAttentionAbort
 import com.shai.riven.data.attention.ImmediateAttentionError
 import com.shai.riven.data.attention.ImmediateAttentionGrounding
@@ -15,7 +16,7 @@ import com.shai.riven.data.memory.MAX_CANDIDATE_MEANING_CHARS
 import com.shai.riven.data.memory.MemoryTransactionService
 import com.shai.riven.data.memory.MemoryWriteError
 import com.shai.riven.data.memory.MemoryWriteResult
-import com.shai.riven.data.memory.sourceExperienceSuppressionHash
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
@@ -46,6 +47,8 @@ class CandidateExtractionService(
             return CandidateExtractionResult.Failure(mapAttentionError(abort.error, input.experienceId))
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: AutomaticMemoryModelFailure) {
+            throw failure
         } catch (failure: Exception) {
             return CandidateExtractionResult.Failure(
                 CandidateExtractionError.StorageFailure(
@@ -60,6 +63,8 @@ class CandidateExtractionService(
             extractor.extract(snapshot)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: AutomaticMemoryModelFailure) {
+            throw failure
         } catch (failure: Exception) {
             return CandidateExtractionResult.Failure(
                 CandidateExtractionError.ExtractorFailure(failure::class.java.simpleName),
@@ -86,14 +91,30 @@ class CandidateExtractionService(
 
                 val createdIds = mutableListOf<String>()
                 val existingIds = mutableListOf<String>()
+                val existingMemoryIds = mutableListOf<String>()
+                val admittedEvidence = memoryDao.memoryEvidenceForExperience(input.experienceId)
                 var suppressedCount = 0
-                val sourceSuppressed = maintenanceDao.suppressionTombstone(
-                    sourceExperienceSuppressionHash(input.experienceId),
-                )?.isActive == true
                 prepared.forEach { candidate ->
-                    val suppressionHash = sourceLineageHash(input.experienceId, candidate.lineageKey)
-                    if (sourceSuppressed || maintenanceDao.suppressionTombstone(suppressionHash)?.isActive == true) {
+                    val claimSuppressionHash = sourceClaimSuppressionHash(
+                        input.experienceId,
+                        candidate.lineageKey,
+                    )
+                    val exactLineageHash = sourceLineageHash(input.experienceId, candidate.lineageKey)
+                    if (
+                        maintenanceDao.suppressionTombstone(claimSuppressionHash)?.isActive == true ||
+                        maintenanceDao.suppressionTombstone(exactLineageHash)?.isActive == true
+                    ) {
                         suppressedCount += 1
+                        return@forEach
+                    }
+
+                    val admittedMemoryId = admittedEvidence.firstOrNull { evidence ->
+                            sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey) ==
+                                claimSuppressionHash
+                        }
+                        ?.memoryId
+                    if (admittedMemoryId != null) {
+                        existingMemoryIds += admittedMemoryId
                         return@forEach
                     }
 
@@ -135,6 +156,7 @@ class CandidateExtractionService(
                     attentionRevision = actionable.assessment.revision,
                     createdCandidateIds = createdIds,
                     existingCandidateIds = existingIds,
+                    existingMemoryIds = existingMemoryIds.distinct(),
                     suppressedLineageCount = suppressedCount,
                 )
             }
@@ -205,7 +227,7 @@ class CandidateExtractionService(
                 ),
             )
         }
-        val firstIndexByLineage = mutableMapOf<String, Int>()
+        val firstIndexByClaim = mutableMapOf<String, Int>()
         return proposal.candidates.mapIndexed { index, candidate ->
             when {
                 candidate.proposedMeaning.isBlank() -> abort(
@@ -228,10 +250,11 @@ class CandidateExtractionService(
                 )
             }
             validateEpistemicBasis(snapshot, candidate, index)
-            val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate)
-            firstIndexByLineage.putIfAbsent(lineageKey, index)?.let { firstIndex ->
+            val semanticClaimKey = candidateClaimLineageKey(snapshot.experienceId, candidate, 0)
+            firstIndexByClaim.putIfAbsent(semanticClaimKey, index)?.let { firstIndex ->
                 abort(CandidateExtractionError.DuplicateCandidateProposal(firstIndex, index))
             }
+            val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate, index)
             PreparedCandidate(index, candidate, lineageKey)
         }
     }
@@ -284,7 +307,11 @@ class CandidateExtractionService(
         prepared: PreparedCandidate,
         updatedAt: Long,
     ): String? {
-        val seeds = memoryDao.candidateSeedEvidenceByLineage(experienceId, prepared.lineageKey)
+        val claimHash = sourceClaimSuppressionHash(experienceId, prepared.lineageKey)
+        val seeds = memoryDao.candidateSeedEvidenceForExperience(experienceId)
+            .filter { evidence ->
+                sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey) == claimHash
+            }
         if (seeds.isEmpty()) return null
         if (seeds.size != 1) {
             abort(
@@ -309,7 +336,7 @@ class CandidateExtractionService(
                 ),
             )
         }
-        if (!candidate.matches(prepared.proposal)) {
+        if (!candidate.matchesStableClaim(prepared.proposal)) {
             abort(
                 CandidateExtractionError.CandidateLineageConflict(
                     prepared.lineageKey,
@@ -317,17 +344,30 @@ class CandidateExtractionService(
                 ),
             )
         }
-        if (candidate.state.progressRank() < prepared.proposal.proposedState.progressRank()) {
+        val nextState = if (
+            candidate.state.progressRank() < prepared.proposal.proposedState.progressRank()
+        ) {
+            prepared.proposal.proposedState
+        } else {
+            candidate.state
+        }
+        if (
+            candidate.proposedCertainty != prepared.proposal.proposedCertainty ||
+            candidate.sensitivity != prepared.proposal.proposedSensitivity ||
+            candidate.state != nextState
+        ) {
             when (
-                val transitioned = memoryTransactionService.transitionCandidateInCurrentTransaction(
+                val refreshed = memoryTransactionService.refreshCandidateInCurrentTransaction(
                     candidateId = candidate.id,
                     expectedState = candidate.state,
-                    nextState = prepared.proposal.proposedState,
+                    nextState = nextState,
+                    proposedCertainty = prepared.proposal.proposedCertainty,
+                    sensitivity = prepared.proposal.proposedSensitivity,
                     updatedAt = updatedAt,
                 )
             ) {
                 is MemoryWriteResult.Success -> Unit
-                is MemoryWriteResult.Failure -> abort(mapMemoryWriteError(transitioned.error, prepared.index))
+                is MemoryWriteResult.Failure -> abort(mapMemoryWriteError(refreshed.error, prepared.index))
             }
         }
         return candidate.id
@@ -456,13 +496,11 @@ class CandidateExtractionService(
             antiSignals = assessment.antiSignals,
         )
 
-    private fun CandidateMemoryEntity.matches(proposal: CandidateMemoryProposal): Boolean =
+    private fun CandidateMemoryEntity.matchesStableClaim(proposal: CandidateMemoryProposal): Boolean =
         proposedKind == proposal.proposedKind &&
             proposedScope == proposal.proposedScope &&
             proposedMeaning == proposal.proposedMeaning &&
-            proposedEpistemicBasis == proposal.proposedEpistemicBasis &&
-            proposedCertainty == proposal.proposedCertainty &&
-            sensitivity == proposal.proposedSensitivity
+            proposedEpistemicBasis == proposal.proposedEpistemicBasis
 
     private fun CandidateMemoryEntity.toSnapshot(lineageKey: String) = CandidateMemorySnapshot(
         candidateId = id,

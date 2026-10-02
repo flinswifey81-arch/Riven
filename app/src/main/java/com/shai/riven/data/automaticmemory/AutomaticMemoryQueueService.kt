@@ -230,7 +230,7 @@ class AutomaticMemoryQueueService(
                 jobId = job.id,
                 succeededState = AutomaticMemoryJobState.SUCCEEDED,
                 pendingState = AutomaticMemoryJobState.PENDING,
-                attentionStage = AutomaticMemoryJobStage.ATTENTION,
+                attentionStage = AutomaticMemoryJobStage.REFRESH_ATTENTION,
                 expectedAttemptCount = job.attemptCount,
                 expectedContextRevision = job.sourceTimelineRevision,
                 contextRevision = sourceTimelineRevision,
@@ -240,7 +240,7 @@ class AutomaticMemoryQueueService(
         ) {
             job.copy(
                 state = AutomaticMemoryJobState.PENDING,
-                nextStage = AutomaticMemoryJobStage.ATTENTION,
+                nextStage = AutomaticMemoryJobStage.REFRESH_ATTENTION,
                 sourceTimelineRevision = sourceTimelineRevision,
                 updatedAt = occurredAt,
                 lastErrorCode = SHORT_WINDOW_CONTEXT_CODE,

@@ -5,7 +5,7 @@ import com.shai.riven.data.attention.ImmediateAttentionError
 import com.shai.riven.data.attention.ImmediateAttentionGrounding
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
-import com.shai.riven.data.memory.sourceExperienceSuppressionHash
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.CandidateEvidenceRole
@@ -140,10 +140,25 @@ internal class CandidateValidationGrounding(
     fun hasActiveSuppressionInCurrentTransaction(
         context: GroundedCandidateValidationContext,
     ): Boolean = context.evidence.any { evidence ->
-        maintenanceDao.suppressionTombstone(sourceExperienceSuppressionHash(evidence.experienceId))?.isActive == true ||
+        maintenanceDao.suppressionTombstone(
+            sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey),
+        )?.isActive == true ||
             maintenanceDao.suppressionTombstone(
                 sourceLineageHash(evidence.experienceId, evidence.lineageKey),
             )?.isActive == true
+    }
+
+    fun admittedMemoryIdsInCurrentTransaction(
+        context: GroundedCandidateValidationContext,
+    ): List<String> {
+        val seed = context.seedEvidence
+        val claimHash = sourceClaimSuppressionHash(seed.experienceId, seed.lineageKey)
+        return memoryDao.memoryEvidenceForExperience(seed.experienceId)
+            .filter { evidence ->
+                sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey) == claimHash
+            }
+            .map { it.memoryId }
+            .distinct()
     }
 
     private fun ImmediateAttentionError.toValidationError(candidateId: String): CandidateValidationError = when (this) {

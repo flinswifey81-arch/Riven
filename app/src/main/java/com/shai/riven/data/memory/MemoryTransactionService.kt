@@ -25,6 +25,7 @@ import com.shai.riven.data.persistence.model.MemoryRetentionState
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
+import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
 import com.shai.riven.data.validation.validationRecallCorpusFence
@@ -254,6 +255,33 @@ class MemoryTransactionService(
         )
     }
 
+    internal fun refreshCandidateInCurrentTransaction(
+        candidateId: String,
+        expectedState: CandidateMemoryState,
+        nextState: CandidateMemoryState,
+        proposedCertainty: MemoryCertainty,
+        sensitivity: SensitivityLevel,
+        updatedAt: Long,
+    ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.REFRESH_CANDIDATE) {
+        val candidate = memoryDao.candidateMemory(candidateId)
+            ?: abort(MemoryWriteError.CandidateNotFound(candidateId))
+        if (candidate.state != expectedState) {
+            abort(MemoryWriteError.InvalidCandidateState(candidateId, candidate.state))
+        }
+        memoryDao.updateCandidateMemory(
+            candidate.copy(
+                proposedCertainty = proposedCertainty,
+                state = nextState,
+                sensitivity = sensitivity,
+                updatedAt = updatedAt,
+            ),
+        )
+        MemoryWriteResult.Success(
+            operation = MemoryWriteOperation.REFRESH_CANDIDATE,
+            candidateId = candidateId,
+        )
+    }
+
     internal fun consumeCandidateInCurrentTransaction(
         candidateId: String,
     ): MemoryWriteResult = executeInCurrentTransaction(MemoryWriteOperation.ADMIT_CANDIDATE) {
@@ -346,7 +374,7 @@ class MemoryTransactionService(
             memoryDao.updateMemory(forgotten)
             evidence.forEach { source ->
                 ensureForgetTombstone(
-                    sourceExperienceHash = sourceExperienceSuppressionHash(source.experienceId),
+                    sourceClaimHash = sourceClaimSuppressionHash(source.experienceId, source.lineageKey),
                     legacyLineageHash = sourceLineageHash(source.experienceId, source.lineageKey),
                     occurredAt = input.occurredAt,
                 )
@@ -939,24 +967,24 @@ class MemoryTransactionService(
     }
 
     private fun ensureForgetTombstone(
-        sourceExperienceHash: String,
+        sourceClaimHash: String,
         legacyLineageHash: String,
         occurredAt: Long,
     ) {
-        val existing = maintenanceDao.suppressionTombstone(sourceExperienceHash)
+        val existing = maintenanceDao.suppressionTombstone(sourceClaimHash)
             ?: maintenanceDao.suppressionTombstone(legacyLineageHash)
         when {
             existing == null -> maintenanceDao.insertSuppressionTombstone(
                 SuppressionTombstoneEntity(
                     id = idGenerator.nextId(),
                     kind = SuppressionKind.FORGET,
-                    sourceLineageHash = sourceExperienceHash,
+                    sourceLineageHash = sourceClaimHash,
                     isActive = true,
                     createdAt = occurredAt,
                     formatVersion = 1,
                 ),
             )
-            existing.sourceLineageHash != sourceExperienceHash ||
+            existing.sourceLineageHash != sourceClaimHash ||
                 !existing.isActive ||
                 existing.kind != SuppressionKind.FORGET ->
                 maintenanceDao.updateSuppressionTombstone(
@@ -966,7 +994,7 @@ class MemoryTransactionService(
                         } else {
                             SuppressionKind.FORGET
                         },
-                        sourceLineageHash = sourceExperienceHash,
+                        sourceLineageHash = sourceClaimHash,
                         isActive = true,
                         expiresAt = null,
                     ),

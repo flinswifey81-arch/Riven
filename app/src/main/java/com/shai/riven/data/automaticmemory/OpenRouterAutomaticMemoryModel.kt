@@ -10,11 +10,13 @@ import com.shai.riven.data.candidate.CandidateExtractionProposal
 import com.shai.riven.data.candidate.CandidateExtractionSnapshot
 import com.shai.riven.data.candidate.CandidateMemoryProposal
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
+import com.shai.riven.data.memory.MemoryEntityLinkInput
 import com.shai.riven.data.memory.RefinementDisposition
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
 import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.EpistemicBasis
+import com.shai.riven.data.persistence.model.EntityLinkRole
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryScope
@@ -40,6 +42,7 @@ import com.shai.riven.data.validation.CandidateValidationOutcome
 import com.shai.riven.data.validation.CandidateValidationSnapshot
 import com.shai.riven.data.validation.ClassificationChangeReason
 import com.shai.riven.data.validation.ValidationAdmissionMetadata
+import java.math.BigDecimal
 import java.net.URI
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -297,7 +300,7 @@ class OpenRouterAutomaticMemoryModel(
             throw AutomaticMemoryModelFailure("INPUT_LIMIT", retryable = false)
         }
         val credential = runtimeProfile.credential?.reveal()?.takeIf(String::isNotBlank)
-            ?: throw AutomaticMemoryModelFailure("MISSING_CREDENTIAL", retryable = false)
+            ?: throw AutomaticMemoryModelFailure("MISSING_CREDENTIAL", retryable = false, blocked = true)
         val responseBody = StringBuilder()
         val response = try {
             httpClient.execute(
@@ -333,6 +336,13 @@ class OpenRouterAutomaticMemoryModel(
             throw AutomaticMemoryModelFailure("UNAVAILABLE", retryable = true)
         }
         if (response.statusCode !in 200..299) {
+            if (response.statusCode == 401 || response.statusCode == 403) {
+                throw AutomaticMemoryModelFailure(
+                    "INVALID_CREDENTIAL",
+                    retryable = false,
+                    blocked = true,
+                )
+            }
             throw AutomaticMemoryModelFailure(
                 "HTTP_${response.statusCode}",
                 retryable = response.statusCode == 408 || response.statusCode == 429 || response.statusCode >= 500,
@@ -403,6 +413,20 @@ class OpenRouterAutomaticMemoryModel(
                         )
                     } ?: IntrinsicSignificanceInput(),
                     sensitivity = value.optEnum("sensitivity", SensitivityLevel::valueOf),
+                    entityLinks = value.requireArray("entityLinks").let { links ->
+                        buildList {
+                            for (index in 0 until links.length()) {
+                                val link = links.optJSONObject(index)
+                                    ?: throw IllegalArgumentException("Invalid entityLinks")
+                                add(
+                                    MemoryEntityLinkInput(
+                                        entityId = link.requireString("entityId"),
+                                        role = link.requireEnum("role", EntityLinkRole::valueOf),
+                                    ),
+                                )
+                            }
+                        }
+                    },
                 )
             }
             return CandidateValidationDecision(
@@ -545,7 +569,9 @@ class OpenRouterAutomaticMemoryModel(
             assistant said them. The locked Riven personality canon is immutable authority for
             Riven identity; never admit a conflicting self-assertion. A broad new Riven
             SELF_DEVELOPMENT claim requires repeated independent evidence. Use completed-turn
-            followingContext as short-window hindsight.
+            followingContext as short-window hindsight. Emit candidates in source order and keep
+            each claim in the same array position during short-window reanalysis, even if its
+            retained meaning is rephrased; array position is a non-semantic source-claim slot.
 
             Schema:
             {"attention":{"outcome":"FORWARD_FOR_INTERPRETATION|NO_CANDIDATE|DEFER_FOR_CONTEXT",
@@ -572,9 +598,14 @@ class OpenRouterAutomaticMemoryModel(
             Schema:
             {"outcome":"ACCEPT_NEW|REINFORCE_EXISTING|MERGE|REFINE_EXISTING|SUPERSEDE_EXISTING|CORRECT_EXISTING|DISPUTE_EXISTING|DEFER|REJECT",
             "targetMemoryIds":[],"admission":null|{"temporalState":"CURRENT|HISTORICAL|TIME_BOUNDED|ATEMPORAL|UNKNOWN",
-            "validFrom":null,"validUntil":null,"sensitivity":null|"STANDARD|SENSITIVE|HIGHLY_SENSITIVE",
-            "significance":{"autobiographical":null|"NONE|LOW|MODERATE|HIGH|CORE","relationship":null,
-            "emotional":null,"practical":null,"identity":null}},
+            "validFrom":null|<integer epoch milliseconds>,"validUntil":null|<integer epoch milliseconds>,
+            "sensitivity":null|"STANDARD|SENSITIVE|HIGHLY_SENSITIVE",
+            "significance":{"autobiographical":null|"NONE|LOW|MODERATE|HIGH|CORE",
+            "relationship":null|"NONE|LOW|MODERATE|HIGH|CORE",
+            "emotional":null|"NONE|LOW|MODERATE|HIGH|CORE",
+            "practical":null|"NONE|LOW|MODERATE|HIGH|CORE",
+            "identity":null|"NONE|LOW|MODERATE|HIGH|CORE"},
+            "entityLinks":[{"entityId":"grounded id","role":"ABOUT|INVOLVES|ACTOR|SUBJECT"}]},
             "refinementDisposition":null|"KEEP_BROADER_CURRENT|SUPERSEDE_BROADER",
             "deferState":null|"PENDING_CONTEXT|TENTATIVE",
             "deferReason":null|"NEEDS_CONTEXT|NEEDS_MORE_EVIDENCE|AMBIGUOUS_SUBJECT|TEMPORAL_AMBIGUITY|SENSITIVE_THRESHOLD|BROADER_PATTERN_REQUIRES_CONSOLIDATION",
@@ -587,7 +618,13 @@ class OpenRouterAutomaticMemoryModel(
             all other outcomes require admission null. REFINE_EXISTING requires refinementDisposition.
             DEFER requires deferState and deferReason. REJECT requires rejectReason. Every field not
             required by the selected outcome must be null. MERGE is a deferral to consolidation and
-            does not itself create a memory.
+            does not itself create a memory. TIME_BOUNDED requires both integer bounds with
+            validFrom <= validUntil; CURRENT requires validUntil null; ATEMPORAL and UNKNOWN require
+            both bounds null; HISTORICAL permits either bound but orders both when present. Do not
+            lower sensitivity below the candidate/evidence floor. Entity links must use only grounded
+            entity ids from the candidate or retrieved memories. classificationChangeReason is required
+            only when REFINE_EXISTING or CORRECT_EXISTING changes the target memory kind, and must be
+            null otherwise.
         """.trimIndent()
     }
 }
@@ -626,9 +663,17 @@ private fun JSONObject.stringList(name: String): List<String> {
     }
 }
 
-private fun JSONObject.optLongOrNull(name: String): Long? =
-    if (!has(name) || isNull(name)) null else (get(name) as? Number)?.toLong()
-        ?: throw IllegalArgumentException("Invalid $name")
+private fun JSONObject.optLongOrNull(name: String): Long? {
+    if (!has(name) || isNull(name)) return null
+    val value = get(name) as? Number ?: throw IllegalArgumentException("Invalid $name")
+    return try {
+        BigDecimal(value.toString()).longValueExact()
+    } catch (_: ArithmeticException) {
+        throw IllegalArgumentException("Invalid $name")
+    } catch (_: NumberFormatException) {
+        throw IllegalArgumentException("Invalid $name")
+    }
+}
 
 private fun String.safeCodeFragment(): String =
     filter { it.isLetterOrDigit() || it == '_' }.ifBlank { "Error" }.take(40)

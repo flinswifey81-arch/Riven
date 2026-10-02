@@ -1,6 +1,7 @@
 package com.shai.riven.data.validation
 
 import androidx.room.withTransaction
+import com.shai.riven.data.automaticmemory.AutomaticMemoryModelFailure
 import com.shai.riven.data.memory.AdmitCandidateMemoryInput
 import com.shai.riven.data.memory.CorrectMemoryInput
 import com.shai.riven.data.memory.DisputeMemoryInput
@@ -56,7 +57,13 @@ class CandidateValidationService(
                     requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(input.candidateId))
                     InitialRead.Suppressed
                 } else {
-                    InitialRead.Ready(context)
+                    val admittedMemoryIds = grounding.admittedMemoryIdsInCurrentTransaction(context)
+                    if (admittedMemoryIds.isNotEmpty()) {
+                        requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(input.candidateId))
+                        InitialRead.AlreadyAdmitted(admittedMemoryIds)
+                    } else {
+                        InitialRead.Ready(context)
+                    }
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -68,6 +75,12 @@ class CandidateValidationService(
         }
         if (initial == InitialRead.Suppressed) {
             return CandidateValidationResult.SuppressedCandidateDiscarded(input.candidateId)
+        }
+        if (initial is InitialRead.AlreadyAdmitted) {
+            return CandidateValidationResult.AlreadyAdmittedCandidateDiscarded(
+                input.candidateId,
+                initial.memoryIds,
+            )
         }
         val initialContext = (initial as InitialRead.Ready).context
 
@@ -87,6 +100,8 @@ class CandidateValidationService(
             retriever.retrieve(query)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: AutomaticMemoryModelFailure) {
+            throw failure
         } catch (failure: Exception) {
             return CandidateValidationResult.Failure(
                 CandidateValidationError.RetrieverFailure(failure::class.java.simpleName),
@@ -121,6 +136,8 @@ class CandidateValidationService(
             decider.decide(snapshot)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: AutomaticMemoryModelFailure) {
+            throw failure
         } catch (failure: Exception) {
             return CandidateValidationResult.Failure(
                 CandidateValidationError.ValidatorFailure(failure::class.java.simpleName),
@@ -160,6 +177,14 @@ class CandidateValidationService(
                 if (grounding.hasActiveSuppressionInCurrentTransaction(currentContext)) {
                     requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(input.candidateId))
                     return@withTransaction CandidateValidationResult.SuppressedCandidateDiscarded(input.candidateId)
+                }
+                val admittedMemoryIds = grounding.admittedMemoryIdsInCurrentTransaction(currentContext)
+                if (admittedMemoryIds.isNotEmpty()) {
+                    requireWriteSuccess(memoryTransactions.consumeCandidateInCurrentTransaction(input.candidateId))
+                    return@withTransaction CandidateValidationResult.AlreadyAdmittedCandidateDiscarded(
+                        input.candidateId,
+                        admittedMemoryIds,
+                    )
                 }
                 val currentMemories = try {
                     grounding.hydrateMemoriesInCurrentTransaction(retrieval.memoryIds)
@@ -670,6 +695,7 @@ class CandidateValidationService(
 
     private sealed interface InitialRead {
         data class Ready(val context: GroundedCandidateValidationContext) : InitialRead
+        data class AlreadyAdmitted(val memoryIds: List<String>) : InitialRead
         data object Suppressed : InitialRead
     }
 

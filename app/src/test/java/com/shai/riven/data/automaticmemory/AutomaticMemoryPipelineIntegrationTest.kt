@@ -20,7 +20,7 @@ import com.shai.riven.data.conversation.NewTimelineMessageInput
 import com.shai.riven.data.conversation.TimelineReadResult
 import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
-import com.shai.riven.data.memory.sourceExperienceSuppressionHash
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.intent.ManualDeleteMemoryInput
 import com.shai.riven.data.memory.intent.ManualForgetMemoryInput
 import com.shai.riven.data.memory.intent.ManualMemoryIntentResult
@@ -28,6 +28,7 @@ import com.shai.riven.data.memory.intent.ManualMemoryIntentService
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
 import com.shai.riven.data.persistence.model.AttentionOutcome
+import com.shai.riven.data.persistence.model.AutomaticMemoryJobStage
 import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ConversationRunState
@@ -53,6 +54,7 @@ import com.shai.riven.data.validation.CandidateValidationOutcome
 import com.shai.riven.data.validation.CandidateValidationSnapshot
 import com.shai.riven.data.validation.ValidationAdmissionMetadata
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -143,6 +145,96 @@ class AutomaticMemoryPipelineIntegrationTest {
     }
 
     @Test
+    fun invalidProviderCredentialBlocksWithoutConsumingAttemptAndRecoversAfterReplacement() = runBlocking {
+        val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
+        queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+        val invalidCredentialModel = object : AutomaticMemoryModel by model {
+            override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal {
+                throw AutomaticMemoryModelFailure(
+                    "INVALID_CREDENTIAL",
+                    retryable = false,
+                    blocked = true,
+                )
+            }
+        }
+        val blockedRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory {
+                AutomaticMemoryModelFactoryResult.Ready(invalidCredentialModel)
+            },
+        )
+
+        val blocked = blockedRunner.run(jobId)
+        val blockedJob = checkNotNull(database.automaticMemoryDao().job(jobId))
+
+        assertEquals(AutomaticMemoryJobRunResult.Blocked(jobId, "INVALID_CREDENTIAL"), blocked)
+        assertEquals(AutomaticMemoryJobState.PENDING, blockedJob.state)
+        assertEquals(0, blockedJob.attemptCount)
+        assertEquals("INVALID_CREDENTIAL", blockedJob.lastErrorCode)
+        assertTrue(runner.run(jobId) is AutomaticMemoryJobRunResult.Succeeded)
+        assertEquals(1, database.memoryDao().memoryCount())
+    }
+
+    @Test
+    fun permanentInputLimitFailsOnceWithoutBurningRetryBudget() = runBlocking {
+        val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
+        queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+        var calls = 0
+        val oversizedInputModel = object : AutomaticMemoryModel by model {
+            override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal {
+                calls += 1
+                throw AutomaticMemoryModelFailure("INPUT_LIMIT", retryable = false)
+            }
+        }
+        val failingRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory {
+                AutomaticMemoryModelFactoryResult.Ready(oversizedInputModel)
+            },
+        )
+
+        val failed = failingRunner.run(jobId)
+
+        assertEquals(AutomaticMemoryJobRunResult.PermanentlyFailed(jobId, "INPUT_LIMIT"), failed)
+        assertTrue(failingRunner.run(jobId) is AutomaticMemoryJobRunResult.NoOp)
+        assertEquals(1, calls)
+        assertEquals(1, database.automaticMemoryDao().job(jobId)?.attemptCount)
+    }
+
+    @Test
+    fun typedCredentialFailureFromValidationRemainsRecoverableAtValidationStage() = runBlocking {
+        val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
+        queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(turn.userMessageId)).id
+        val validationBlockedModel = object : AutomaticMemoryModel by model {
+            override suspend fun decide(snapshot: CandidateValidationSnapshot): CandidateValidationDecision {
+                throw AutomaticMemoryModelFailure(
+                    "INVALID_CREDENTIAL",
+                    retryable = false,
+                    blocked = true,
+                )
+            }
+        }
+        val blockedRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory {
+                AutomaticMemoryModelFactoryResult.Ready(validationBlockedModel)
+            },
+        )
+
+        val blocked = blockedRunner.run(jobId)
+        val checkpoint = checkNotNull(database.automaticMemoryDao().job(jobId))
+
+        assertEquals(AutomaticMemoryJobRunResult.Blocked(jobId, "INVALID_CREDENTIAL"), blocked)
+        assertEquals(AutomaticMemoryJobStage.VALIDATION, checkpoint.nextStage)
+        assertEquals(0, checkpoint.attemptCount)
+        assertTrue(runner.run(jobId) is AutomaticMemoryJobRunResult.Succeeded)
+        assertEquals(1, database.memoryDao().memoryCount())
+    }
+
+    @Test
     fun attemptBudgetFailsBeforeAnotherProviderCall() = runBlocking {
         val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
         queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
@@ -205,6 +297,52 @@ class AutomaticMemoryPipelineIntegrationTest {
     }
 
     @Test
+    fun refreshIntentSurvivesInterruptionImmediatelyAfterClaim() = runBlocking {
+        model.deferSardinesUntilKeepIt = true
+        val sourceTurn = appendSuccessfulTurn("I love sardines.", "Do you want that remembered?")
+        enqueueAndRun(sourceTurn)
+        assertEquals(0, database.memoryDao().memoryCount())
+
+        val clarification = appendSuccessfulTurn(
+            "Keep it as a standing preference.",
+            "Understood.",
+        )
+        queue.ensureForSucceededRun(clarification.runId, clarification.finalRevision, now())
+        val jobId = checkNotNull(database.automaticMemoryDao().jobForMessage(sourceTurn.userMessageId)).id
+        assertEquals(
+            AutomaticMemoryJobStage.REFRESH_ATTENTION,
+            database.automaticMemoryDao().job(jobId)?.nextStage,
+        )
+
+        val analysesBeforeInterruption = model.sardineAnalysisCalls
+        model.cancelNextSardineAnalysis = true
+        try {
+            runner.run(jobId)
+            throw AssertionError("Expected the refresh analysis to be interrupted")
+        } catch (_: CancellationException) {
+            // Simulates process loss after the durable job was claimed and its display error cleared.
+        }
+
+        val interrupted = checkNotNull(database.automaticMemoryDao().job(jobId))
+        assertEquals(AutomaticMemoryJobState.RUNNING, interrupted.state)
+        assertEquals(AutomaticMemoryJobStage.REFRESH_ATTENTION, interrupted.nextStage)
+        assertEquals(null, interrupted.lastErrorCode)
+        assertEquals(analysesBeforeInterruption + 1, model.sardineAnalysisCalls)
+
+        val recoveryRunner = AutomaticMemoryJobRunner(
+            database = database,
+            modelFactory = AutomaticMemoryModelFactory { AutomaticMemoryModelFactoryResult.Ready(model) },
+            clock = { Long.MAX_VALUE / 4 },
+            runningLeaseMs = 1L,
+        )
+        val recovered = recoveryRunner.run(jobId)
+
+        assertTrue(recovered is AutomaticMemoryJobRunResult.Succeeded)
+        assertEquals(analysesBeforeInterruption + 2, model.sardineAnalysisCalls)
+        assertEquals(listOf("Shai loves sardines."), database.memoryDao().recentMemories(10).map { it.meaning })
+    }
+
+    @Test
     fun reconciliationSkipsOlderExcludedSourcesInsteadOfStarvingAvailableRun() = runBlocking {
         val turns = (0..25).map { index ->
             appendSuccessfulTurn("Historical statement $index", "Historical response $index")
@@ -261,14 +399,16 @@ class AutomaticMemoryPipelineIntegrationTest {
         val memories = database.memoryDao().recentMemories(10)
         val sardineMemory = memories.single { it.meaning.contains("sardines") }
         val teaMemory = memories.single { it.meaning.contains("oolong") }
+        val sardineEvidence = database.memoryDao().evidenceForMemory(sardineMemory.id).single()
+        val teaEvidence = database.memoryDao().evidenceForMemory(teaMemory.id).single()
 
         val manual = ManualMemoryIntentService(database, scheduler)
         assertTrue(manual.forget(ManualForgetMemoryInput(sardineMemory.id, now())) is ManualMemoryIntentResult.Forgotten)
         assertTrue(database.maintenanceDao().suppressionTombstone(
-            sourceExperienceSuppressionHash(experienceFor(sardines.userMessageId)),
+            sourceClaimSuppressionHash(sardineEvidence.experienceId, sardineEvidence.lineageKey),
         )?.isActive == true)
         assertEquals(null, database.maintenanceDao().suppressionTombstone(
-            sourceExperienceSuppressionHash(experienceFor(tea.userMessageId)),
+            sourceClaimSuppressionHash(teaEvidence.experienceId, teaEvidence.lineageKey),
         ))
         assertTrue(manual.delete(ManualDeleteMemoryInput(teaMemory.id, now())) is ManualMemoryIntentResult.Deleted)
 
@@ -287,6 +427,115 @@ class AutomaticMemoryPipelineIntegrationTest {
         val result = recall.retrieve(ConversationalMemoryQuery("sardines oolong", now()))
         recall.close()
         assertTrue(result.memories.isEmpty())
+    }
+
+    @Test
+    fun admittedSiblingDoesNotDuplicateOrBlockDeferredSiblingReprocessing() = runBlocking {
+        model.twoFactShortWindow = true
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines, and my dog's name is Pixel.",
+            "Two separate facts; Pixel may need clarification.",
+        )
+        enqueueAndRun(sourceTurn)
+        assertEquals(listOf("Shai loves sardines."), database.memoryDao().recentMemories(10).map { it.meaning })
+
+        val clarification = appendSuccessfulTurn(
+            "Pixel is the permanent name; keep that as an ongoing fact.",
+            "Understood.",
+        )
+        val queued = queue.ensureForSucceededRun(clarification.runId, clarification.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        val results = queued.jobIds.map { runner.run(it) }
+
+        assertTrue(results.all { it is AutomaticMemoryJobRunResult.Succeeded })
+        val memories = database.memoryDao().recentMemories(10)
+        assertEquals(1, memories.count { it.meaning.contains("sardine", ignoreCase = true) })
+        val pixel = memories.single { it.meaning == "Shai's dog is named Pixel." }
+        assertEquals(MemoryCertainty.CERTAIN, pixel.certainty)
+        assertEquals(SensitivityLevel.STANDARD, pixel.sensitivity)
+        assertTrue(
+            database.memoryDao().candidateSeedEvidenceForExperience(experienceFor(sourceTurn.userMessageId)).isEmpty(),
+        )
+    }
+
+    @Test
+    fun forgottenClaimParaphraseIsSuppressedWhileDeferredSiblingFromSameMessageIsAdmitted() = runBlocking {
+        model.twoFactShortWindow = true
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines, and my dog's name is Pixel.",
+            "Two separate facts; I will keep their meanings distinct.",
+        )
+        enqueueAndRun(sourceTurn)
+        val sardineMemory = database.memoryDao().recentMemories(10).single()
+        assertTrue(sardineMemory.meaning.contains("sardines"))
+        val deferred = database.memoryDao()
+            .candidateSeedEvidenceForExperience(experienceFor(sourceTurn.userMessageId))
+            .mapNotNull { database.memoryDao().candidateMemory(it.candidateMemoryId) }
+            .single()
+        assertEquals(CandidateMemoryState.PENDING_CONTEXT, deferred.state)
+        assertTrue(deferred.proposedMeaning.contains("Pixel"))
+
+        val manual = ManualMemoryIntentService(database, scheduler)
+        assertTrue(
+            manual.forget(ManualForgetMemoryInput(sardineMemory.id, now())) is
+                ManualMemoryIntentResult.Forgotten,
+        )
+
+        val clarification = appendSuccessfulTurn(
+            "Pixel is the permanent name; keep that as an ongoing fact.",
+            "Understood.",
+        )
+        val queued = queue.ensureForSucceededRun(clarification.runId, clarification.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        val results = queued.jobIds.map { runner.run(it) }
+
+        assertTrue(results.all { it is AutomaticMemoryJobRunResult.Succeeded })
+        val retained = database.memoryDao().recentMemories(10)
+        val pixel = retained.single { it.meaning == "Shai's dog is named Pixel." }
+        assertEquals(MemoryCertainty.CERTAIN, pixel.certainty)
+        assertEquals(SensitivityLevel.STANDARD, pixel.sensitivity)
+        assertEquals(1, retained.count { it.meaning.contains("sardine", ignoreCase = true) })
+
+        val replay = CandidateExtractionService(database, model).extract(
+            ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
+        ) as CandidateExtractionResult.Extracted
+        assertEquals(1, replay.suppressedLineageCount)
+        assertTrue(replay.createdCandidateIds.isEmpty())
+        assertEquals(
+            listOf(pixel.id),
+            replay.existingMemoryIds,
+        )
+    }
+
+    @Test
+    fun deletedClaimParaphraseIsSuppressedWithoutSuppressingSiblingFromSameMessage() = runBlocking {
+        model.twoFactShortWindow = true
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines, and my dog's name is Pixel.",
+            "Pixel is the permanent name, and I will keep both facts distinct.",
+        )
+        enqueueAndRun(sourceTurn)
+        val initial = database.memoryDao().recentMemories(10)
+        val sardineMemory = initial.single { it.meaning.contains("sardine", ignoreCase = true) }
+        val pixelMemory = initial.single { it.meaning.contains("Pixel") }
+
+        val manual = ManualMemoryIntentService(database, scheduler)
+        assertTrue(
+            manual.delete(ManualDeleteMemoryInput(sardineMemory.id, now())) is
+                ManualMemoryIntentResult.Deleted,
+        )
+        assertEquals(null, database.memoryDao().memory(sardineMemory.id))
+        assertNotNull(database.memoryDao().memory(pixelMemory.id))
+
+        val replay = CandidateExtractionService(database, model).extract(
+            ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
+        ) as CandidateExtractionResult.Extracted
+
+        assertEquals(1, replay.suppressedLineageCount)
+        assertTrue(replay.createdCandidateIds.isEmpty())
+        assertEquals(listOf(pixelMemory.id), replay.existingMemoryIds)
+        assertFalse(database.memoryDao().recentMemories(10).any { it.meaning.contains("sardine", ignoreCase = true) })
+        assertNotNull(database.memoryDao().memory(pixelMemory.id))
     }
 
     @Test
@@ -504,11 +753,19 @@ class AutomaticMemoryPipelineIntegrationTest {
         var paraphraseKnownFacts = false
         var forceSingleLineageSelfDevelopment = false
         var deferSardinesUntilKeepIt = false
+        var twoFactShortWindow = false
+        var cancelNextSardineAnalysis = false
+        var sardineAnalysisCalls = 0
 
         override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal {
             totalCalls += 1
             val source = snapshot.sourceContent.orEmpty()
             if (source.contains("sardines", ignoreCase = true)) {
+                sardineAnalysisCalls += 1
+                if (cancelNextSardineAnalysis) {
+                    cancelNextSardineAnalysis = false
+                    throw CancellationException("simulated interruption after claim")
+                }
                 sawCompletedTurnHindsight = snapshot.followingActiveContext.isNotEmpty()
                 if (
                     deferSardinesUntilKeepIt &&
@@ -519,6 +776,7 @@ class AutomaticMemoryPipelineIntegrationTest {
             }
             val signal = when {
                 source.startsWith("Correction:") -> PositiveAttentionSignal.CORRECTION_OR_REVISION
+                source.contains("dog's name is Pixel", ignoreCase = true) -> PositiveAttentionSignal.PREFERENCE
                 source.contains("sardines", ignoreCase = true) ||
                     source.contains("favorite tea", ignoreCase = true) ||
                     source.contains("grew up", ignoreCase = true) -> PositiveAttentionSignal.PREFERENCE
@@ -538,6 +796,37 @@ class AutomaticMemoryPipelineIntegrationTest {
         ): CandidateExtractionProposal {
             totalCalls += 1
             val source = snapshot.sourceContent.orEmpty()
+            if (twoFactShortWindow && source.contains("dog's name is Pixel", ignoreCase = true)) {
+                val resolved = snapshot.followingActiveContext.any {
+                    it.content.contains("permanent name", ignoreCase = true)
+                }
+                return CandidateExtractionProposal(
+                    listOf(
+                        CandidateMemoryProposal(
+                            if (resolved) "Sardines are a food Shai loves." else "Shai loves sardines.",
+                            MemoryKind.SEMANTIC,
+                            MemoryScope.SHAI,
+                            EpistemicBasis.DIRECT_USER_STATEMENT,
+                            MemoryCertainty.CERTAIN,
+                            CandidateMemoryState.READY_FOR_VALIDATION,
+                            SensitivityLevel.STANDARD,
+                        ),
+                        CandidateMemoryProposal(
+                            "Shai's dog is named Pixel.",
+                            MemoryKind.SEMANTIC,
+                            MemoryScope.SHAI,
+                            EpistemicBasis.DIRECT_USER_STATEMENT,
+                            if (resolved) MemoryCertainty.CERTAIN else MemoryCertainty.UNCERTAIN,
+                            if (resolved) {
+                                CandidateMemoryState.READY_FOR_VALIDATION
+                            } else {
+                                CandidateMemoryState.PENDING_CONTEXT
+                            },
+                            if (resolved) SensitivityLevel.STANDARD else SensitivityLevel.SENSITIVE,
+                        ),
+                    ),
+                )
+            }
             val proposal = when {
                 source.contains("sardines", ignoreCase = true) -> CandidateMemoryProposal(
                     if (paraphraseKnownFacts) "Sardines are a food Shai loves." else "Shai loves sardines.",

@@ -2,6 +2,7 @@ package com.shai.riven.data.attention
 
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
+import com.shai.riven.data.automaticmemory.AutomaticMemoryModelFailure
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
@@ -30,6 +31,8 @@ class ImmediateAttentionService(
             analyzer.analyze(snapshot)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: AutomaticMemoryModelFailure) {
+            throw failure
         } catch (failure: Exception) {
             return AssessImmediateAttentionResult.Failure(
                 ImmediateAttentionError.AnalyzerFailure(failure::class.java.simpleName),

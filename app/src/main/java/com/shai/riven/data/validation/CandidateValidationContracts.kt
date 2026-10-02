@@ -194,6 +194,10 @@ sealed interface CandidateValidationResult {
     ) : CandidateValidationResult
 
     data class SuppressedCandidateDiscarded(val candidateId: String) : CandidateValidationResult
+    data class AlreadyAdmittedCandidateDiscarded(
+        val candidateId: String,
+        val memoryIds: List<String>,
+    ) : CandidateValidationResult
     data class Failure(val error: CandidateValidationError) : CandidateValidationResult
 }
 

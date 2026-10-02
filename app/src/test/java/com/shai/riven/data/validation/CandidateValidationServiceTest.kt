@@ -121,6 +121,30 @@ class CandidateValidationServiceTest {
         assertEquals(LINEAGE, database.memoryDao().evidenceForMemory(NEW_MEMORY).single().lineageKey)
     }
 
+    @Test
+    fun acceptNewReplayWithSameStableSourceClaimIsDiscardedBeforeModelDecision() = runBlocking {
+        val admittedLineage = "AUTO_CANDIDATE_V2:0:${"a".repeat(64)}"
+        val replayLineage = "AUTO_CANDIDATE_V2:0:${"b".repeat(64)}"
+        database.openHelper.writableDatabase.execSQL(
+            "UPDATE candidate_memory_evidence SET lineage_key = ? WHERE candidate_memory_id = ?",
+            arrayOf(replayLineage, CANDIDATE),
+        )
+        insertTargetMemory(
+            evidenceLineage = admittedLineage,
+            evidenceExperienceId = SEED,
+        )
+
+        val result = validate()
+
+        assertEquals(
+            CandidateValidationResult.AlreadyAdmittedCandidateDiscarded(CANDIDATE, listOf(TARGET)),
+            result,
+        )
+        assertNull(database.memoryDao().candidateMemory(CANDIDATE))
+        assertNull(decider.snapshot)
+        assertEquals(1, database.memoryDao().memoryCount())
+    }
+
     @Test // 2
     fun acceptNewCopiesExactCandidateMeaning() = runBlocking {
         val exact = "  exact meaning is not trimmed or rewritten  "
@@ -256,8 +280,11 @@ class CandidateValidationServiceTest {
         reinforceDecision()
         validate()
         insertCandidate("candidate-2", SEED, LINEAGE)
-        val failure = error(validate("candidate-2"))
-        assertTrue(failure is CandidateValidationError.NoIndependentEvidence)
+        val replay = validate("candidate-2")
+        assertEquals(
+            CandidateValidationResult.AlreadyAdmittedCandidateDiscarded("candidate-2", listOf(TARGET)),
+            replay,
+        )
     }
 
     @Test // 19
@@ -1387,9 +1414,10 @@ class CandidateValidationServiceTest {
         truth: MemoryTruthState = MemoryTruthState.SUPPORTED,
         lifecycle: MemoryLifecycleState = MemoryLifecycleState.VALIDATED,
         temporal: TemporalState = TemporalState.CURRENT,
+        evidenceExperienceId: String? = null,
     ) {
-        val experienceId = "existing-exp-$id"
-        insertExperience(experienceId)
+        val experienceId = evidenceExperienceId ?: "existing-exp-$id"
+        if (evidenceExperienceId == null) insertExperience(experienceId)
         database.memoryDao().insertMemory(
             MemoryEntity(
                 id = id,

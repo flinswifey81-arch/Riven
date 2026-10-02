@@ -106,7 +106,9 @@ enum class AutomaticMemoryJobState {
 
 enum class AutomaticMemoryJobStage {
     ATTENTION,
+    REFRESH_ATTENTION,
     EXTRACTION,
+    REFRESH_EXTRACTION,
     VALIDATION,
     COMPLETE,
 }

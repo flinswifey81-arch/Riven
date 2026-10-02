@@ -67,6 +67,7 @@ sealed interface CandidateExtractionResult {
         val attentionRevision: Long,
         val createdCandidateIds: List<String>,
         val existingCandidateIds: List<String>,
+        val existingMemoryIds: List<String>,
         val suppressedLineageCount: Int,
     ) : CandidateExtractionResult
 

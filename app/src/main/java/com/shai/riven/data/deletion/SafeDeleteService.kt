@@ -17,7 +17,7 @@ import com.shai.riven.data.persistence.model.OpenLoopState
 import com.shai.riven.data.persistence.model.RepairJobState
 import com.shai.riven.data.persistence.model.RepairJobType
 import com.shai.riven.data.persistence.model.SuppressionKind
-import com.shai.riven.data.memory.sourceExperienceSuppressionHash
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.memory.sourceLineageHash
 import com.shai.riven.data.validation.ValidationRecallCorpusChange
 import com.shai.riven.data.validation.requireTopLevelValidationRecallMutation
@@ -393,7 +393,7 @@ class SafeDeleteService(
         val relatedOpenLoops = dao.openLoopsForMemory(memoryId)
         retainedEvidence.forEach { evidence ->
             accumulator.tombstones += ensureDeleteTombstone(
-                sourceExperienceHash = sourceExperienceSuppressionHash(evidence.experienceId),
+                sourceClaimHash = sourceClaimSuppressionHash(evidence.experienceId, evidence.lineageKey),
                 legacyLineageHash = sourceLineageHash(evidence.experienceId, evidence.lineageKey),
                 occurredAt = accumulator.occurredAt,
             )
@@ -504,17 +504,17 @@ class SafeDeleteService(
     }
 
     private fun ensureDeleteTombstone(
-        sourceExperienceHash: String,
+        sourceClaimHash: String,
         legacyLineageHash: String,
         occurredAt: Long,
     ): SuppressionTombstoneReference {
-        val existing = dao.suppressionTombstone(sourceExperienceHash)
+        val existing = dao.suppressionTombstone(sourceClaimHash)
             ?: dao.suppressionTombstone(legacyLineageHash)
         val tombstone = if (existing == null) {
             SuppressionTombstoneEntity(
                 id = idGenerator.nextId(),
                 kind = SuppressionKind.DELETE,
-                sourceLineageHash = sourceExperienceHash,
+                sourceLineageHash = sourceClaimHash,
                 isActive = true,
                 createdAt = occurredAt,
                 expiresAt = null,
@@ -523,7 +523,7 @@ class SafeDeleteService(
         } else {
             existing.copy(
                 kind = SuppressionKind.DELETE,
-                sourceLineageHash = sourceExperienceHash,
+                sourceLineageHash = sourceClaimHash,
                 isActive = true,
                 expiresAt = null,
             ).also { updated ->

@@ -16,6 +16,7 @@ import com.shai.riven.data.experience.ConversationExperienceLookupResult
 import com.shai.riven.data.experience.ConversationExperienceService
 import com.shai.riven.data.memory.MAX_CANDIDATE_MEANING_CHARS
 import com.shai.riven.data.memory.sourceLineageHash
+import com.shai.riven.data.memory.sourceClaimSuppressionHash
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
@@ -402,8 +403,18 @@ class CandidateExtractionServiceTest {
     @Test
     fun shortWindowReassessmentPromotesMatchingDeferredCandidate() = runBlocking {
         forwardExperience()
-        val ready = proposal("Context now resolves the claim", state = CandidateMemoryState.READY_FOR_VALIDATION)
-        insertExistingCandidateForLineage(ready, state = CandidateMemoryState.PENDING_CONTEXT)
+        val pending = proposal(
+            "Context now resolves the claim",
+            certainty = MemoryCertainty.UNCERTAIN,
+            state = CandidateMemoryState.PENDING_CONTEXT,
+            sensitivity = SensitivityLevel.HIGHLY_SENSITIVE,
+        )
+        val ready = pending.copy(
+            proposedCertainty = MemoryCertainty.CERTAIN,
+            proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
+            proposedSensitivity = SensitivityLevel.SENSITIVE,
+        )
+        insertExistingCandidateForLineage(ready, stored = pending)
         extractor.proposal = extraction(ready)
 
         val result = extracted(extract(extractedAt = 100))
@@ -411,6 +422,8 @@ class CandidateExtractionServiceTest {
         assertEquals(listOf("existing"), result.existingCandidateIds)
         val promoted = checkNotNull(database.memoryDao().candidateMemory("existing"))
         assertEquals(CandidateMemoryState.READY_FOR_VALIDATION, promoted.state)
+        assertEquals(MemoryCertainty.CERTAIN, promoted.proposedCertainty)
+        assertEquals(SensitivityLevel.SENSITIVE, promoted.sensitivity)
         assertEquals(100, promoted.updatedAt)
     }
 
@@ -421,7 +434,8 @@ class CandidateExtractionServiceTest {
         val ids = extracted(extract()).createdCandidateIds
         val lineages = ids.map { database.memoryDao().candidateEvidence(it).single().lineageKey }
         assertNotEquals(lineages[0], lineages[1])
-        assertTrue(lineages.all { it.matches(Regex("AUTO_CANDIDATE_V1:[0-9a-f]{64}")) })
+        assertEquals(listOf("0", "1"), lineages.map { it.split(':')[1] })
+        assertTrue(lineages.all { it.matches(Regex("AUTO_CANDIDATE_V2:\\d+:[0-9a-f]{64}")) })
     }
 
     @Test
@@ -435,6 +449,21 @@ class CandidateExtractionServiceTest {
 
         assertEquals(CandidateLineageConflictReason.PROPOSAL_MISMATCH, error.reason)
         assertEquals(1, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun sameSourceClaimSlotWithChangedMeaningFailsClosedWithoutCreatingDuplicate() = runBlocking {
+        forwardExperience()
+        val original = proposal("Original pending wording", state = CandidateMemoryState.PENDING_CONTEXT)
+        val paraphrase = original.copy(proposedMeaning = "Paraphrased pending wording")
+        insertExistingCandidateForLineage(original)
+        extractor.proposal = extraction(paraphrase)
+
+        val error = failure(extract()) as CandidateExtractionError.CandidateLineageConflict
+
+        assertEquals(CandidateLineageConflictReason.PROPOSAL_MISMATCH, error.reason)
+        assertEquals(1, database.memoryDao().candidateMemoryCount())
+        assertEquals("Original pending wording", database.memoryDao().candidateMemory("existing")?.proposedMeaning)
     }
 
     @Test
@@ -492,6 +521,31 @@ class CandidateExtractionServiceTest {
     }
 
     @Test
+    fun claimSlotTombstoneBlocksParaphraseWithoutBlockingSecondClaim() = runBlocking {
+        forwardExperience()
+        insertTombstone(
+            "experience",
+            proposal("Original forgotten phrasing"),
+            SuppressionKind.FORGET,
+            isActive = true,
+            claimOrdinal = 0,
+        )
+        extractor.proposal = extraction(
+            proposal("Paraphrased forgotten meaning"),
+            proposal("Unrelated fact from the same source", kind = MemoryKind.EPISODIC),
+        )
+
+        val result = extracted(extract())
+
+        assertEquals(1, result.suppressedLineageCount)
+        assertEquals(1, result.createdCandidateIds.size)
+        assertEquals(
+            "Unrelated fact from the same source",
+            database.memoryDao().candidateMemory(result.createdCandidateIds.single())?.proposedMeaning,
+        )
+    }
+
+    @Test
     fun independentExperienceMayRelearnSameHumanReadableMeaning() = runBlocking {
         val meaning = "Shai likes the same thing."
         forwardExperience("experience-a")
@@ -529,6 +583,26 @@ class CandidateExtractionServiceTest {
         assertEquals(expected, sourceLineageHash("experience", "AUTO_CANDIDATE_V1:abc"))
         assertEquals(64, expected.length)
         assertEquals(expected.lowercase(), expected)
+    }
+
+    @Test
+    fun claimSuppressionHashIgnoresSemanticDigestButKeepsSourceSlotNarrow() {
+        val original = sourceClaimSuppressionHash(
+            "experience",
+            "AUTO_CANDIDATE_V2:0:${"a".repeat(64)}",
+        )
+        val paraphrase = sourceClaimSuppressionHash(
+            "experience",
+            "AUTO_CANDIDATE_V2:0:${"b".repeat(64)}",
+        )
+        val sibling = sourceClaimSuppressionHash(
+            "experience",
+            "AUTO_CANDIDATE_V2:1:${"b".repeat(64)}",
+        )
+
+        assertEquals(original, paraphrase)
+        assertNotEquals(original, sibling)
+        assertEquals(64, original.length)
     }
 
     @Test
@@ -866,7 +940,7 @@ class CandidateExtractionServiceTest {
             as ReadCandidatesForExperienceResult.Candidates
         assertEquals(listOf(id), result.candidates.map { it.candidateId })
         assertEquals("Retained meaning", result.candidates.single().proposedMeaning)
-        assertTrue(result.candidates.single().lineageKey.startsWith("AUTO_CANDIDATE_V1:"))
+        assertTrue(result.candidates.single().lineageKey.startsWith("AUTO_CANDIDATE_V2:0:"))
     }
 
     @Test
@@ -1061,12 +1135,13 @@ class CandidateExtractionServiceTest {
         candidate: CandidateMemoryProposal,
         kind: SuppressionKind,
         isActive: Boolean,
+        claimOrdinal: Int = 0,
     ): SuppressionTombstoneEntity {
-        val lineage = candidateClaimLineageKey(experienceId, candidate)
+        val lineage = candidateClaimLineageKey(experienceId, candidate, claimOrdinal)
         val row = SuppressionTombstoneEntity(
             id = "tombstone-${rowCount("suppression_tombstones") + 1}",
             kind = kind,
-            sourceLineageHash = sourceLineageHash(experienceId, lineage),
+            sourceLineageHash = sourceClaimSuppressionHash(experienceId, lineage),
             isActive = isActive,
             createdAt = 1,
             formatVersion = 1,
@@ -1087,7 +1162,7 @@ class CandidateExtractionServiceTest {
                 experienceId = "experience",
                 evidenceOrder = 0,
                 role = CandidateEvidenceRole.SEED,
-                lineageKey = candidateClaimLineageKey("experience", requested),
+                lineageKey = candidateClaimLineageKey("experience", requested, 0),
                 createdAt = 1,
             ),
         )

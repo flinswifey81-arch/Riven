@@ -180,6 +180,9 @@ interface MemoryDao {
     @Query("SELECT * FROM memory_evidence WHERE memory_id = :memoryId ORDER BY created_at, experience_id")
     fun evidenceForMemory(memoryId: String): List<MemoryEvidenceEntity>
 
+    @Query("SELECT * FROM memory_evidence WHERE experience_id = :experienceId ORDER BY memory_id, created_at")
+    fun memoryEvidenceForExperience(experienceId: String): List<MemoryEvidenceEntity>
+
     @Query("SELECT DISTINCT memory_id FROM memory_evidence WHERE experience_id = :experienceId ORDER BY memory_id")
     fun memoryIdsForExperience(experienceId: String): List<String>
 

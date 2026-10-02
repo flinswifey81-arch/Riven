@@ -47,6 +47,7 @@ sealed interface AutomaticMemoryModelFactoryResult {
 internal class AutomaticMemoryModelFailure(
     val errorCode: String,
     val retryable: Boolean,
+    val blocked: Boolean = false,
 ) : RuntimeException(errorCode)
 
 fun interface AutomaticMemoryModelFactory {
@@ -117,20 +118,33 @@ class AutomaticMemoryJobRunner(
         val validation = CandidateValidationService(database, decider = model)
         try {
             var stage = claimed.nextStage
-            if (stage == AutomaticMemoryJobStage.ATTENTION) {
-                val result = ensureAttention(claimed, attention)
+            if (
+                stage == AutomaticMemoryJobStage.ATTENTION ||
+                stage == AutomaticMemoryJobStage.REFRESH_ATTENTION
+            ) {
+                val forceRefresh = stage == AutomaticMemoryJobStage.REFRESH_ATTENTION
+                val result = ensureAttention(claimed, attention, forceRefresh)
                 if (result != null) return finishStageFailure(claimed, result)
-                if (!advance(claimed, stage, AutomaticMemoryJobStage.EXTRACTION)) {
+                val nextStage = if (forceRefresh) {
+                    AutomaticMemoryJobStage.REFRESH_EXTRACTION
+                } else {
+                    AutomaticMemoryJobStage.EXTRACTION
+                }
+                if (!advance(claimed, stage, nextStage)) {
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }
-                stage = AutomaticMemoryJobStage.EXTRACTION
+                stage = nextStage
             }
-            if (stage == AutomaticMemoryJobStage.EXTRACTION) {
+            if (
+                stage == AutomaticMemoryJobStage.EXTRACTION ||
+                stage == AutomaticMemoryJobStage.REFRESH_EXTRACTION
+            ) {
+                val forceRefresh = stage == AutomaticMemoryJobStage.REFRESH_EXTRACTION
                 val outcome = attention.readAssessment(claimed.sourceExperienceId)
                 val assessment = (outcome as? ReadAttentionAssessmentResult.Assessment)?.assessment
                     ?: return fail(claimed, "ATTENTION_CHECK_FAILED", retryable = true)
                 if (assessment.outcome == AttentionOutcome.FORWARD_FOR_INTERPRETATION) {
-                    val result = ensureExtraction(claimed, extraction)
+                    val result = ensureExtraction(claimed, extraction, forceRefresh)
                     if (result != null) return finishStageFailure(claimed, result)
                     if (!advance(claimed, stage, AutomaticMemoryJobStage.VALIDATION)) {
                         return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
@@ -156,7 +170,11 @@ class AutomaticMemoryJobRunner(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: AutomaticMemoryModelFailure) {
-            return fail(claimed, failure.errorCode, retryable = failure.retryable)
+            return if (failure.blocked) {
+                block(claimed, failure.errorCode)
+            } else {
+                fail(claimed, failure.errorCode, retryable = failure.retryable)
+            }
         } catch (failure: Exception) {
             return fail(
                 claimed,
@@ -171,10 +189,9 @@ class AutomaticMemoryJobRunner(
     private suspend fun ensureAttention(
         job: AutomaticMemoryJobEntity,
         service: ImmediateAttentionService,
+        forceRefresh: Boolean,
     ): StageFailure? = when (val existing = service.readAssessment(job.sourceExperienceId)) {
-        is ReadAttentionAssessmentResult.Assessment -> if (
-            job.lastErrorCode == AutomaticMemoryQueueService.SHORT_WINDOW_CONTEXT_CODE
-        ) {
+        is ReadAttentionAssessmentResult.Assessment -> if (forceRefresh) {
             assessAttention(job, service, existing.assessment.revision)
         } else {
             null
@@ -208,13 +225,14 @@ class AutomaticMemoryJobRunner(
     private suspend fun ensureExtraction(
         job: AutomaticMemoryJobEntity,
         service: CandidateExtractionService,
+        forceRefresh: Boolean,
     ): StageFailure? {
         val existing = service.readCandidatesSeededByExperience(job.sourceExperienceId)
         when (existing) {
             is ReadCandidatesForExperienceResult.Failure -> return existing.error.toStageFailure()
             is ReadCandidatesForExperienceResult.Candidates -> if (
                 existing.candidates.isNotEmpty() &&
-                job.lastErrorCode != AutomaticMemoryQueueService.SHORT_WINDOW_CONTEXT_CODE
+                !forceRefresh
             ) {
                 return null
             }
