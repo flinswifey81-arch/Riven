@@ -227,8 +227,7 @@ class CandidateExtractionService(
                 ),
             )
         }
-        val sourceClaimIds = candidateSourceClaims(snapshot.sourceContent)
-            .mapTo(mutableSetOf()) { it.id }
+        val sourceClaims = candidateSourceClaims(snapshot.sourceContent).associateBy { it.id }
         val firstIndexByClaim = mutableMapOf<String, Int>()
         return proposal.candidates.mapIndexed { index, candidate ->
             when {
@@ -256,10 +255,22 @@ class CandidateExtractionService(
                         InvalidCandidateProposalReason.MISSING_SOURCE_CLAIM_ID,
                     ),
                 )
-                candidate.sourceClaimId !in sourceClaimIds -> abort(
+                candidate.sourceClaimId !in sourceClaims -> abort(
                     CandidateExtractionError.InvalidCandidateProposal(
                         index,
                         InvalidCandidateProposalReason.UNKNOWN_SOURCE_CLAIM_ID,
+                    ),
+                )
+                candidate.sourceAnchor.text.isBlank() -> abort(
+                    CandidateExtractionError.InvalidCandidateProposal(
+                        index,
+                        InvalidCandidateProposalReason.MISSING_SOURCE_ANCHOR,
+                    ),
+                )
+                candidate.sourceAnchor.occurrence < 0 -> abort(
+                    CandidateExtractionError.InvalidCandidateProposal(
+                        index,
+                        InvalidCandidateProposalReason.INVALID_SOURCE_ANCHOR_OCCURRENCE,
                     ),
                 )
             }
@@ -268,7 +279,16 @@ class CandidateExtractionService(
             firstIndexByClaim.putIfAbsent(semanticClaimKey, index)?.let { firstIndex ->
                 abort(CandidateExtractionError.DuplicateCandidateProposal(firstIndex, index))
             }
-            val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate)
+            val sourceAnchor = resolveCandidateSourceAnchor(
+                checkNotNull(sourceClaims[candidate.sourceClaimId]),
+                candidate.sourceAnchor,
+            ) ?: abort(
+                CandidateExtractionError.InvalidCandidateProposal(
+                    index,
+                    InvalidCandidateProposalReason.SOURCE_ANCHOR_NOT_FOUND,
+                ),
+            )
+            val lineageKey = candidateClaimLineageKey(snapshot.experienceId, candidate, sourceAnchor)
             PreparedCandidate(index, candidate, lineageKey)
         }
     }

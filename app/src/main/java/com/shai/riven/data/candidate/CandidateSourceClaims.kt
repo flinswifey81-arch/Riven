@@ -8,6 +8,13 @@ package com.shai.riven.data.candidate
 internal data class CandidateSourceClaim(
     val id: String,
     val text: String,
+    val startOffset: Int,
+    val endOffsetExclusive: Int,
+)
+
+internal data class ResolvedCandidateSourceAnchor(
+    val startOffset: Int,
+    val endOffsetExclusive: Int,
 )
 
 internal const val SOURCE_CLAIM_ID_PREFIX = "SOURCE_CLAIM_V1:"
@@ -57,15 +64,34 @@ internal fun candidateSourceClaims(sourceContent: String?): List<CandidateSource
         CandidateSourceClaim(
             id = "$SOURCE_CLAIM_ID_PREFIX$ordinal",
             text = sourceContent.substring(range.first, range.last + 1),
+            startOffset = range.first,
+            endOffsetExclusive = range.last + 1,
         )
     }
 }
 
-internal fun sourceClaimOrdinal(sourceClaimId: String): Int? = SOURCE_CLAIM_ID_PATTERN
-    .matchEntire(sourceClaimId)
-    ?.groupValues
-    ?.get(1)
-    ?.toIntOrNull()
+internal fun resolveCandidateSourceAnchor(
+    sourceClaim: CandidateSourceClaim,
+    anchor: CandidateSourceAnchor,
+): ResolvedCandidateSourceAnchor? {
+    if (anchor.text.isBlank() || anchor.occurrence < 0) return null
+    var fromIndex = 0
+    var remainingOccurrence = anchor.occurrence
+    while (fromIndex <= sourceClaim.text.length - anchor.text.length) {
+        val localStart = sourceClaim.text.indexOf(anchor.text, startIndex = fromIndex)
+        if (localStart < 0) return null
+        if (remainingOccurrence == 0) {
+            val absoluteStart = sourceClaim.startOffset + localStart
+            return ResolvedCandidateSourceAnchor(
+                startOffset = absoluteStart,
+                endOffsetExclusive = absoluteStart + anchor.text.length,
+            )
+        }
+        remainingOccurrence -= 1
+        fromIndex = localStart + 1
+    }
+    return null
+}
 
 private fun startsCoordinatingClause(source: String, fromIndex: Int): Boolean {
     var index = fromIndex
@@ -78,4 +104,3 @@ private fun startsCoordinatingClause(source: String, fromIndex: Int): Boolean {
 
 private val SOURCE_SENTENCE_TERMINATORS = setOf('.', '!', '?')
 private val COORDINATING_CONJUNCTIONS = setOf("and", "but", "or", "yet", "so")
-private val SOURCE_CLAIM_ID_PATTERN = Regex("SOURCE_CLAIM_V1:(0|[1-9]\\d*)")

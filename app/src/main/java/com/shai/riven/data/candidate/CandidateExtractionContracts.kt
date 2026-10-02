@@ -43,6 +43,12 @@ data class CandidateMemoryProposal(
     val proposedState: CandidateMemoryState,
     val proposedSensitivity: SensitivityLevel,
     val sourceClaimId: String,
+    val sourceAnchor: CandidateSourceAnchor,
+)
+
+data class CandidateSourceAnchor(
+    val text: String,
+    val occurrence: Int,
 )
 
 data class CandidateExtractionProposal(
@@ -109,6 +115,9 @@ enum class InvalidCandidateProposalReason {
     DISALLOWED_STATE,
     MISSING_SOURCE_CLAIM_ID,
     UNKNOWN_SOURCE_CLAIM_ID,
+    MISSING_SOURCE_ANCHOR,
+    INVALID_SOURCE_ANCHOR_OCCURRENCE,
+    SOURCE_ANCHOR_NOT_FOUND,
 }
 
 enum class InvalidEpistemicBasisReason {

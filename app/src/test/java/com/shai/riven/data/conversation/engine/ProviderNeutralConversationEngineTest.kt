@@ -9,6 +9,7 @@ import com.shai.riven.data.candidate.CandidateExtractionService
 import com.shai.riven.data.candidate.CandidateIdGenerator
 import com.shai.riven.data.candidate.CandidateMemoryExtractor
 import com.shai.riven.data.candidate.CandidateMemoryProposal
+import com.shai.riven.data.candidate.CandidateSourceAnchor
 import com.shai.riven.data.candidate.candidateSourceClaims
 import com.shai.riven.data.candidate.ExtractCandidateMemoriesInput
 import com.shai.riven.data.context.ActiveConversationContextSource
@@ -1020,6 +1021,7 @@ class ProviderNeutralConversationEngineTest {
                             proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
                             proposedSensitivity = SensitivityLevel.STANDARD,
                             sourceClaimId = sourceClaims[0].id,
+                            sourceAnchor = CandidateSourceAnchor(sourceClaims[0].text, 0),
                         ),
                         CandidateMemoryProposal(
                             proposedMeaning = "Hello Riven chain delete marker",
@@ -1030,6 +1032,7 @@ class ProviderNeutralConversationEngineTest {
                             proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
                             proposedSensitivity = SensitivityLevel.STANDARD,
                             sourceClaimId = sourceClaims[1].id,
+                            sourceAnchor = CandidateSourceAnchor(sourceClaims[1].text, 0),
                         ),
                     ),
                 )

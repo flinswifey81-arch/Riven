@@ -9,6 +9,7 @@ import com.shai.riven.data.attention.PositiveAttentionSignal
 import com.shai.riven.data.candidate.CandidateExtractionProposal
 import com.shai.riven.data.candidate.CandidateExtractionSnapshot
 import com.shai.riven.data.candidate.CandidateMemoryProposal
+import com.shai.riven.data.candidate.CandidateSourceAnchor
 import com.shai.riven.data.candidate.candidateSourceClaims
 import com.shai.riven.data.memory.IntrinsicSignificanceInput
 import com.shai.riven.data.memory.MemoryEntityLinkInput
@@ -273,6 +274,8 @@ class OpenRouterAutomaticMemoryModel(
                 JSONObject()
                     .put("sourceClaimId", claim.id)
                     .put("text", claim.text)
+                    .put("startOffset", claim.startOffset)
+                    .put("endOffsetExclusive", claim.endOffsetExclusive)
             }))
             .put("sourceMessage", sourceMessage)
             .put("precedingContext", JSONArray(preceding))
@@ -389,6 +392,12 @@ class OpenRouterAutomaticMemoryModel(
                             proposedState = candidate.requireEnum("state", CandidateMemoryState::valueOf),
                             proposedSensitivity = candidate.requireEnum("sensitivity", SensitivityLevel::valueOf),
                             sourceClaimId = candidate.requireString("sourceClaimId"),
+                            sourceAnchor = candidate.requireObject("sourceAnchor").let { anchor ->
+                                CandidateSourceAnchor(
+                                    text = anchor.requireString("text"),
+                                    occurrence = anchor.requireNonNegativeInt("occurrence"),
+                                )
+                            },
                         ),
                     )
                 }
@@ -578,9 +587,13 @@ class OpenRouterAutomaticMemoryModel(
             SELF_DEVELOPMENT claim requires repeated independent evidence. Use completed-turn
             followingContext as short-window hindsight. sourceClaims contains server-issued opaque
             identifiers for deterministic immutable segments of the source Experience. Every
-            candidate must copy exactly one supplied sourceClaimId that directly grounds the claim.
-            Never invent or modify an id. Reordering, omission, insertion, paraphrase, or splitting
-            in your output must not change the sourceClaimId for the same grounded source segment.
+            candidate must copy exactly one supplied sourceClaimId and provide sourceAnchor with the
+            smallest exact, case-sensitive substring of that sourceClaims text which independently
+            grounds this candidate. occurrence is the zero-based occurrence of that exact substring
+            inside the supplied segment. Multiple independent candidates may share sourceClaimId
+            only when they have distinct exact sourceAnchor ranges. Never invent or modify an id or
+            anchor text. Reordering, omission, insertion, or paraphrase in your output must not
+            change the source anchor for the same grounded fact.
 
             Schema:
             {"attention":{"outcome":"FORWARD_FOR_INTERPRETATION|NO_CANDIDATE|DEFER_FOR_CONTEXT",
@@ -589,7 +602,8 @@ class OpenRouterAutomaticMemoryModel(
             "meaning":"bounded human-readable retained meaning","kind":"SEMANTIC|EPISODIC|RELATIONSHIP|SELF_DEVELOPMENT",
             "scope":"SHAI|RIVEN|SHARED|OTHER|MULTI_SCOPE","epistemicBasis":"DIRECT_USER_STATEMENT|DIRECT_RIVEN_EXPERIENCE|TOOL_OBSERVATION|EXPLICIT_CORRECTION|INFERENCE",
             "certainty":"CERTAIN|PROBABLE|UNCERTAIN|DISPUTED","state":"PENDING_CONTEXT|TENTATIVE|READY_FOR_VALIDATION",
-            "sensitivity":"STANDARD|SENSITIVE|HIGHLY_SENSITIVE","sourceClaimId":"one exact supplied sourceClaims id"}]}
+            "sensitivity":"STANDARD|SENSITIVE|HIGHLY_SENSITIVE","sourceClaimId":"one exact supplied sourceClaims id",
+            "sourceAnchor":{"text":"smallest exact substring of that sourceClaims text","occurrence":0}}]}
         """.trimIndent()
 
         private val VALIDATION_SYSTEM_PROMPT = """
@@ -650,6 +664,19 @@ private fun JSONObject.requireArray(name: String): JSONArray =
 
 private fun JSONObject.requireString(name: String): String =
     (get(name) as? String)?.takeIf(String::isNotBlank) ?: throw IllegalArgumentException("Missing $name")
+
+private fun JSONObject.requireNonNegativeInt(name: String): Int {
+    val value = get(name) as? Number ?: throw IllegalArgumentException("Invalid $name")
+    val parsed = try {
+        BigDecimal(value.toString()).intValueExact()
+    } catch (_: ArithmeticException) {
+        throw IllegalArgumentException("Invalid $name")
+    } catch (_: NumberFormatException) {
+        throw IllegalArgumentException("Invalid $name")
+    }
+    if (parsed < 0) throw IllegalArgumentException("Invalid $name")
+    return parsed
+}
 
 private fun <T> JSONObject.requireEnum(name: String, parser: (String) -> T): T =
     parser(requireString(name))

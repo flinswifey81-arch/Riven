@@ -68,6 +68,7 @@ class CandidateExtractionServiceTest {
     private lateinit var timeline: ConversationTimelineService
     private lateinit var experienceService: ConversationExperienceService
     private var idCounter = 0
+    private var currentSourceContent = "Grounded source content"
 
     @Before
     fun setUp() {
@@ -445,8 +446,8 @@ class CandidateExtractionServiceTest {
         val ids = extracted(extract()).createdCandidateIds
         val lineages = ids.map { database.memoryDao().candidateEvidence(it).single().lineageKey }
         assertNotEquals(lineages[0], lineages[1])
-        assertEquals(listOf("0", "1"), lineages.map { it.split(':')[1] })
-        assertTrue(lineages.all { it.matches(Regex("AUTO_CANDIDATE_V3:\\d+:[0-9a-f]{64}")) })
+        assertEquals(listOf("0", "9"), lineages.map { it.split(':')[1] })
+        assertTrue(lineages.all { it.matches(Regex("AUTO_CANDIDATE_V4:\\d+:\\d+:[0-9a-f]{64}")) })
     }
 
     @Test
@@ -468,7 +469,7 @@ class CandidateExtractionServiceTest {
     @Test
     fun modelCannotInventSourceClaimIdentity() = runBlocking {
         forwardExperience(content = "Only one grounded claim.")
-        extractor.proposal = extraction(proposal(sourceClaimId = sourceClaimId(1)))
+        extractor.proposal = extraction(proposal().copy(sourceClaimId = sourceClaimId(1)))
 
         assertEquals(
             CandidateExtractionError.InvalidCandidateProposal(
@@ -478,6 +479,44 @@ class CandidateExtractionServiceTest {
             failure(extract()),
         )
         assertEquals(0, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun sourceChildAnchorMustBeAnExactSubstringOfItsServerClaim() = runBlocking {
+        forwardExperience(content = "I love sardines and my dog's name is Pixel.")
+        extractor.proposal = extraction(
+            proposal(
+                meaning = "Shai loves sardines.",
+                sourceAnchorText = "Shai loves sardines",
+            ),
+        )
+
+        assertEquals(
+            CandidateExtractionError.InvalidCandidateProposal(
+                0,
+                InvalidCandidateProposalReason.SOURCE_ANCHOR_NOT_FOUND,
+            ),
+            failure(extract()),
+        )
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+    }
+
+    @Test
+    fun repeatedExactAnchorUsesValidatedOccurrenceForStableChildIdentity() = runBlocking {
+        forwardExperience(content = "tea then tea")
+        extractor.proposal = extraction(
+            proposal(
+                meaning = "The second tea mention matters.",
+                sourceAnchorText = "tea",
+                sourceAnchorOccurrence = 1,
+            ),
+        )
+
+        val candidateId = extracted(extract()).createdCandidateIds.single()
+        assertTrue(
+            database.memoryDao().candidateEvidence(candidateId).single().lineageKey
+                .startsWith("AUTO_CANDIDATE_V4:9:12:"),
+        )
     }
 
     @Test
@@ -654,15 +693,15 @@ class CandidateExtractionServiceTest {
     fun claimSuppressionHashUsesServerSourceClaimAndIgnoresSemanticDigest() {
         val original = sourceClaimSuppressionHash(
             "experience",
-            "AUTO_CANDIDATE_V3:0:${"a".repeat(64)}",
+            "AUTO_CANDIDATE_V4:0:10:${"a".repeat(64)}",
         )
         val paraphrase = sourceClaimSuppressionHash(
             "experience",
-            "AUTO_CANDIDATE_V3:0:${"b".repeat(64)}",
+            "AUTO_CANDIDATE_V4:0:10:${"b".repeat(64)}",
         )
         val sibling = sourceClaimSuppressionHash(
             "experience",
-            "AUTO_CANDIDATE_V3:1:${"b".repeat(64)}",
+            "AUTO_CANDIDATE_V4:11:20:${"b".repeat(64)}",
         )
 
         assertEquals(original, paraphrase)
@@ -671,17 +710,19 @@ class CandidateExtractionServiceTest {
     }
 
     @Test
-    fun legacyModelOutputOrdinalIsNotTreatedAsStableClaimIdentity() {
-        val firstWording = sourceClaimSuppressionHash(
-            "experience",
-            "AUTO_CANDIDATE_V2:0:${"a".repeat(64)}",
-        )
-        val secondWording = sourceClaimSuppressionHash(
-            "experience",
-            "AUTO_CANDIDATE_V2:0:${"b".repeat(64)}",
-        )
+    fun legacyCoarseLineagesRetainExactCompatibilityOnly() {
+        listOf("AUTO_CANDIDATE_V2", "AUTO_CANDIDATE_V3").forEach { prefix ->
+            val firstWording = sourceClaimSuppressionHash(
+                "experience",
+                "$prefix:0:${"a".repeat(64)}",
+            )
+            val secondWording = sourceClaimSuppressionHash(
+                "experience",
+                "$prefix:0:${"b".repeat(64)}",
+            )
 
-        assertNotEquals(firstWording, secondWording)
+            assertNotEquals(firstWording, secondWording)
+        }
     }
 
     @Test
@@ -1019,7 +1060,7 @@ class CandidateExtractionServiceTest {
             as ReadCandidatesForExperienceResult.Candidates
         assertEquals(listOf(id), result.candidates.map { it.candidateId })
         assertEquals("Retained meaning", result.candidates.single().proposedMeaning)
-        assertTrue(result.candidates.single().lineageKey.startsWith("AUTO_CANDIDATE_V3:0:"))
+        assertTrue(result.candidates.single().lineageKey.startsWith("AUTO_CANDIDATE_V4:0:23:"))
     }
 
     @Test
@@ -1127,6 +1168,7 @@ class CandidateExtractionServiceTest {
         availability: ExperienceAvailability = ExperienceAvailability.AVAILABLE,
         content: String = "Grounded source content",
     ) {
+        currentSourceContent = content
         database.memoryDao().insertExperience(
             ExperienceEntity(
                 id = id,
@@ -1169,7 +1211,21 @@ class CandidateExtractionServiceTest {
         state: CandidateMemoryState = CandidateMemoryState.READY_FOR_VALIDATION,
         sensitivity: SensitivityLevel = SensitivityLevel.SENSITIVE,
         sourceClaimId: String = sourceClaimId(0),
-    ) = CandidateMemoryProposal(meaning, kind, scope, basis, certainty, state, sensitivity, sourceClaimId)
+        sourceAnchorText: String? = null,
+        sourceAnchorOccurrence: Int = 0,
+    ): CandidateMemoryProposal {
+        return CandidateMemoryProposal(
+            meaning,
+            kind,
+            scope,
+            basis,
+            certainty,
+            state,
+            sensitivity,
+            sourceClaimId,
+            CandidateSourceAnchor(sourceAnchorText ?: FULL_SOURCE_ANCHOR, sourceAnchorOccurrence),
+        )
+    }
 
     private fun extraction(vararg candidates: CandidateMemoryProposal) =
         CandidateExtractionProposal(candidates.toList())
@@ -1219,7 +1275,7 @@ class CandidateExtractionServiceTest {
         kind: SuppressionKind,
         isActive: Boolean,
     ): SuppressionTombstoneEntity {
-        val lineage = candidateClaimLineageKey(experienceId, candidate)
+        val lineage = candidateClaimLineageKey(experienceId, candidate, resolvedAnchor(candidate))
         val row = SuppressionTombstoneEntity(
             id = "tombstone-${rowCount("suppression_tombstones") + 1}",
             kind = kind,
@@ -1244,13 +1300,23 @@ class CandidateExtractionServiceTest {
                 experienceId = "experience",
                 evidenceOrder = 0,
                 role = CandidateEvidenceRole.SEED,
-                lineageKey = candidateClaimLineageKey("experience", requested),
+                lineageKey = candidateClaimLineageKey("experience", requested, resolvedAnchor(requested)),
                 createdAt = 1,
             ),
         )
     }
 
     private fun sourceClaimId(ordinal: Int): String = "$SOURCE_CLAIM_ID_PREFIX$ordinal"
+
+    private fun resolvedAnchor(candidate: CandidateMemoryProposal): ResolvedCandidateSourceAnchor {
+        val sourceClaim = candidateSourceClaims(currentSourceContent).single { it.id == candidate.sourceClaimId }
+        val anchor = if (candidate.sourceAnchor.text == FULL_SOURCE_ANCHOR) {
+            CandidateSourceAnchor(sourceClaim.text, 0)
+        } else {
+            candidate.sourceAnchor
+        }
+        return checkNotNull(resolveCandidateSourceAnchor(sourceClaim, anchor))
+    }
 
     private fun candidateEntity(
         id: String,
@@ -1338,7 +1404,19 @@ class CandidateExtractionServiceTest {
             snapshots += snapshot
             failure?.let { throw it }
             beforeReturn()
-            return proposal
+            val sourceClaims = candidateSourceClaims(snapshot.sourceContent).associateBy { it.id }
+            return proposal.copy(
+                candidates = proposal.candidates.map { candidate ->
+                    if (candidate.sourceAnchor.text != FULL_SOURCE_ANCHOR) {
+                        candidate
+                    } else {
+                        val sourceClaim = sourceClaims[candidate.sourceClaimId] ?: return@map candidate
+                        candidate.copy(sourceAnchor = CandidateSourceAnchor(sourceClaim.text, 0))
+                    }
+                },
+            )
         }
     }
 }
+
+private const val FULL_SOURCE_ANCHOR = "__TEST_FULL_SOURCE_ANCHOR__"

@@ -16,28 +16,33 @@ internal fun sourceLineageHash(experienceId: String, lineageKey: String): String
 }
 
 /**
- * Minimal claim-scoped suppression key. Automatic candidate lineage v3 embeds a server-validated
- * immutable source-claim ordinal plus a semantic digest. Only the source claim is retained in the
- * suppression hash, so a paraphrase cannot evade Forget/Delete and deleted semantic content is not
- * retained. Older positional/model-derived and manual lineages fall back to their exact hash.
+ * Minimal claim-scoped suppression key. Automatic candidate lineage v4 embeds a server-validated
+ * immutable source-anchor range plus a semantic digest. Only the nonsemantic source offsets are
+ * retained in the suppression hash, so paraphrased meaning cannot evade Forget/Delete and deleted
+ * semantic content is not retained. Older coarse/model-derived and manual lineages fall back to
+ * their exact hash. V1-V3 automatic lineages therefore retain exact-lineage compatibility only;
+ * they do not receive V4 paraphrase reconciliation because they contain no validated child range.
  */
 internal fun sourceClaimSuppressionHash(experienceId: String, lineageKey: String): String {
-    val automaticClaimOrdinal = AUTO_CANDIDATE_V3_PATTERN.matchEntire(lineageKey)
-        ?.groupValues
-        ?.get(1)
-        ?.toIntOrNull()
-    if (automaticClaimOrdinal == null) return sourceLineageHash(experienceId, lineageKey)
+    val automaticClaim = AUTO_CANDIDATE_V4_PATTERN.matchEntire(lineageKey)
+        ?: return sourceLineageHash(experienceId, lineageKey)
+    val anchorStart = automaticClaim.groupValues[1].toIntOrNull()
+        ?: return sourceLineageHash(experienceId, lineageKey)
+    val anchorEnd = automaticClaim.groupValues[2].toIntOrNull()
+        ?: return sourceLineageHash(experienceId, lineageKey)
     val canonicalSource = buildString {
-        append("riven-source-claim-v2:")
+        append("riven-source-claim-v3:")
         append(experienceId.toByteArray(Charsets.UTF_8).size)
         append(':')
         append(experienceId)
         append(':')
-        append(automaticClaimOrdinal)
+        append(anchorStart)
+        append(':')
+        append(anchorEnd)
     }
     return MessageDigest.getInstance("SHA-256")
         .digest(canonicalSource.toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> "%02x".format(byte) }
 }
 
-private val AUTO_CANDIDATE_V3_PATTERN = Regex("AUTO_CANDIDATE_V3:(\\d+):[0-9a-f]{64}")
+private val AUTO_CANDIDATE_V4_PATTERN = Regex("AUTO_CANDIDATE_V4:(\\d+):(\\d+):[0-9a-f]{64}")

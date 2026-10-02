@@ -12,6 +12,7 @@ import com.shai.riven.data.candidate.CandidateExtractionResult
 import com.shai.riven.data.candidate.CandidateExtractionService
 import com.shai.riven.data.candidate.CandidateExtractionSnapshot
 import com.shai.riven.data.candidate.CandidateMemoryProposal
+import com.shai.riven.data.candidate.CandidateSourceAnchor
 import com.shai.riven.data.candidate.ExtractCandidateMemoriesInput
 import com.shai.riven.data.candidate.candidateSourceClaims
 import com.shai.riven.data.conversation.AppendTimelineMessageInput
@@ -561,11 +562,11 @@ class AutomaticMemoryPipelineIntegrationTest {
         model.extractionOverride = { snapshot ->
             CandidateExtractionProposal(
                 listOf(
-                    proposalFor(snapshot, "dog's name is Pixel", "Shai's dog is named Pixel."),
-                    proposalFor(snapshot, "sardines", "Sardines are a food Shai loves."),
+                    proposalFor(snapshot, "and my dog's name is Pixel.", "Shai's dog is named Pixel."),
+                    proposalFor(snapshot, "I love sardines", "Sardines are a food Shai loves."),
                     proposalFor(
                         snapshot,
-                        "sardines",
+                        "I love sardines",
                         "Shai has an enduring positive food preference for sardines.",
                         kind = MemoryKind.EPISODIC,
                     ),
@@ -588,24 +589,119 @@ class AutomaticMemoryPipelineIntegrationTest {
     }
 
     @Test
+    fun freshIndependentChildAnchorsWithinOneCompoundSourceAreBothAdmitted() = runBlocking {
+        model.extractionOverride = { snapshot ->
+            val parentIds = candidateSourceClaims(snapshot.sourceContent).map { it.id }.distinct()
+            assertEquals(listOf("SOURCE_CLAIM_V1:0"), parentIds)
+            CandidateExtractionProposal(
+                listOf(
+                    proposalFor(snapshot, "I love sardines", "Shai loves sardines."),
+                    proposalFor(snapshot, "my dog's name is Pixel", "Shai's dog is named Pixel."),
+                ),
+            )
+        }
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines and my dog's name is Pixel.",
+            "Those are two independently grounded facts.",
+        )
+
+        enqueueAndRun(sourceTurn)
+
+        val memories = database.memoryDao().recentMemories(10)
+        assertEquals(1, memories.count { it.meaning == "Shai loves sardines." })
+        assertEquals(1, memories.count { it.meaning == "Shai's dog is named Pixel." })
+        val evidence = memories.flatMap { database.memoryDao().evidenceForMemory(it.id) }
+        assertEquals(2, evidence.map { sourceClaimSuppressionHash(it.experienceId, it.lineageKey) }.toSet().size)
+    }
+
+    @Test
+    fun admittedFirstChildDoesNotHideNewSiblingFromSameCompoundSource() = runBlocking {
+        var includePixel = false
+        model.extractionOverride = { snapshot ->
+            CandidateExtractionProposal(buildList {
+                add(proposalFor(snapshot, "I love sardines", "Shai loves sardines."))
+                if (includePixel) {
+                    add(proposalFor(snapshot, "my dog's name is Pixel", "Shai's dog is named Pixel."))
+                }
+            })
+        }
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines and my dog's name is Pixel.",
+            "I will preserve their separate source anchors.",
+        )
+        enqueueAndRun(sourceTurn)
+        val sardineMemory = database.memoryDao().recentMemories(10).single()
+
+        includePixel = true
+        val replay = CandidateExtractionService(database, model).extract(
+            ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
+        ) as CandidateExtractionResult.Extracted
+
+        assertEquals(listOf(sardineMemory.id), replay.existingMemoryIds)
+        assertEquals(1, replay.createdCandidateIds.size)
+        assertEquals(
+            "Shai's dog is named Pixel.",
+            database.memoryDao().candidateMemory(replay.createdCandidateIds.single())?.proposedMeaning,
+        )
+    }
+
+    @Test
+    fun forgettingOneChildOfCompoundSourcePreservesUnrelatedSibling() = runBlocking {
+        var replay = false
+        model.extractionOverride = { snapshot ->
+            val sardineMeaning = if (replay) {
+                "Sardines are a food Shai loves."
+            } else {
+                "Shai loves sardines."
+            }
+            val sardines = proposalFor(snapshot, "I love sardines", sardineMeaning)
+            val pixel = proposalFor(snapshot, "my dog's name is Pixel", "Shai's dog is named Pixel.")
+            CandidateExtractionProposal(if (replay) listOf(pixel, sardines) else listOf(sardines, pixel))
+        }
+        val sourceTurn = appendSuccessfulTurn(
+            "I love sardines and my dog's name is Pixel.",
+            "I will preserve their separate source anchors.",
+        )
+        enqueueAndRun(sourceTurn)
+        val initial = database.memoryDao().recentMemories(10)
+        val sardineMemory = initial.single { it.meaning.contains("sardine", ignoreCase = true) }
+        val pixelMemory = initial.single { it.meaning.contains("Pixel") }
+        val manual = ManualMemoryIntentService(database, scheduler)
+        assertTrue(
+            manual.forget(ManualForgetMemoryInput(sardineMemory.id, now())) is
+                ManualMemoryIntentResult.Forgotten,
+        )
+
+        replay = true
+        val reextracted = CandidateExtractionService(database, model).extract(
+            ExtractCandidateMemoriesInput(experienceFor(sourceTurn.userMessageId), now()),
+        ) as CandidateExtractionResult.Extracted
+
+        assertEquals(1, reextracted.suppressedLineageCount)
+        assertTrue(reextracted.createdCandidateIds.isEmpty())
+        assertEquals(listOf(pixelMemory.id), reextracted.existingMemoryIds)
+        assertNotNull(database.memoryDao().memory(pixelMemory.id))
+    }
+
+    @Test
     fun deleteSurvivesInsertedOmittedAndReappearingReplayWhileSiblingRemains() = runBlocking {
         var extractionShape = 0
         model.extractionOverride = { snapshot ->
             when (extractionShape) {
                 0 -> CandidateExtractionProposal(
                     listOf(
-                        proposalFor(snapshot, "sardines", "Shai loves sardines."),
-                        proposalFor(snapshot, "dog's name is Pixel", "Shai's dog is named Pixel."),
+                        proposalFor(snapshot, "I love sardines", "Shai loves sardines."),
+                        proposalFor(snapshot, "My dog's name is Pixel", "Shai's dog is named Pixel."),
                     ),
                 )
                 1 -> CandidateExtractionProposal(
                     listOf(
-                        proposalFor(snapshot, "favorite tea", "Shai's favorite tea is oolong."),
-                        proposalFor(snapshot, "sardines", "Sardines are a food Shai loves."),
+                        proposalFor(snapshot, "My favorite tea is oolong", "Shai's favorite tea is oolong."),
+                        proposalFor(snapshot, "I love sardines", "Sardines are a food Shai loves."),
                     ),
                 )
                 else -> CandidateExtractionProposal(
-                    listOf(proposalFor(snapshot, "dog's name is Pixel", "Shai's dog is named Pixel.")),
+                    listOf(proposalFor(snapshot, "My dog's name is Pixel", "Shai's dog is named Pixel.")),
                 )
             }
         }
@@ -749,6 +845,7 @@ class AutomaticMemoryPipelineIntegrationTest {
             proposedState = CandidateMemoryState.READY_FOR_VALIDATION,
             proposedSensitivity = SensitivityLevel.STANDARD,
             sourceClaimId = sourceClaimId,
+            sourceAnchor = CandidateSourceAnchor(sourceFragment, 0),
         )
     }
 
@@ -933,6 +1030,10 @@ class AutomaticMemoryPipelineIntegrationTest {
             fun claimIdContaining(text: String): String = sourceClaims.single {
                 it.text.contains(text, ignoreCase = true)
             }.id
+            fun sourceAnchorFor(text: String) = CandidateSourceAnchor(
+                sourceClaims.single { it.text.contains(text, ignoreCase = true) }.text,
+                0,
+            )
             if (twoFactShortWindow && source.contains("dog's name is Pixel", ignoreCase = true)) {
                 val resolved = snapshot.followingActiveContext.any {
                     it.content.contains("permanent name", ignoreCase = true)
@@ -948,6 +1049,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                             CandidateMemoryState.READY_FOR_VALIDATION,
                             SensitivityLevel.STANDARD,
                             claimIdContaining("sardines"),
+                            sourceAnchorFor("sardines"),
                         ),
                         CandidateMemoryProposal(
                             "Shai's dog is named Pixel.",
@@ -962,6 +1064,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                             },
                             if (resolved) SensitivityLevel.STANDARD else SensitivityLevel.SENSITIVE,
                             claimIdContaining("dog's name is Pixel"),
+                            sourceAnchorFor("dog's name is Pixel"),
                         ),
                     ),
                 )
@@ -976,6 +1079,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                     CandidateMemoryState.READY_FOR_VALIDATION,
                     SensitivityLevel.STANDARD,
                     claimIdContaining("sardines"),
+                    sourceAnchorFor("sardines"),
                 )
                 source.contains("favorite tea", ignoreCase = true) -> CandidateMemoryProposal(
                     if (paraphraseKnownFacts) "Oolong is Shai's favorite tea." else "Shai's favorite tea is oolong.",
@@ -986,6 +1090,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                     CandidateMemoryState.READY_FOR_VALIDATION,
                     SensitivityLevel.STANDARD,
                     claimIdContaining("favorite tea"),
+                    sourceAnchorFor("favorite tea"),
                 )
                 source.startsWith("Correction:") -> CandidateMemoryProposal(
                     "Shai grew up in Brooklyn and currently lives in Kansas.",
@@ -996,6 +1101,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                     CandidateMemoryState.READY_FOR_VALIDATION,
                     SensitivityLevel.STANDARD,
                     claimIdContaining("Correction"),
+                    sourceAnchorFor("Correction"),
                 )
                 source.contains("grew up in Kansas", ignoreCase = true) -> CandidateMemoryProposal(
                     "Shai grew up in Kansas.",
@@ -1006,6 +1112,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                     CandidateMemoryState.READY_FOR_VALIDATION,
                     SensitivityLevel.STANDARD,
                     claimIdContaining("grew up in Kansas"),
+                    sourceAnchorFor("grew up in Kansas"),
                 )
                 source.contains("discovered that I love playing chess", ignoreCase = true) -> CandidateMemoryProposal(
                     "Riven discovered that he loves playing chess.",
@@ -1016,6 +1123,7 @@ class AutomaticMemoryPipelineIntegrationTest {
                     CandidateMemoryState.READY_FOR_VALIDATION,
                     SensitivityLevel.STANDARD,
                     claimIdContaining("playing chess"),
+                    sourceAnchorFor("playing chess"),
                 )
                 else -> null
             }
