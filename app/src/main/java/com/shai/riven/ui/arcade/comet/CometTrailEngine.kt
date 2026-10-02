@@ -29,6 +29,7 @@ enum class TrailDirection(
 data class CometTrailState(
     val body: List<TrailPoint>,
     val direction: TrailDirection,
+    val queuedDirection: TrailDirection? = null,
     val food: TrailPoint,
     val randomState: Long,
     val treatsEaten: Int = 0,
@@ -45,6 +46,7 @@ data class CometTrailState(
         require(treatsEaten >= 0)
         require(stepsTaken >= 0)
         require(boardRefreshes >= 0)
+        require(queuedDirection == null || collisionDirection == null)
     }
 
     val head: TrailPoint
@@ -73,20 +75,27 @@ object CometTrailEngine {
             return if (wouldCollide(state, direction)) {
                 state.copy(collisionDirection = direction)
             } else {
-                state.copy(direction = direction, collisionDirection = null)
+                state.copy(queuedDirection = direction, collisionDirection = null)
             }
         }
+        if (state.queuedDirection != null) return state
+        if (direction == state.direction) return state
         if (direction == state.direction.opposite()) return state
-        return state.copy(direction = direction)
+        return state.copy(queuedDirection = direction)
     }
 
     fun tick(state: CometTrailState): CometTrailState {
         if (state.collisionDirection != null) return state
-        val nextHead = wrappedStep(state.head, state.direction)
+        val movementDirection = state.queuedDirection ?: state.direction
+        val nextHead = wrappedStep(state.head, movementDirection)
         val growing = nextHead == state.food
         val collisionBody = if (growing) state.body else state.body.dropLast(1)
         if (nextHead in collisionBody) {
-            return state.copy(collisionDirection = state.direction)
+            return state.copy(
+                direction = movementDirection,
+                queuedDirection = null,
+                collisionDirection = movementDirection,
+            )
         }
 
         val movedBody = if (growing) {
@@ -97,6 +106,8 @@ object CometTrailEngine {
         if (!growing) {
             return state.copy(
                 body = movedBody,
+                direction = movementDirection,
+                queuedDirection = null,
                 stepsTaken = state.stepsTaken + 1,
             )
         }
@@ -120,6 +131,8 @@ object CometTrailEngine {
         val placement = placeFood(state.randomState, movedBody)
         return state.copy(
             body = movedBody,
+            direction = movementDirection,
+            queuedDirection = null,
             food = placement.point,
             randomState = placement.randomState,
             treatsEaten = eaten,
@@ -145,6 +158,30 @@ object CometTrailEngine {
         return nextHead in collisionBody
     }
 
+    fun safeDirections(state: CometTrailState): List<TrailDirection> =
+        TrailDirection.entries.filterNot { direction -> wouldCollide(state, direction) }
+
+    /**
+     * Reversible no-loss review default for the rare case where every neighboring cell is blocked.
+     * The trail keeps its length and progress while being laid onto a known-playable orbit.
+     */
+    fun untangle(state: CometTrailState): CometTrailState {
+        if (state.collisionDirection == null) return state
+        val body = recoveryOrbit().take(state.body.size)
+        val placement = state.food
+            .takeIf { food -> food !in body }
+            ?.let { food -> FoodPlacement(food, state.randomState) }
+            ?: placeFood(state.randomState, body)
+        return state.copy(
+            body = body,
+            direction = TrailDirection.UP,
+            queuedDirection = null,
+            food = placement.point,
+            randomState = placement.randomState,
+            collisionDirection = null,
+        )
+    }
+
     fun isConnectedBody(body: List<TrailPoint>): Boolean = body.zipWithNext().all { (first, second) ->
         TrailDirection.entries.any { direction -> wrappedStep(first, direction) == second }
     }
@@ -154,6 +191,17 @@ object CometTrailEngine {
         TrailPoint(5, 6),
         TrailPoint(4, 6),
     )
+
+    private fun recoveryOrbit(): List<TrailPoint> = buildList {
+        for (y in 0 until COMET_TRAIL_ROWS) {
+            val columns = if (y % 2 == 0) {
+                0 until COMET_TRAIL_COLUMNS
+            } else {
+                COMET_TRAIL_COLUMNS - 1 downTo 0
+            }
+            columns.forEach { x -> add(TrailPoint(x, y)) }
+        }
+    }
 
     private data class FoodPlacement(
         val point: TrailPoint,

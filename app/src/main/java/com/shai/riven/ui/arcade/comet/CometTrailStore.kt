@@ -69,7 +69,8 @@ class SharedPreferencesCometTrailStore(
 }
 
 object CometTrailSnapshotCodec {
-    private const val VERSION = "1"
+    private const val VERSION = "2"
+    private const val LEGACY_VERSION = "1"
 
     fun encode(state: CometTrailState): String {
         val body = state.body.joinToString(separator = ";") { point -> "${point.x},${point.y}" }
@@ -77,6 +78,7 @@ object CometTrailSnapshotCodec {
             VERSION,
             body,
             state.direction.name,
+            state.queuedDirection?.name.orEmpty(),
             state.food.x,
             state.food.y,
             state.randomState,
@@ -90,8 +92,10 @@ object CometTrailSnapshotCodec {
 
     fun decode(snapshot: String): CometTrailState? = runCatching {
         val parts = snapshot.split('|')
-        require(parts.size == 11)
-        require(parts[0] == VERSION)
+        require(
+            (parts[0] == VERSION && parts.size == 12) ||
+                (parts[0] == LEGACY_VERSION && parts.size == 11),
+        )
         val payload = parts.dropLast(1).joinToString(separator = "|")
         require(parts.last() == checksum(payload))
         val body = parts[1].split(';').map { encodedPoint ->
@@ -99,15 +103,24 @@ object CometTrailSnapshotCodec {
             require(coordinates.size == 2)
             TrailPoint(coordinates[0].toInt(), coordinates[1].toInt())
         }
+        val hasQueuedDirection = parts[0] == VERSION
+        val valueOffset = if (hasQueuedDirection) 1 else 0
         val state = CometTrailState(
             body = body,
             direction = TrailDirection.valueOf(parts[2]),
-            food = TrailPoint(parts[3].toInt(), parts[4].toInt()),
-            randomState = parts[5].toLong(),
-            treatsEaten = parts[6].toInt(),
-            stepsTaken = parts[7].toInt(),
-            boardRefreshes = parts[8].toInt(),
-            collisionDirection = parts[9].takeIf(String::isNotEmpty)?.let(TrailDirection::valueOf),
+            queuedDirection = if (hasQueuedDirection) {
+                parts[3].takeIf(String::isNotEmpty)?.let(TrailDirection::valueOf)
+            } else {
+                null
+            },
+            food = TrailPoint(parts[3 + valueOffset].toInt(), parts[4 + valueOffset].toInt()),
+            randomState = parts[5 + valueOffset].toLong(),
+            treatsEaten = parts[6 + valueOffset].toInt(),
+            stepsTaken = parts[7 + valueOffset].toInt(),
+            boardRefreshes = parts[8 + valueOffset].toInt(),
+            collisionDirection = parts[9 + valueOffset]
+                .takeIf(String::isNotEmpty)
+                ?.let(TrailDirection::valueOf),
         )
         require(CometTrailEngine.isConnectedBody(state.body))
         require(state.food !in state.body)

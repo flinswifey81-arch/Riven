@@ -92,6 +92,75 @@ class CometTrailComposeTest {
     }
 
     @Test
+    fun fullyTrappedTrailOffersPersistedNoLossUntangleRecovery() {
+        composeRule.mainClock.autoAdvance = false
+        val pocket = CometTrailState(
+            body = listOf(
+                TrailPoint(2, 3),
+                TrailPoint(3, 3),
+                TrailPoint(3, 2),
+                TrailPoint(3, 1),
+                TrailPoint(2, 1),
+                TrailPoint(1, 1),
+                TrailPoint(1, 2),
+                TrailPoint(1, 3),
+                TrailPoint(0, 3),
+                TrailPoint(0, 4),
+            ),
+            direction = TrailDirection.UP,
+            food = TrailPoint(9, 9),
+            randomState = 17L,
+            treatsEaten = 6,
+            stepsTaken = 30,
+        )
+        val trapped = CometTrailEngine.tick(CometTrailEngine.tick(pocket))
+        val store = FakeCometTrailStore(session = trapped)
+        composeRule.setContent {
+            RivenTheme {
+                CometTrailGame(externallyPaused = false, storeOverride = store)
+            }
+        }
+
+        composeRule.onNodeWithText("UNTANGLE TO KEEP GLIDING").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Untangle Comet Trail")
+            .assertIsEnabled()
+            .performClick()
+        settleCompose()
+
+        val recovered = requireNotNull(store.savedSession)
+        assertNull(recovered.collisionDirection)
+        assertEquals(trapped.body.size, recovered.body.size)
+        assertEquals(trapped.treatsEaten, recovered.treatsEaten)
+        assertEquals(trapped.stepsTaken, recovered.stepsTaken)
+
+        composeRule.mainClock.advanceTimeBy(700L)
+        composeRule.runOnIdle { }
+        assertEquals(trapped.stepsTaken + 1, store.savedSession?.stepsTaken)
+    }
+
+    @Test
+    fun rapidDirectionButtonsCannotReverseBeforeTheNextTick() {
+        composeRule.mainClock.autoAdvance = false
+        val store = FakeCometTrailStore(session = CometTrailEngine.newGame(seed = 29L))
+        composeRule.setContent {
+            RivenTheme {
+                CometTrailGame(externallyPaused = false, storeOverride = store)
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Turn Comet Trail up").performClick()
+        composeRule.onNodeWithContentDescription("Turn Comet Trail left").performClick()
+        composeRule.runOnIdle { }
+        assertEquals(TrailDirection.UP, store.savedSession?.queuedDirection)
+
+        composeRule.mainClock.advanceTimeBy(700L)
+        composeRule.runOnIdle { }
+        assertEquals(TrailPoint(6, 5), store.savedSession?.head)
+        assertEquals(TrailDirection.UP, store.savedSession?.direction)
+        assertNull(store.savedSession?.queuedDirection)
+    }
+
+    @Test
     fun chatPauseStopsGravityAndDisablesPlayControls() {
         composeRule.mainClock.autoAdvance = false
         val initial = CometTrailEngine.newGame(seed = 22L)
@@ -212,7 +281,8 @@ class CometTrailComposeTest {
         composeRule.runOnIdle { showGame.value = false }
         settleCompose()
 
-        assertEquals(TrailDirection.DOWN, store.savedSession?.direction)
+        assertEquals(TrailDirection.RIGHT, store.savedSession?.direction)
+        assertEquals(TrailDirection.DOWN, store.savedSession?.queuedDirection)
     }
 
     @Test

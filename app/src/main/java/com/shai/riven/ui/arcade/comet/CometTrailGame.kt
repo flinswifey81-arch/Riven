@@ -118,6 +118,7 @@ fun CometTrailGame(
 
     val hostPaused = externallyPaused || manuallyPaused || settingsOpen || !lifecycleResumed
     val collisionPaused = state.collisionDirection != null
+    val trapped = collisionPaused && CometTrailEngine.safeDirections(state).isEmpty()
     val paused = hostPaused || collisionPaused
     val onDirection: (TrailDirection) -> Unit = { direction ->
         if (!hostPaused) {
@@ -146,6 +147,7 @@ fun CometTrailGame(
         manuallyPaused -> "Paused"
         settingsOpen -> "Paused for settings"
         !lifecycleResumed -> "Paused while away"
+        trapped -> "Untangle to keep gliding"
         collisionPaused -> "Choose a safer turn"
         else -> "Gliding"
     }
@@ -154,10 +156,18 @@ fun CometTrailGame(
         settings = settings,
         paused = paused,
         hostPaused = hostPaused,
+        trapped = trapped,
         pauseLabel = pauseLabel,
         compactLayout = compactLayout,
         onDirection = onDirection,
         onTogglePause = { manuallyPaused = !manuallyPaused },
+        onUntangle = {
+            if (!hostPaused && collisionPaused) {
+                val updated = CometTrailEngine.untangle(state)
+                state = updated
+                store.saveSession(updated)
+            }
+        },
         onOpenSettings = { settingsOpen = true },
         modifier = modifier,
     )
@@ -176,10 +186,12 @@ private fun CometTrailLayout(
     settings: CometTrailSettings,
     paused: Boolean,
     hostPaused: Boolean,
+    trapped: Boolean,
     pauseLabel: String,
     compactLayout: Boolean,
     onDirection: (TrailDirection) -> Unit,
     onTogglePause: () -> Unit,
+    onUntangle: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -209,7 +221,11 @@ private fun CometTrailLayout(
             )
             Text(
                 text = if (paused) {
-                    if (state.collisionDirection != null && !hostPaused) "SAFE TURN" else "PAUSED"
+                    when {
+                        trapped && !hostPaused -> "UNTANGLE"
+                        state.collisionDirection != null && !hostPaused -> "SAFE TURN"
+                        else -> "PAUSED"
+                    }
                 } else {
                     "${settings.speed.label} • fixed"
                 },
@@ -242,10 +258,12 @@ private fun CometTrailLayout(
         }
         if (!compactLayout) {
             Text(
-                text = if (state.collisionDirection != null) {
-                    "No progress lost • Choose a safe direction to keep gliding."
-                } else {
-                    "Endless wrapping • Self-contact pauses before contact (review default)."
+                text = when {
+                    trapped -> "No progress lost • Untangle keeps length and progress (review default)."
+                    state.collisionDirection != null -> {
+                        "No progress lost • Choose a safe direction to keep gliding."
+                    }
+                    else -> "Endless wrapping • Self-contact pauses before contact (review default)."
                 },
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue,
@@ -257,9 +275,11 @@ private fun CometTrailLayout(
         CometTrailControls(
             hostPaused = hostPaused,
             collisionPaused = state.collisionDirection != null,
+            trapped = trapped,
             manuallyPaused = pauseLabel == "Paused",
             onDirection = onDirection,
             onTogglePause = onTogglePause,
+            onUntangle = onUntangle,
             compactLayout = compactLayout,
         )
     }
@@ -427,9 +447,11 @@ private fun CometTrailSidePanel(
 private fun CometTrailControls(
     hostPaused: Boolean,
     collisionPaused: Boolean,
+    trapped: Boolean,
     manuallyPaused: Boolean,
     onDirection: (TrailDirection) -> Unit,
     onTogglePause: () -> Unit,
+    onUntangle: () -> Unit,
     compactLayout: Boolean,
 ) {
     Column(
@@ -452,10 +474,22 @@ private fun CometTrailControls(
                 modifier = Modifier.weight(1f),
             )
             TrailControlButton(
-                label = if (manuallyPaused) "RESUME" else "PAUSE",
-                description = if (manuallyPaused) "Resume Comet Trail" else "Pause Comet Trail",
-                enabled = !collisionPaused && (!hostPaused || manuallyPaused),
-                onClick = onTogglePause,
+                label = when {
+                    trapped -> "UNTANGLE"
+                    manuallyPaused -> "RESUME"
+                    else -> "PAUSE"
+                },
+                description = when {
+                    trapped -> "Untangle Comet Trail"
+                    manuallyPaused -> "Resume Comet Trail"
+                    else -> "Pause Comet Trail"
+                },
+                enabled = if (trapped) {
+                    !hostPaused
+                } else {
+                    !collisionPaused && (!hostPaused || manuallyPaused)
+                },
+                onClick = if (trapped) onUntangle else onTogglePause,
                 modifier = Modifier.weight(1f),
                 accent = true,
             )
@@ -560,7 +594,7 @@ private fun CometTrailSettingsDialog(
                 Text("${settings.speed.label} • ${settings.speed.tickMillis} ms")
             }
             Text(
-                text = "Forgiving review default: a predicted self-contact pauses before impact. Choose another safe direction and continue with your trail intact.",
+                text = "Forgiving review default: predicted self-contact pauses before impact. Choose a safe direction, or Untangle if fully enclosed; length and progress stay intact.",
                 color = WarmIvory,
                 fontSize = 12.sp,
                 textAlign = TextAlign.Center,

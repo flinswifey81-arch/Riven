@@ -44,6 +44,68 @@ class CometTrailStoreTest {
     }
 
     @Test
+    fun queuedTurnSurvivesRestoreAndStillRejectsRapidSecondInput() {
+        val queued = CometTrailEngine.turn(
+            CometTrailEngine.newGame(seed = 19L),
+            TrailDirection.DOWN,
+        )
+
+        val restored = requireNotNull(
+            CometTrailSnapshotCodec.decode(CometTrailSnapshotCodec.encode(queued)),
+        )
+
+        assertEquals(queued, restored)
+        assertEquals(restored, CometTrailEngine.turn(restored, TrailDirection.LEFT))
+        val moved = CometTrailEngine.tick(restored)
+        assertEquals(TrailPoint(6, 7), moved.head)
+        assertEquals(TrailDirection.DOWN, moved.direction)
+        assertNull(moved.queuedDirection)
+    }
+
+    @Test
+    fun fullyTrappedSnapshotCanBeRestoredAndUntangledWithoutLoss() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val preferenceName = "comet-trail-trap-${System.nanoTime()}"
+        val store = SharedPreferencesCometTrailStore(context, preferenceName)
+        val pocket = CometTrailState(
+            body = listOf(
+                TrailPoint(2, 3),
+                TrailPoint(3, 3),
+                TrailPoint(3, 2),
+                TrailPoint(3, 1),
+                TrailPoint(2, 1),
+                TrailPoint(1, 1),
+                TrailPoint(1, 2),
+                TrailPoint(1, 3),
+                TrailPoint(0, 3),
+                TrailPoint(0, 4),
+            ),
+            direction = TrailDirection.UP,
+            food = TrailPoint(9, 9),
+            randomState = 31L,
+            treatsEaten = 12,
+            stepsTaken = 90,
+        )
+        val trapped = CometTrailEngine.tick(CometTrailEngine.tick(pocket))
+        store.saveSession(trapped)
+
+        val restored = requireNotNull(store.loadSession())
+        assertTrue(CometTrailEngine.safeDirections(restored).isEmpty())
+        val recovered = CometTrailEngine.untangle(restored)
+        store.saveSession(recovered)
+        val persistedRecovery = requireNotNull(store.loadSession())
+
+        assertEquals(trapped.body.size, persistedRecovery.body.size)
+        assertEquals(trapped.treatsEaten, persistedRecovery.treatsEaten)
+        assertEquals(trapped.stepsTaken, persistedRecovery.stepsTaken)
+        assertNull(persistedRecovery.collisionDirection)
+        assertEquals(
+            persistedRecovery.stepsTaken + 1,
+            CometTrailEngine.tick(persistedRecovery).stepsTaken,
+        )
+    }
+
+    @Test
     fun corruptDisconnectedOrUnsafeSnapshotsAreRejected() {
         val state = CometTrailEngine.newGame(seed = 8L)
         val encoded = CometTrailSnapshotCodec.encode(state)

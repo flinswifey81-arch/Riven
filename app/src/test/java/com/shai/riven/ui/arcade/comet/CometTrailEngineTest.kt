@@ -101,6 +101,86 @@ class CometTrailEngineTest {
     }
 
     @Test
+    fun onlyOnePerpendicularTurnIsAcceptedBeforeMovement() {
+        val state = CometTrailEngine.newGame(seed = 5L)
+
+        assertEquals(state, CometTrailEngine.turn(state, TrailDirection.RIGHT))
+        assertEquals(state, CometTrailEngine.turn(state, TrailDirection.LEFT))
+
+        val queued = CometTrailEngine.turn(state, TrailDirection.UP)
+        assertEquals(TrailDirection.RIGHT, queued.direction)
+        assertEquals(TrailDirection.UP, queued.queuedDirection)
+        assertEquals(queued, CometTrailEngine.turn(queued, TrailDirection.LEFT))
+        assertEquals(queued, CometTrailEngine.turn(queued, TrailDirection.DOWN))
+
+        val moved = CometTrailEngine.tick(queued)
+        assertEquals(TrailPoint(6, 5), moved.head)
+        assertEquals(TrailDirection.UP, moved.direction)
+        assertNull(moved.queuedDirection)
+    }
+
+    @Test
+    fun collisionRecoveryAlsoAcceptsOnlyOneTurnBeforeMovement() {
+        val body = listOf(
+            TrailPoint(2, 2),
+            TrailPoint(2, 3),
+            TrailPoint(1, 3),
+            TrailPoint(1, 2),
+            TrailPoint(1, 1),
+        )
+        val paused = CometTrailEngine.tick(
+            fixture(body = body, direction = TrailDirection.LEFT, food = TrailPoint(9, 9)),
+        )
+
+        val recovered = CometTrailEngine.turn(paused, TrailDirection.UP)
+        assertEquals(TrailDirection.UP, recovered.queuedDirection)
+        assertEquals(recovered, CometTrailEngine.turn(recovered, TrailDirection.RIGHT))
+
+        val moved = CometTrailEngine.tick(recovered)
+        assertEquals(TrailPoint(2, 1), moved.head)
+        assertEquals(TrailDirection.UP, moved.direction)
+    }
+
+    @Test
+    fun fullyEnclosedHeadCanUntangleWithoutLosingProgress() {
+        val state = fixture(
+            body = listOf(
+                TrailPoint(2, 3),
+                TrailPoint(3, 3),
+                TrailPoint(3, 2),
+                TrailPoint(3, 1),
+                TrailPoint(2, 1),
+                TrailPoint(1, 1),
+                TrailPoint(1, 2),
+                TrailPoint(1, 3),
+                TrailPoint(0, 3),
+                TrailPoint(0, 4),
+            ),
+            direction = TrailDirection.UP,
+            food = TrailPoint(9, 9),
+        ).copy(treatsEaten = 8, stepsTaken = 40, boardRefreshes = 2)
+
+        val enteredPocket = CometTrailEngine.tick(state)
+        assertEquals(TrailPoint(2, 2), enteredPocket.head)
+        val trapped = CometTrailEngine.tick(enteredPocket)
+        assertEquals(TrailDirection.UP, trapped.collisionDirection)
+        assertTrue(CometTrailEngine.safeDirections(trapped).isEmpty())
+
+        val recovered = CometTrailEngine.untangle(trapped)
+        assertNull(recovered.collisionDirection)
+        assertEquals(trapped.body.size, recovered.body.size)
+        assertEquals(trapped.treatsEaten, recovered.treatsEaten)
+        assertEquals(trapped.stepsTaken, recovered.stepsTaken)
+        assertEquals(trapped.boardRefreshes, recovered.boardRefreshes)
+        assertTrue(CometTrailEngine.isConnectedBody(recovered.body))
+        assertTrue(recovered.food !in recovered.body)
+
+        val moved = CometTrailEngine.tick(recovered)
+        assertEquals(recovered.stepsTaken + 1, moved.stepsTaken)
+        assertNull(moved.collisionDirection)
+    }
+
+    @Test
     fun fillingTheBoardStartsAFreshOrbitWithoutLoss() {
         val path = buildList {
             for (y in 0 until COMET_TRAIL_ROWS) {
