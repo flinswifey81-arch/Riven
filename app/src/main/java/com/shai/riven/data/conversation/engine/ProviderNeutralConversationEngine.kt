@@ -1,6 +1,7 @@
 package com.shai.riven.data.conversation.engine
 
 import com.shai.riven.data.context.ActiveConversationReceiptValidator
+import com.shai.riven.data.context.ActiveConversationContextSource
 import com.shai.riven.data.context.ConversationalContextAssembler
 import com.shai.riven.data.context.ConversationalContextAssemblyInput
 import com.shai.riven.data.context.ConversationalContextFreshnessValidator
@@ -260,7 +261,9 @@ class ProviderNeutralConversationEngine(
                 is RivenContextCollectionResult.Failure -> {
                     val errorCode = if (assembled.requiredFailures.any { failure ->
                             val cause = failure.cause as? RivenContextFailureCause.ContractViolation
-                            cause?.violation is RivenContextContractViolation.CollectionBudgetExceeded
+                            cause?.violation is RivenContextContractViolation.CollectionBudgetExceeded ||
+                                (failure.sourceId == ActiveConversationContextSource.SOURCE_ID &&
+                                    cause?.violation is RivenContextContractViolation.FragmentTooLarge)
                         }
                     ) {
                         ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED

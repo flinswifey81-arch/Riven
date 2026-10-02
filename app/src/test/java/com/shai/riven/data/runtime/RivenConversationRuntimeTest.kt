@@ -108,6 +108,27 @@ class RivenConversationRuntimeTest {
     }
 
     @Test
+    fun fastSendWithoutAProfilePersistsDraftBeforeValidationAndSurvivesRelaunch() = runBlocking {
+        val first = runtime(QueueHttpClient())
+        assertTrue(first.initialize() is RivenRuntimeResult.Success)
+
+        val rejected = first.send("Keep this unconfigured message")
+
+        assertTrue(rejected is RivenRuntimeResult.Failure)
+        assertEquals(
+            "Keep this unconfigured message",
+            checkNotNull((rejected as RivenRuntimeResult.Failure).snapshot).draft,
+        )
+        first.close()
+        runtimes.remove(first)
+
+        val second = runtime(QueueHttpClient())
+        val reopened = second.initialize() as RivenRuntimeResult.Success
+        assertEquals("Keep this unconfigured message", reopened.snapshot.draft)
+        assertTrue(reopened.snapshot.messages.isEmpty())
+    }
+
+    @Test
     fun failedPartialReplyIsNotCanonicalAndRetryCompletesIt() = runBlocking {
         val http = QueueHttpClient(
             listOf(
@@ -268,6 +289,23 @@ class RivenConversationRuntimeTest {
 
         assertTrue(result is RivenRuntimeResult.Failure)
         assertEquals(ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED, (result as RivenRuntimeResult.Failure).engineCode)
+        assertTrue(http.requests.isEmpty())
+    }
+
+    @Test
+    fun currentTurnBeyondTranscriptSourceLimitReportsExplicitContextLimitBeforeHttp() = runBlocking {
+        val http = QueueHttpClient(success("must not run"))
+        val runtime = runtime(http)
+        runtime.initialize()
+        assertTrue(runtime.saveProfile(null, "Primary", "anthropic/example", "fake-key") is RivenProfileSaveResult.Success)
+
+        val result = runtime.send("x".repeat(40_000))
+
+        assertTrue(result is RivenRuntimeResult.Failure)
+        assertEquals(
+            ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED,
+            (result as RivenRuntimeResult.Failure).engineCode,
+        )
         assertTrue(http.requests.isEmpty())
     }
 

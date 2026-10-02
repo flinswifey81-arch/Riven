@@ -109,8 +109,31 @@ fun RivenApp(
     var draft by rememberSaveable { mutableStateOf("") }
     var draftInitialized by rememberSaveable { mutableStateOf(false) }
     var persistedDraft by remember { mutableStateOf("") }
-    var submittedDraft by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingSubmission by remember { mutableStateOf<PendingDraftSubmission?>(null) }
+    var nextSubmissionId by remember { mutableStateOf(0L) }
     var activeConversationJob by remember { mutableStateOf<Job?>(null) }
+
+    fun beginSubmission(content: String, baselineUserMessageIds: Set<String>): Long {
+        val submissionId = ++nextSubmissionId
+        pendingSubmission = PendingDraftSubmission(submissionId, content, baselineUserMessageIds)
+        return submissionId
+    }
+
+    fun settleSubmission(submissionId: Long?, restored: RivenRuntimeSnapshot?) {
+        val pending = pendingSubmission ?: return
+        if (submissionId != null && pending.submissionId != submissionId) return
+        var committed = false
+        restored?.let {
+            snapshot = it
+            persistedDraft = it.draft
+            committed = it.messages.any { message ->
+                message.role == MessageRole.USER && message.id !in pending.baselineUserMessageIds
+            }
+        }
+        draft = if (committed) restored?.draft.orEmpty() else pending.content
+        pendingSubmission = null
+        draftInitialized = true
+    }
 
     fun navigateTo(target: RivenDestination) {
         if (destination == RivenDestination.CHAT && target != RivenDestination.CHAT) {
@@ -125,10 +148,8 @@ fun RivenApp(
             is RivenRuntimeResult.Success -> {
                 snapshot = result.snapshot
                 persistedDraft = result.snapshot.draft
-                val submittedWasCommitted = submittedDraft != null &&
-                    result.snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content == submittedDraft
-                if (!draftInitialized || submittedWasCommitted) draft = result.snapshot.draft
-                submittedDraft = null
+                if (pendingSubmission != null) settleSubmission(null, result.snapshot)
+                else if (!draftInitialized) draft = result.snapshot.draft
                 draftInitialized = true
             }
             is RivenRuntimeResult.Failure -> {
@@ -144,8 +165,8 @@ fun RivenApp(
         loading = false
     }
 
-    LaunchedEffect(runtime, draft, persistedDraft, draftInitialized, submittedDraft) {
-        if (draftInitialized && submittedDraft == null && draft != persistedDraft) {
+    LaunchedEffect(runtime, draft, persistedDraft, draftInitialized, pendingSubmission) {
+        if (draftInitialized && pendingSubmission == null && draft != persistedDraft) {
             delay(DRAFT_SAVE_DELAY_MILLIS)
             when (val result = runtimeIo { runtime.saveDraft(draft) }) {
                 is RivenRuntimeResult.Success -> {
@@ -157,16 +178,14 @@ fun RivenApp(
         }
     }
 
-    LaunchedEffect(runtime, destination, loading) {
+    LaunchedEffect(runtime, destination) {
         if (!loading) {
             when (val result = runtimeIo { runtime.snapshot() }) {
                 is RivenRuntimeResult.Success -> {
                     snapshot = result.snapshot
                     persistedDraft = result.snapshot.draft
-                    val submittedWasCommitted = submittedDraft != null &&
-                        result.snapshot.messages.lastOrNull { it.role == MessageRole.USER }?.content == submittedDraft
-                    if (!draftInitialized || submittedWasCommitted) draft = result.snapshot.draft
-                    submittedDraft = null
+                    if (pendingSubmission != null) settleSubmission(null, result.snapshot)
+                    else if (!draftInitialized) draft = result.snapshot.draft
                 }
                 is RivenRuntimeResult.Failure -> notice = result.message
             }
@@ -204,11 +223,11 @@ fun RivenApp(
                 initialSnapshot = snapshot,
                 draft = draft,
                 onDraftChange = { draft = it },
-                onDraftSubmitted = { submittedDraft = it },
+                onDraftSubmitted = ::beginSubmission,
+                onSubmissionSettled = ::settleSubmission,
                 onRuntimeDraft = { storedDraft ->
                     draft = storedDraft
                     persistedDraft = storedDraft
-                    submittedDraft = null
                 },
                 externalNotice = notice,
                 onSnapshot = { snapshot = it },
@@ -296,7 +315,8 @@ private fun ChatScreen(
     initialSnapshot: RivenRuntimeSnapshot?,
     draft: String,
     onDraftChange: (String) -> Unit,
-    onDraftSubmitted: (String) -> Unit,
+    onDraftSubmitted: (String, Set<String>) -> Long,
+    onSubmissionSettled: (Long, RivenRuntimeSnapshot?) -> Unit,
     onRuntimeDraft: (String) -> Unit,
     externalNotice: String?,
     onSnapshot: (RivenRuntimeSnapshot) -> Unit,
@@ -306,9 +326,11 @@ private fun ChatScreen(
 ) {
     var snapshot by remember(initialSnapshot) { mutableStateOf(initialSnapshot) }
     var sending by remember { mutableStateOf(false) }
+    var cancelling by remember { mutableStateOf(false) }
     var streamedReply by remember { mutableStateOf("") }
     var notice by remember(externalNotice) { mutableStateOf(externalNotice) }
     var conversationJob by remember { mutableStateOf<Job?>(null) }
+    var activeSubmissionId by remember { mutableStateOf<Long?>(null) }
     val latestConversationJob by rememberUpdatedState(conversationJob)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -317,20 +339,22 @@ private fun ChatScreen(
         onDispose { latestConversationJob?.cancel(CancellationException("Chat screen left")) }
     }
 
-    fun apply(result: RivenRuntimeResult) {
+    fun apply(result: RivenRuntimeResult, submissionId: Long? = null) {
         when (result) {
             is RivenRuntimeResult.Success -> {
                 snapshot = result.snapshot
-                onRuntimeDraft(result.snapshot.draft)
+                if (submissionId != null) onSubmissionSettled(submissionId, result.snapshot)
+                else onRuntimeDraft(result.snapshot.draft)
                 notice = null
                 onSnapshot(result.snapshot)
             }
             is RivenRuntimeResult.Failure -> {
                 result.snapshot?.let {
                     snapshot = it
-                    onRuntimeDraft(it.draft)
+                    if (submissionId == null) onRuntimeDraft(it.draft)
                     onSnapshot(it)
                 }
+                if (submissionId != null) onSubmissionSettled(submissionId, result.snapshot)
                 notice = result.message
             }
         }
@@ -338,10 +362,12 @@ private fun ChatScreen(
 
     fun runConversation(
         preserveDraft: Boolean,
+        submissionId: Long? = null,
         block: suspend (suspend (String) -> Unit) -> RivenRuntimeResult,
     ) {
-        if (sending) return
+        if (sending || cancelling) return
         sending = true
+        activeSubmissionId = submissionId
         streamedReply = ""
         notice = null
         conversationJob = scope.launch {
@@ -364,16 +390,18 @@ private fun ChatScreen(
                         withContext(Dispatchers.Main.immediate) { streamedReply += delta }
                     }
                 }
-                apply(result)
+                apply(result, submissionId)
             } catch (_: CancellationException) {
                 notice = "Reply cancelled. Your message is still saved."
             } catch (_: Exception) {
+                submissionId?.let { onSubmissionSettled(it, null) }
                 notice = "Riven could not complete this reply. Your message is still saved."
             } finally {
                 streamedReply = ""
                 sending = false
                 conversationJob = null
                 onConversationJobChanged(null)
+                if (!cancelling) activeSubmissionId = null
             }
         }
         onConversationJobChanged(conversationJob)
@@ -442,38 +470,52 @@ private fun ChatScreen(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     item {
-                        TextButton(onClick = { runConversation(true) { runtime.retry(it) } }, enabled = !sending) {
+                        TextButton(
+                            onClick = { runConversation(true) { runtime.retry(it) } },
+                            enabled = !sending && !cancelling,
+                        ) {
                             Text("Retry")
                         }
                     }
                     item {
-                        TextButton(onClick = { runConversation(true) { runtime.regenerate(it) } }, enabled = !sending) {
+                        TextButton(
+                            onClick = { runConversation(true) { runtime.regenerate(it) } },
+                            enabled = !sending && !cancelling,
+                        ) {
                             Text("Regenerate")
                         }
                     }
                     item {
-                        TextButton(onClick = { runConversation(true) { runtime.continueConversation(it) } }, enabled = !sending) {
+                        TextButton(
+                            onClick = { runConversation(true) { runtime.continueConversation(it) } },
+                            enabled = !sending && !cancelling,
+                        ) {
                             Text("Continue")
                         }
                     }
-                    if (sending) {
+                    if (sending || cancelling) {
                         item {
                             TextButton(
                                 onClick = {
-                                    conversationJob?.cancel()
+                                    if (cancelling) return@TextButton
+                                    cancelling = true
+                                    val submissionId = activeSubmissionId
                                     scope.launch {
-                                        when (val result = runtimeIo { runtime.cancel() }) {
-                                            is RivenRuntimeResult.Success -> apply(result)
-                                            is RivenRuntimeResult.Failure -> {
-                                                result.snapshot?.let {
-                                                    snapshot = it
-                                                    onSnapshot(it)
-                                                }
-                                            }
+                                        try {
+                                            apply(runtimeIo { runtime.cancel() }, submissionId)
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (_: Exception) {
+                                            submissionId?.let { onSubmissionSettled(it, null) }
+                                            notice = "Riven could not confirm cancellation. Your draft is still saved."
+                                        } finally {
+                                            activeSubmissionId = null
+                                            cancelling = false
                                         }
                                     }
                                 },
-                            ) { Text("Cancel") }
+                                enabled = !cancelling,
+                            ) { Text(if (cancelling) "Cancelling" else "Cancel") }
                         }
                     }
                 }
@@ -488,21 +530,26 @@ private fun ChatScreen(
                     value = draft,
                     onValueChange = onDraftChange,
                     modifier = Modifier.weight(1f).testTag("chat_input"),
-                    enabled = !sending,
+                    enabled = !sending && !cancelling,
                     label = { Text("Message Riven") },
                     minLines = 1,
                     maxLines = if (compact) 3 else 5,
                 )
                 Button(
                     onClick = {
-                        onDraftSubmitted(draft)
-                        runConversation(false) { runtime.send(draft, it) }
+                        val submissionId = onDraftSubmitted(
+                            draft,
+                            snapshot?.messages.orEmpty()
+                                .filter { it.role == MessageRole.USER }
+                                .mapTo(linkedSetOf()) { it.id },
+                        )
+                        runConversation(false, submissionId) { runtime.send(draft, it) }
                     },
-                    enabled = !sending && draft.isNotBlank(),
+                    enabled = !sending && !cancelling && draft.isNotBlank(),
                     modifier = Modifier.testTag("chat_send"),
                     colors = ButtonDefaults.buttonColors(containerColor = RubyHeart),
                 ) {
-                    Text(if (sending) "…" else "Send")
+                    Text(if (sending || cancelling) "…" else "Send")
                 }
             }
         }
@@ -938,6 +985,12 @@ private fun MemoryControlCard(
 private fun SectionTitle(text: String) {
     Text(text, color = MutedGold, style = MaterialTheme.typography.titleLarge)
 }
+
+private data class PendingDraftSubmission(
+    val submissionId: Long,
+    val content: String,
+    val baselineUserMessageIds: Set<String>,
+)
 
 private const val DRAFT_SAVE_DELAY_MILLIS = 350L
 private const val MAX_VISIBLE_MODEL_CHOICES = 24

@@ -89,10 +89,10 @@ class OpenRouterConversationAdapter(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: OpenRouterTransportTimeoutException) {
-            emit(ProviderStreamEvent.Failure(ProviderFailureCode.TIMEOUT, providerRequestId))
+            if (!terminal) emit(ProviderStreamEvent.Failure(ProviderFailureCode.TIMEOUT, providerRequestId))
             return
         } catch (_: Exception) {
-            emit(ProviderStreamEvent.Failure(ProviderFailureCode.UNAVAILABLE, providerRequestId))
+            if (!terminal) emit(ProviderStreamEvent.Failure(ProviderFailureCode.UNAVAILABLE, providerRequestId))
             return
         }
 

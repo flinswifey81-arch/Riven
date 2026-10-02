@@ -13,6 +13,7 @@ class RivenContextSourceRegistry(
         val fragments = mutableListOf<RivenContextFragment>()
         val optionalFailures = mutableListOf<RivenContextSourceFailure>()
         val requiredFailures = mutableListOf<RivenContextSourceFailure>()
+        val sourceBudgetOmissions = mutableListOf<RivenContextBudgetOmission>()
         val freshnessReceipts = linkedSetOf<RivenContextFreshnessReceipt>()
         val now = request.now
 
@@ -38,7 +39,7 @@ class RivenContextSourceRegistry(
                 }
 
                 is RivenContextSourceResult.Success -> {
-                    val violation = validatePayloads(source.descriptor, result.payloads)
+                    val violation = validatePayloadStructure(result.payloads)
                     if (violation != null) {
                         recordFailure(
                             source = source,
@@ -47,14 +48,26 @@ class RivenContextSourceRegistry(
                             requiredFailures = requiredFailures,
                         )
                     } else {
-                        freshnessReceipts += result.freshnessReceipts
-                        result.payloads
+                        val stamped = result.payloads
                             .asSequence()
                             .filterNot { payload ->
                                 payload.validUntil?.let { validUntil -> validUntil <= now } == true
                             }
                             .mapIndexed { index, payload -> source.descriptor.stamp(payload, index) }
-                            .forEach(fragments::add)
+                            .toList()
+                        val bounded = applySourceBudget(stamped, source.descriptor)
+                        if (bounded.violation != null) {
+                            recordFailure(
+                                source = source,
+                                cause = RivenContextFailureCause.ContractViolation(bounded.violation),
+                                optionalFailures = optionalFailures,
+                                requiredFailures = requiredFailures,
+                            )
+                        } else {
+                            freshnessReceipts += result.freshnessReceipts
+                            fragments += bounded.fragments
+                            sourceBudgetOmissions += bounded.omissions
+                        }
                     }
                 }
             }
@@ -73,7 +86,7 @@ class RivenContextSourceRegistry(
         val snapshot = RivenContextSnapshot(
             fragments = budgeted.fragments,
             optionalFailures = optionalFailures.toList(),
-            budgetOmissions = budgeted.omissions,
+            budgetOmissions = (sourceBudgetOmissions + budgeted.omissions).distinct(),
             freshnessReceipts = freshnessReceipts,
         )
         return if (requiredFailures.isEmpty()) {
@@ -137,6 +150,65 @@ class RivenContextSourceRegistry(
         return BudgetApplication(selected.sortedWith(FRAGMENT_ORDER), omissions, null)
     }
 
+    private fun applySourceBudget(
+        fragments: List<RivenContextFragment>,
+        descriptor: RivenContextSourceDescriptor,
+    ): SourceBudgetApplication {
+        val nonDroppable = fragments.filter { fragment ->
+            fragment.budgetBehavior != RivenContextBudgetBehavior.DROP_IF_NEEDED
+        }
+        if (nonDroppable.size > descriptor.maxFragments) {
+            return SourceBudgetApplication(
+                violation = RivenContextContractViolation.MaximumFragmentsExceeded(
+                    maximum = descriptor.maxFragments,
+                    actual = nonDroppable.size,
+                ),
+            )
+        }
+        nonDroppable.firstOrNull { it.content.length > descriptor.maxCharsPerFragment }?.let { fragment ->
+            return SourceBudgetApplication(
+                violation = RivenContextContractViolation.FragmentTooLarge(
+                    fragmentId = fragment.fragmentId,
+                    maximumChars = descriptor.maxCharsPerFragment,
+                    actualChars = fragment.content.length,
+                ),
+            )
+        }
+        val protectedChars = nonDroppable.sumOf { fragment -> fragment.content.length.toLong() }
+        if (protectedChars > descriptor.maxAggregateChars) {
+            return SourceBudgetApplication(
+                violation = RivenContextContractViolation.AggregateTooLarge(
+                    maximumChars = descriptor.maxAggregateChars,
+                    actualChars = protectedChars,
+                ),
+            )
+        }
+
+        val selected = nonDroppable.toMutableList()
+        val omissions = mutableListOf<RivenContextBudgetOmission>()
+        var remainingFragments = descriptor.maxFragments - nonDroppable.size
+        var remainingChars = descriptor.maxAggregateChars.toLong() - protectedChars
+        fragments.filterNot(nonDroppable::contains).sortedWith(BUDGET_SELECTION_ORDER).forEach { fragment ->
+            if (fragment.content.length > descriptor.maxCharsPerFragment) {
+                omissions += fragment.omission()
+                return@forEach
+            }
+            if (remainingFragments == 0 || remainingChars == 0L) {
+                omissions += fragment.omission()
+            } else if (fragment.content.length <= remainingChars) {
+                selected += fragment
+                remainingFragments--
+                remainingChars -= fragment.content.length
+            } else {
+                omissions += fragment.omission()
+            }
+        }
+        return SourceBudgetApplication(
+            fragments = selected.sortedWith(FRAGMENT_ORDER),
+            omissions = omissions.distinct(),
+        )
+    }
+
     private fun recordFailure(
         source: RivenContextSource,
         cause: RivenContextFailureCause,
@@ -154,17 +226,9 @@ class RivenContextSourceRegistry(
         }
     }
 
-    private fun validatePayloads(
-        descriptor: RivenContextSourceDescriptor,
+    private fun validatePayloadStructure(
         payloads: List<RivenContextPayload>,
     ): RivenContextContractViolation? {
-        if (payloads.size > descriptor.maxFragments) {
-            return RivenContextContractViolation.MaximumFragmentsExceeded(
-                maximum = descriptor.maxFragments,
-                actual = payloads.size,
-            )
-        }
-
         val seenFragmentIds = mutableSetOf<String>()
         payloads.forEachIndexed { index, payload ->
             if (payload.fragmentId.isBlank()) {
@@ -175,13 +239,6 @@ class RivenContextSourceRegistry(
             }
             if (payload.content.isBlank()) {
                 return RivenContextContractViolation.BlankContent(payload.fragmentId)
-            }
-            if (payload.content.length > descriptor.maxCharsPerFragment) {
-                return RivenContextContractViolation.FragmentTooLarge(
-                    fragmentId = payload.fragmentId,
-                    maximumChars = descriptor.maxCharsPerFragment,
-                    actualChars = payload.content.length,
-                )
             }
             val observedAt = payload.observedAt
             val validUntil = payload.validUntil
@@ -194,13 +251,6 @@ class RivenContextSourceRegistry(
             }
         }
 
-        val aggregateChars = payloads.sumOf { payload -> payload.content.length.toLong() }
-        if (aggregateChars > descriptor.maxAggregateChars) {
-            return RivenContextContractViolation.AggregateTooLarge(
-                maximumChars = descriptor.maxAggregateChars,
-                actualChars = aggregateChars,
-            )
-        }
         return null
     }
 
@@ -309,5 +359,11 @@ class RivenContextSourceRegistry(
         val fragments: List<RivenContextFragment>,
         val omissions: List<RivenContextBudgetOmission>,
         val violation: RivenContextContractViolation.CollectionBudgetExceeded?,
+    )
+
+    private data class SourceBudgetApplication(
+        val fragments: List<RivenContextFragment> = emptyList(),
+        val omissions: List<RivenContextBudgetOmission> = emptyList(),
+        val violation: RivenContextContractViolation? = null,
     )
 }

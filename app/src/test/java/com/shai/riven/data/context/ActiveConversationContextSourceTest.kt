@@ -160,6 +160,71 @@ class ActiveConversationContextSourceTest {
     }
 
     @Test
+    fun accumulatedLongHistoryDropsOldestTurnsBeforeSourceValidationAndKeepsNewestBoundedWindow() = runBlocking {
+        createConversation()
+        val contents = (0 until 27).associate { index ->
+            "message-$index" to "$index-${"x".repeat(4_998)}"
+        }
+        var revision = 0L
+        contents.forEach { (id, body) ->
+            append(id, MessageRole.USER, revision, revision + 1, body = body)
+            revision++
+        }
+        val currentId = "message-26"
+        val result = RivenContextSourceRegistry(listOf(ActiveConversationContextSource(timeline))).collect(
+            request(revision, currentId, checkNotNull(contents[currentId])),
+        ) as RivenContextCollectionResult.Success
+
+        val active = result.snapshot.fragments.filter {
+            it.sourceId == ActiveConversationContextSource.SOURCE_ID
+        }
+        assertTrue(active.any { it.fragmentId == currentId })
+        assertTrue(active.any { it.fragmentId == "message-25" })
+        assertFalse(active.any { it.fragmentId == "message-0" })
+        assertTrue(active.sumOf { it.content.length } <= 32_768)
+        assertTrue(result.snapshot.budgetOmissions.any { it.fragmentId == "message-0" })
+    }
+
+    @Test
+    fun oversizedOldTurnIsOmittedWithoutPoisoningAValidCurrentTurn() = runBlocking {
+        createConversation()
+        append("oversized-old", MessageRole.USER, 0, 1, body = "x".repeat(40_000))
+        append("current", MessageRole.USER, 1, 2, body = "current turn")
+
+        val result = RivenContextSourceRegistry(listOf(ActiveConversationContextSource(timeline))).collect(
+            request(2, "current", "current turn"),
+        ) as RivenContextCollectionResult.Success
+        val active = result.snapshot.fragments.filter {
+            it.sourceId == ActiveConversationContextSource.SOURCE_ID
+        }
+
+        assertEquals(listOf("current"), active.map { it.fragmentId })
+        assertTrue(result.snapshot.budgetOmissions.any { it.fragmentId == "oversized-old" })
+        assertTrue(active.single().content.length <= ActiveConversationContextSource.MAX_CHARS_PER_FRAGMENT)
+    }
+
+    @Test
+    fun oversizedCurrentTurnRemainsAnExplicitRequiredSourceFailure() = runBlocking {
+        createConversation()
+        val oversized = "x".repeat(40_000)
+        append("current", MessageRole.USER, 0, 1, body = oversized)
+
+        val result = RivenContextSourceRegistry(listOf(ActiveConversationContextSource(timeline))).collect(
+            request(1, "current", oversized),
+        ) as RivenContextCollectionResult.Failure
+        val violation = (result.requiredFailures.single().cause as RivenContextFailureCause.ContractViolation).violation
+
+        assertEquals(
+            RivenContextContractViolation.FragmentTooLarge(
+                fragmentId = "current",
+                maximumChars = ActiveConversationContextSource.MAX_CHARS_PER_FRAGMENT,
+                actualChars = "role=USER\n".length + oversized.length,
+            ),
+            violation,
+        )
+    }
+
+    @Test
     fun optionalStaleMemorySourceIsTypedFailureNotProvenEmptyHistory() = runBlocking {
         createConversation()
         append("u1", MessageRole.USER, 0, 1)
@@ -283,12 +348,13 @@ class ActiveConversationContextSourceTest {
         revision: Long,
         at: Long,
         delivery: MessageDeliveryState = MessageDeliveryState.PERSISTED,
+        body: String = content(id),
     ) {
         assertTrue(
             timeline.appendMessage(
                 AppendTimelineMessageInput(
                     conversationId = CONVERSATION_ID,
-                    message = NewTimelineMessageInput(id, role, delivery, content(id), at, at),
+                    message = NewTimelineMessageInput(id, role, delivery, body, at, at),
                     expectedTimelineRevision = revision,
                     occurredAt = at,
                 ),

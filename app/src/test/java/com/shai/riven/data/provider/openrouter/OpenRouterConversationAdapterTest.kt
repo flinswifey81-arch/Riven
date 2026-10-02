@@ -11,6 +11,7 @@ import com.shai.riven.data.conversation.engine.ProviderFailureCode
 import com.shai.riven.data.conversation.engine.ProviderStreamEvent
 import com.shai.riven.data.credential.ProviderSecret
 import com.shai.riven.data.persistence.model.MessageRole
+import java.io.IOException
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -160,6 +161,29 @@ class OpenRouterConversationAdapterTest {
             events,
         )
         assertEquals(4, http.consumedLines)
+    }
+
+    @Test
+    fun transportCloseFailureAfterDoneCannotReplaceCompletedReplyWithFailure() = runBlocking {
+        val http = OpenRouterHttpClient { _, onLine ->
+            for (line in listOf(
+                "data: {\"id\":\"req-close\",\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}",
+                "",
+                "data: [DONE]",
+                "",
+            )) {
+                if (!onLine(line)) break
+            }
+            throw IOException("stream close failed after the terminal event")
+        }
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        OpenRouterConversationAdapter(http).stream(request()) { events += it }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Delta("kept"), ProviderStreamEvent.Completed("req-close")),
+            events,
+        )
     }
 
     @Test

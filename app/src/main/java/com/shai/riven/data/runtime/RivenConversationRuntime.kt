@@ -279,14 +279,14 @@ class RivenConversationRuntime(
     ): RivenRuntimeResult = conversationOperation { operation ->
         ensureConversation()
         coroutineContext.ensureActive()
+        val saved = saveDraftWithinLock(content)
+        if (saved is RivenRuntimeResult.Failure) return@conversationOperation saved
+        coroutineContext.ensureActive()
         val profileId = selectedProfileOrNull()?.profileId
             ?: return@conversationOperation RivenRuntimeResult.Failure(
                 message = "Configure and select an enabled OpenRouter profile before sending.",
                 snapshot = snapshotOrNull(),
             )
-        val saved = saveDraftWithinLock(content)
-        if (saved is RivenRuntimeResult.Failure) return@conversationOperation saved
-        coroutineContext.ensureActive()
         val timelineSnapshot = activeTimelineOrNull()
             ?: return@conversationOperation RivenRuntimeResult.Failure("Conversation is unavailable.")
         val draft = readDraft()
