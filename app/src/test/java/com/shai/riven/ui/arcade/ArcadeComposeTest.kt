@@ -21,6 +21,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import com.shai.riven.MainActivity
@@ -80,6 +82,14 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("DEMO COMMENTARY").assertIsDisplayed()
         composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
         composeRule.onAllNodesWithContentDescription("Face-down card").assertCountEquals(8)
+        composeRule.onNodeWithContentDescription("Eclipse. Skip the next turn.").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(
+            "Double Trouble. The next player draws two cards.",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
+        composeRule.onNodeWithContentDescription(
+            "Rewrite the Stars. Choose the next color.",
+        ).assertIsDisplayed()
     }
 
     @Test
@@ -119,6 +129,24 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("Ruleset awaiting confirmation").assertIsDisplayed()
         composeRule.onNodeWithText("CONTROL LAYOUT PREVIEW").assertIsDisplayed()
     }
+
+    @Test
+    fun starstruckUsesDistinctAccessibleCelestialTiles() {
+        composeRule.setContent {
+            RivenTheme {
+                ArcadeExperience(
+                    state = ArcadeUiState(selectedGameId = ArcadeGame.HEART_MATCH.gameId),
+                    onAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Starstruck").assertIsDisplayed()
+        composeRule.onNodeWithText("Moons • hearts • stars").assertIsDisplayed()
+        listOf("Aqua moon tile", "Ruby heart tile", "Gold star tile").forEach { label ->
+            assertTrue(composeRule.onAllNodesWithContentDescription(label).fetchSemanticsNodes().isNotEmpty())
+        }
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -132,20 +160,28 @@ class ArcadeActivityScreenshotTest {
     fun rendersSharedCardTableToInspectablePng() {
         writeScreenshot("arcade-lobby.png")
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
-        composeRule.onNodeWithText("Riven's Card Table").performClick()
+        composeRule.onNodeWithText("Cosmic Mischief").performClick()
         composeRule.onNodeWithText("SHARED TABLE").assertIsDisplayed()
         writeScreenshot("shared-card-table.png")
     }
 
     @Test
+    fun rendersStarstruckGridToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(4)
+        composeRule.onNodeWithText("Starstruck").performClick()
+        composeRule.onNodeWithText("CELESTIAL GRID").assertIsDisplayed()
+        writeScreenshot("starstruck-grid.png")
+    }
+
+    @Test
     fun recreationPreservesNavigationConversationAndDraftWhileBackUnwindsLayers() {
-        composeRule.onNodeWithText("Stacker").performClick()
+        composeRule.onNodeWithText("Celestial Spire").performClick()
         composeRule.onNodeWithContentDescription("Open conversation with Riven").performClick()
         composeRule.onNode(hasSetTextAction()).performTextInput("Draft survives recreation")
 
         composeRule.activityRule.scenario.recreate()
 
-        composeRule.onNodeWithText("Stacker").assertIsDisplayed()
+        composeRule.onNodeWithText("Celestial Spire").assertIsDisplayed()
         composeRule.onNodeWithText("Draft survives recreation").assertIsDisplayed()
         composeRule.runOnIdle {
             composeRule.activity.onBackPressedDispatcher.onBackPressed()
@@ -170,14 +206,14 @@ class ArcadeActivityScreenshotTest {
     @Test
     fun returningFromGamePreservesTheLobbyScrollPosition() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
-        composeRule.onNodeWithText("Riven's Card Table").performClick()
+        composeRule.onNodeWithText("Cosmic Mischief").performClick()
         composeRule.onNodeWithText("SHARED TABLE").assertIsDisplayed()
 
         composeRule.runOnIdle {
             composeRule.activity.onBackPressedDispatcher.onBackPressed()
         }
 
-        composeRule.onNodeWithText("Riven's Card Table").assertIsDisplayed()
+        composeRule.onNodeWithText("Cosmic Mischief").assertIsDisplayed()
     }
 
     private fun writeScreenshot(fileName: String) {
@@ -211,9 +247,14 @@ class ArcadeCompactActivityScreenshotTest {
     @Test
     fun rendersCompactSharedCardTableToInspectablePng() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
-        composeRule.onNodeWithText("Riven's Card Table").performClick()
+        composeRule.onNodeWithText("Cosmic Mischief").performClick()
         composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(2)
         composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
+        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
+        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
+        composeRule.onNodeWithContentDescription(
+            "Rewrite the Stars. Choose the next color.",
+        ).assertIsDisplayed()
 
         val output = File(
             System.getProperty("user.dir"),
@@ -256,13 +297,42 @@ class ArcadeCompactLayoutTest {
         }
 
         composeRule.onNodeWithTag("arcade_game_scroll").assertIsDisplayed()
+        composeRule.onNodeWithText("Cosmic Mischief").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Quiet commentary").assertIsDisplayed()
         composeRule.onNodeWithText("CALL OUT").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
+        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
+        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
+        composeRule.onNodeWithContentDescription(
+            "Rewrite the Stars. Choose the next color.",
+        ).assertIsDisplayed()
+        assertTrue(
+            composeRule.onAllNodesWithContentDescription(
+                "Double Trouble. The next player draws two cards.",
+            ).fetchSemanticsNodes().isNotEmpty(),
+        )
         composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(3)
         composeRule.onNodeWithText(
             "Preview only • Deck, penalties, challenges, trade protocol, and hidden-information engine remain pending.",
         ).assertIsDisplayed()
+    }
+
+
+    @Test
+    fun compactLargeTextLobbyKeepsApprovedLongNamesReachable() {
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(state = ArcadeUiState(), onAction = {})
+                }
+            }
+        }
+
+        listOf("Celestial Spire", "Midnight Solitaire", "Starstruck", "Comet Trail", "Cosmic Mischief")
+            .forEachIndexed { index, title ->
+                composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(index + 2)
+                composeRule.onNodeWithText(title).assertIsDisplayed()
+            }
     }
 
     @Test

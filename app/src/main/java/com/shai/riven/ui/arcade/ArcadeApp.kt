@@ -6,7 +6,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +29,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -57,6 +57,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -90,7 +91,10 @@ import com.shai.riven.ui.theme.TableNavy
 import com.shai.riven.ui.theme.TableNavyRaised
 import com.shai.riven.ui.theme.VioletHeart
 import com.shai.riven.ui.theme.WarmIvory
+import kotlin.math.PI
+import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.sin
 
 private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
     save = { state ->
@@ -888,8 +892,8 @@ private fun SolitairePreview(onAction: (ArcadeAction) -> Unit) {
 
 @Composable
 private fun HeartMatchPreview(onAction: (ArcadeAction) -> Unit) {
-    val heartColors = listOf(RubyHeart, AquaHeart, VioletHeart, CoralHeart, LimeHeart)
-    PreviewBoard(title = "HEART GRID", status = "Swap & cascade preview") {
+    val tileKinds = CelestialMatchTileKind.entries
+    PreviewBoard(title = "CELESTIAL GRID", status = "Moons • hearts • stars") {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -904,29 +908,124 @@ private fun HeartMatchPreview(onAction: (ArcadeAction) -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
                     repeat(6) { column ->
-                        val color = heartColors[(row * 2 + column + if (row == 3) 1 else 0) % heartColors.size]
-                        Box(
+                        val tileKind = tileKinds[(row * 2 + column + if (row == 3) 1 else 0) % tileKinds.size]
+                        CelestialMatchTile(
+                            kind = tileKind,
                             modifier = Modifier
                                 .weight(1f)
-                                .fillMaxHeight()
-                                .background(TableNavyRaised, RoundedCornerShape(10.dp))
-                                .clickable {
-                                    onAction(ArcadeAction.PreviewControl("Heart swap"))
-                                },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text("♥", color = color, fontSize = 28.sp)
-                        }
+                                .fillMaxHeight(),
+                            onClick = { onAction(ArcadeAction.PreviewControl("Celestial tile swap")) },
+                        )
                     }
                 }
             }
             Text(
-                text = "Cascades, sound, and power-up effects follow in the engine slice.",
+                text = "Distinct moon, heart, and star tiles preview the look; cascades and effects remain pending.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue,
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+}
+
+private enum class CelestialMatchTileKind {
+    MOON,
+    HEART,
+    STAR,
+}
+
+@Composable
+private fun CelestialMatchTile(
+    kind: CelestialMatchTileKind,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = when (kind) {
+        CelestialMatchTileKind.MOON -> "Aqua moon tile"
+        CelestialMatchTileKind.HEART -> "Ruby heart tile"
+        CelestialMatchTileKind.STAR -> "Gold star tile"
+    }
+    Box(
+        modifier = modifier
+            .background(TableNavyRaised, RoundedCornerShape(10.dp))
+            .border(1.dp, MutedGold.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+            .clearAndSetSemantics { contentDescription = label }
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(7.dp),
+        ) {
+            val tileCenter = center
+            val radius = size.minDimension * 0.39f
+            when (kind) {
+                CelestialMatchTileKind.MOON -> {
+                    drawCircle(AquaHeart, radius = radius, center = tileCenter)
+                    drawCircle(
+                        color = TableNavyRaised,
+                        radius = radius * 0.84f,
+                        center = tileCenter + Offset(radius * 0.48f, -radius * 0.08f),
+                    )
+                    drawCircle(
+                        color = MutedGold.copy(alpha = 0.55f),
+                        radius = radius * 1.08f,
+                        center = tileCenter,
+                        style = Stroke(width = 0.75.dp.toPx()),
+                    )
+                }
+
+                CelestialMatchTileKind.HEART -> {
+                    val heart = Path().apply {
+                        moveTo(tileCenter.x, tileCenter.y + radius)
+                        cubicTo(
+                            tileCenter.x - radius * 1.18f,
+                            tileCenter.y + radius * 0.24f,
+                            tileCenter.x - radius * 0.82f,
+                            tileCenter.y - radius * 0.88f,
+                            tileCenter.x,
+                            tileCenter.y - radius * 0.34f,
+                        )
+                        cubicTo(
+                            tileCenter.x + radius * 0.82f,
+                            tileCenter.y - radius * 0.88f,
+                            tileCenter.x + radius * 1.18f,
+                            tileCenter.y + radius * 0.24f,
+                            tileCenter.x,
+                            tileCenter.y + radius,
+                        )
+                        close()
+                    }
+                    drawPath(heart, color = RubyHeart)
+                    drawPath(
+                        path = heart,
+                        color = MutedGold.copy(alpha = 0.52f),
+                        style = Stroke(width = 0.75.dp.toPx()),
+                    )
+                }
+
+                CelestialMatchTileKind.STAR -> {
+                    val star = Path().apply {
+                        repeat(10) { index ->
+                            val pointRadius = if (index % 2 == 0) radius else radius * 0.42f
+                            val angle = -PI / 2.0 + index * PI / 5.0
+                            val x = tileCenter.x + cos(angle).toFloat() * pointRadius
+                            val y = tileCenter.y + sin(angle).toFloat() * pointRadius
+                            if (index == 0) moveTo(x, y) else lineTo(x, y)
+                        }
+                        close()
+                    }
+                    drawPath(star, color = MutedGold)
+                    drawCircle(
+                        color = WarmIvory.copy(alpha = 0.72f),
+                        radius = radius * 0.13f,
+                        center = tileCenter,
+                    )
+                }
+            }
         }
     }
 }
@@ -992,22 +1091,89 @@ private fun SnakePreview(onAction: (ArcadeAction) -> Unit) {
     }
 }
 
+private enum class CelestialCardMotif {
+    ORBIT,
+    ECLIPSE,
+    TWIN_STARS,
+    CONSTELLATION,
+}
+
 private data class DemoCard(
-    val label: String,
-    val colorName: String,
+    val id: String,
+    val cornerLabel: String,
+    val title: String,
+    val effect: String,
+    val accessibilityLabel: String,
     val color: Color,
+    val motif: CelestialCardMotif,
 )
 
 @Composable
 private fun SharedCardTablePreview(onAction: (ArcadeAction) -> Unit) {
     val hand = listOf(
-        DemoCard("7", "RED", RubyHeart),
-        DemoCard("3", "AQUA", AquaHeart),
-        DemoCard("SKIP", "GOLD", MutedGold),
-        DemoCard("7", "VIOLET", VioletHeart),
-        DemoCard("+2", "RED", RubyHeart),
-        DemoCard("5", "LIME", LimeHeart),
-        DemoCard("WILD", "ANY", VioletHeart),
+        DemoCard(
+            id = "red-seven",
+            cornerLabel = "7",
+            title = "RED",
+            effect = "Number card",
+            accessibilityLabel = "Red seven. Number card.",
+            color = RubyHeart,
+            motif = CelestialCardMotif.ORBIT,
+        ),
+        DemoCard(
+            id = "aqua-three",
+            cornerLabel = "3",
+            title = "AQUA",
+            effect = "Number card",
+            accessibilityLabel = "Aqua three. Number card.",
+            color = AquaHeart,
+            motif = CelestialCardMotif.ORBIT,
+        ),
+        DemoCard(
+            id = "eclipse",
+            cornerLabel = "Ø",
+            title = "ECLIPSE",
+            effect = "Skip next turn",
+            accessibilityLabel = "Eclipse. Skip the next turn.",
+            color = MutedGold,
+            motif = CelestialCardMotif.ECLIPSE,
+        ),
+        DemoCard(
+            id = "violet-seven",
+            cornerLabel = "7",
+            title = "VIOLET",
+            effect = "Number card",
+            accessibilityLabel = "Violet seven. Number card.",
+            color = VioletHeart,
+            motif = CelestialCardMotif.ORBIT,
+        ),
+        DemoCard(
+            id = "double-trouble",
+            cornerLabel = "+2",
+            title = "DOUBLE TROUBLE",
+            effect = "Next player draws 2",
+            accessibilityLabel = "Double Trouble. The next player draws two cards.",
+            color = RubyHeart,
+            motif = CelestialCardMotif.TWIN_STARS,
+        ),
+        DemoCard(
+            id = "lime-five",
+            cornerLabel = "5",
+            title = "LIME",
+            effect = "Number card",
+            accessibilityLabel = "Lime five. Number card.",
+            color = LimeHeart,
+            motif = CelestialCardMotif.ORBIT,
+        ),
+        DemoCard(
+            id = "rewrite-the-stars",
+            cornerLabel = "★",
+            title = "REWRITE THE STARS",
+            effect = "Choose next color",
+            accessibilityLabel = "Rewrite the Stars. Choose the next color.",
+            color = VioletHeart,
+            motif = CelestialCardMotif.CONSTELLATION,
+        ),
     )
     PreviewBoard(title = "SHARED TABLE", status = "Demo hand • no engine") {
         Column(
@@ -1034,7 +1200,7 @@ private fun SharedCardTablePreview(onAction: (ArcadeAction) -> Unit) {
                 }
                 Spacer(Modifier.width(18.dp))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    PlayingCard(label = "7", suit = "RED", color = RubyHeart)
+                    CelestialPlayingCard(card = hand.first(), testTag = "celestial_discard")
                     Text("DISCARD", color = MistBlue, style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -1057,19 +1223,18 @@ private fun SharedCardTablePreview(onAction: (ArcadeAction) -> Unit) {
                 }
             }
             Text("YOUR HAND", color = MistBlue, style = MaterialTheme.typography.labelSmall)
-            Row(
+            LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+                    .testTag("celestial_hand"),
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                hand.forEach { card ->
-                    PlayingCard(
-                        label = card.label,
-                        suit = card.colorName,
-                        color = card.color,
-                        compact = true,
-                    )
+                items(
+                    count = hand.size,
+                    key = { index -> hand[index].id },
+                ) { index ->
+                    val card = hand[index]
+                    CelestialPlayingCard(card = card, testTag = "celestial_hand_${card.id}")
                 }
             }
         }
@@ -1095,6 +1260,231 @@ private fun PreviewBoard(
             Text(status, color = MistBlue, style = MaterialTheme.typography.labelSmall)
         }
         Box(modifier = Modifier.weight(1f)) { content() }
+    }
+}
+
+@Composable
+private fun CelestialPlayingCard(
+    card: DemoCard,
+    testTag: String,
+) {
+    val largeText = LocalDensity.current.fontScale >= 1.3f
+    val width = if (largeText) 82.dp else 64.dp
+    val height = if (largeText) 120.dp else 94.dp
+    val shape = RoundedCornerShape(if (largeText) 12.dp else 10.dp)
+    Box(
+        modifier = Modifier
+            .width(width)
+            .height(height)
+            .background(WarmIvory, shape)
+            .border(1.dp, MutedGold, shape)
+            .clearAndSetSemantics { contentDescription = card.accessibilityLabel }
+            .testTag(testTag),
+    ) {
+        CelestialCardArtwork(card = card)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 6.dp, vertical = 5.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = card.cornerLabel,
+                    color = card.color,
+                    fontSize = if (largeText) 11.sp else 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+                Text(
+                    text = card.cornerLabel,
+                    color = card.color.copy(alpha = 0.72f),
+                    fontSize = if (largeText) 9.sp else 7.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            if (card.motif == CelestialCardMotif.ORBIT) {
+                Text(
+                    text = card.cornerLabel,
+                    color = card.color,
+                    fontSize = if (largeText) 32.sp else 27.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+            } else {
+                Spacer(Modifier.height(if (largeText) 31.dp else 23.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = card.title,
+                color = DeepInk,
+                fontSize = if (largeText) 8.sp else 7.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = if (largeText) 9.sp else 8.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = card.effect,
+                color = DeepInk.copy(alpha = 0.76f),
+                fontSize = if (largeText) 6.sp else 5.sp,
+                fontWeight = FontWeight.Medium,
+                lineHeight = if (largeText) 7.sp else 6.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CelestialCardArtwork(card: DemoCard) {
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(3.dp),
+    ) {
+        val stroke = 0.75.dp.toPx()
+        val innerInset = 2.dp.toPx()
+        val corner = 7.dp.toPx()
+        val bracket = size.minDimension * 0.16f
+        val center = Offset(size.width / 2f, size.height * 0.43f)
+        val radius = size.minDimension * 0.18f
+
+        drawRoundRect(
+            color = MutedGold.copy(alpha = 0.55f),
+            topLeft = Offset(innerInset, innerInset),
+            size = androidx.compose.ui.geometry.Size(
+                width = size.width - innerInset * 2f,
+                height = size.height - innerInset * 2f,
+            ),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner, corner),
+            style = Stroke(width = stroke),
+        )
+        listOf(
+            Offset(innerInset * 2f, innerInset * 2f),
+            Offset(size.width - innerInset * 2f, innerInset * 2f),
+            Offset(innerInset * 2f, size.height - innerInset * 2f),
+            Offset(size.width - innerInset * 2f, size.height - innerInset * 2f),
+        ).forEachIndexed { index, point ->
+            val horizontalDirection = if (index % 2 == 0) 1f else -1f
+            val verticalDirection = if (index < 2) 1f else -1f
+            drawLine(
+                color = MutedGold.copy(alpha = 0.62f),
+                start = point,
+                end = point + Offset(bracket * horizontalDirection, 0f),
+                strokeWidth = stroke,
+            )
+            drawLine(
+                color = MutedGold.copy(alpha = 0.62f),
+                start = point,
+                end = point + Offset(0f, bracket * verticalDirection),
+                strokeWidth = stroke,
+            )
+        }
+
+        when (card.motif) {
+            CelestialCardMotif.ORBIT -> {
+                drawCircle(card.color.copy(alpha = 0.12f), radius = radius, center = center)
+                drawCircle(
+                    color = MutedGold.copy(alpha = 0.72f),
+                    radius = radius,
+                    center = center,
+                    style = Stroke(width = stroke),
+                )
+                drawCircle(
+                    color = card.color.copy(alpha = 0.72f),
+                    radius = radius * 0.18f,
+                    center = center + Offset(radius * 1.25f, 0f),
+                )
+                drawLine(
+                    color = card.color.copy(alpha = 0.42f),
+                    start = center - Offset(radius * 1.45f, 0f),
+                    end = center + Offset(radius * 1.45f, 0f),
+                    strokeWidth = stroke,
+                )
+            }
+
+            CelestialCardMotif.ECLIPSE -> {
+                drawCircle(card.color.copy(alpha = 0.34f), radius = radius, center = center)
+                drawCircle(
+                    color = WarmIvory,
+                    radius = radius * 0.84f,
+                    center = center + Offset(radius * 0.42f, -radius * 0.08f),
+                )
+                drawCircle(
+                    color = MutedGold.copy(alpha = 0.78f),
+                    radius = radius * 1.18f,
+                    center = center,
+                    style = Stroke(width = stroke),
+                )
+            }
+
+            CelestialCardMotif.TWIN_STARS -> {
+                drawCircle(
+                    color = card.color.copy(alpha = 0.2f),
+                    radius = radius * 0.72f,
+                    center = center - Offset(radius * 0.48f, 0f),
+                )
+                drawCircle(
+                    color = MutedGold.copy(alpha = 0.24f),
+                    radius = radius * 0.72f,
+                    center = center + Offset(radius * 0.48f, 0f),
+                )
+                drawCircle(
+                    color = MutedGold.copy(alpha = 0.72f),
+                    radius = radius * 1.35f,
+                    center = center,
+                    style = Stroke(width = stroke),
+                )
+                drawLine(
+                    color = card.color,
+                    start = center - Offset(0f, radius * 0.58f),
+                    end = center + Offset(0f, radius * 0.58f),
+                    strokeWidth = stroke * 1.4f,
+                )
+                drawLine(
+                    color = card.color,
+                    start = center - Offset(radius * 0.58f, 0f),
+                    end = center + Offset(radius * 0.58f, 0f),
+                    strokeWidth = stroke * 1.4f,
+                )
+            }
+
+            CelestialCardMotif.CONSTELLATION -> {
+                val points = listOf(
+                    center + Offset(-radius * 1.05f, radius * 0.45f),
+                    center + Offset(-radius * 0.42f, -radius * 0.82f),
+                    center + Offset(radius * 0.18f, radius * 0.12f),
+                    center + Offset(radius * 0.86f, -radius * 0.58f),
+                    center + Offset(radius * 1.08f, radius * 0.55f),
+                )
+                points.zipWithNext().forEach { (start, end) ->
+                    drawLine(
+                        color = MutedGold.copy(alpha = 0.72f),
+                        start = start,
+                        end = end,
+                        strokeWidth = stroke,
+                    )
+                }
+                val starColors = listOf(RubyHeart, AquaHeart, MutedGold, VioletHeart, LimeHeart)
+                points.forEachIndexed { index, point ->
+                    drawCircle(
+                        color = starColors[index],
+                        radius = if (index == 2) stroke * 3.2f else stroke * 2.1f,
+                        center = point,
+                    )
+                }
+            }
+        }
     }
 }
 

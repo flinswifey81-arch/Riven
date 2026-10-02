@@ -26,6 +26,27 @@ class ArcadeModelsTest {
     }
 
     @Test
+    fun approvedDisplayNamesKeepStableIdsAndOrdinaryGameTypes() {
+        val expected = listOf(
+            Triple(ArcadeGame.STACKER, "stacker", "Celestial Spire"),
+            Triple(ArcadeGame.KLONDIKE, "klondike", "Midnight Solitaire"),
+            Triple(ArcadeGame.HEART_MATCH, "heart-match", "Starstruck"),
+            Triple(ArcadeGame.WRAPPING_SNAKE, "wrapping-snake", "Comet Trail"),
+            Triple(ArcadeGame.RIVEN_CARD_TABLE, "riven-card-table", "Cosmic Mischief"),
+        )
+
+        expected.forEach { (game, stableId, displayName) ->
+            assertEquals(stableId, game.gameId)
+            assertEquals(displayName, game.title)
+        }
+        assertTrue(ArcadeGame.STACKER.eyebrow.contains("STACKER"))
+        assertTrue(ArcadeGame.KLONDIKE.eyebrow.contains("SOLITAIRE"))
+        assertTrue(ArcadeGame.HEART_MATCH.eyebrow.contains("MATCH THREE"))
+        assertTrue(ArcadeGame.WRAPPING_SNAKE.eyebrow.contains("SNAKE"))
+        assertTrue(ArcadeGame.RIVEN_CARD_TABLE.eyebrow.contains("SHARED CARD GAME"))
+    }
+
+    @Test
     fun unknownGameCannotCreateAFalseNavigationState() {
         val state = ArcadeUiState(conversationDraft = "kept")
 
