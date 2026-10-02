@@ -7,6 +7,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.reminder.ReminderDeliveryMode
 import com.shai.riven.data.reminder.ReminderDeliveryClaim
 import com.shai.riven.data.reminder.ReminderDraft
+import com.shai.riven.data.reminder.ReminderEventKind
 import com.shai.riven.data.reminder.ReminderFailureCode
 import com.shai.riven.data.reminder.ReminderOperationResult
 import com.shai.riven.data.reminder.ReminderPlatformScheduler
@@ -42,6 +43,7 @@ class ReminderDeliveryDispatcherTest {
     private lateinit var repository: ReminderRepository
     private lateinit var sink: RecordingNotificationSink
     private lateinit var permissions: MutablePermissionSource
+    private lateinit var scheduler: RecordingScheduler
     private var idCounter = 0
 
     @Before
@@ -50,9 +52,10 @@ class ReminderDeliveryDispatcherTest {
         database = Room.inMemoryDatabaseBuilder(context, ReminderDatabase::class.java)
             .allowMainThreadQueries()
             .build()
+        scheduler = RecordingScheduler()
         repository = ReminderRepository(
             dao = database.reminderDao(),
-            scheduler = AlwaysScheduled,
+            scheduler = scheduler,
             timePolicy = ReminderTimePolicy(
                 Clock.fixed(Instant.parse("2026-10-02T12:00:00Z"), ZoneOffset.UTC),
             ) { ZoneOffset.UTC },
@@ -163,7 +166,7 @@ class ReminderDeliveryDispatcherTest {
     }
 
     @Test
-    fun failedAlarmTimeoutNotificationIsNotSilentlyAcknowledged() = runBlocking {
+    fun failedAlarmTimeoutNotificationIsTerminalAndNeverReschedulesAudibleAlarm() = runBlocking {
         val created = createAlarm("failed timeout handoff")
         val claim = repository.claimDelivery(
             created.id,
@@ -177,9 +180,66 @@ class ReminderDeliveryDispatcherTest {
         sink.reminderPostSucceeds = false
 
         dispatcher().recoverPending(delivering)
+        val recoveryReport = repository.rescheduleAll("application_startup")
+        val staleClaim = repository.claimDelivery(created.id, created.scheduleRevision)
 
-        assertEquals(ReminderStatus.FAILED, current(created.id).status)
+        assertEquals(ReminderStatus.DELIVERED, current(created.id).status)
+        assertEquals(ReminderFailureCode.NOTIFICATION_PERMISSION_REQUIRED, current(created.id).lastFailureCode)
         assertEquals(1, sink.reminderPosts)
+        assertEquals(0, recoveryReport.scheduled)
+        assertEquals(1, scheduler.requests.size)
+        assertEquals(ReminderDeliveryClaim.IgnoredDuplicateOrStale, staleClaim)
+        assertEquals(
+            1,
+            database.reminderDao().eventCount(
+                created.id,
+                ReminderEventKind.DELIVERY_CLAIMED.name,
+            ),
+        )
+        assertEquals(
+            1,
+            database.reminderDao().eventCount(
+                created.id,
+                ReminderEventKind.FOLLOWUP_NOTIFICATION_FAILED.name,
+            ),
+        )
+    }
+
+    @Test
+    fun startupRecoveryDoesNotRetryOrReRingTerminalTimeoutFollowupFailure() = runBlocking {
+        val created = createAlarm("bounded timeout recovery")
+        val claim = repository.claimDelivery(
+            created.id,
+            created.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+        val delivering = checkNotNull(repository.prepareRingingTimeoutNotification(
+            created.id,
+            created.scheduleRevision,
+            claim.deliveryToken,
+        ))
+        sink.reminderPostSucceeds = false
+        val dispatcher = dispatcher()
+        dispatcher.recoverPending(delivering)
+        val postsBeforeStartup = sink.reminderPosts
+
+        ReminderRecoveryCoordinator(
+            repository = repository,
+            dispatcher = dispatcher,
+            nowMillis = { Instant.parse("2026-10-03T12:00:00Z").toEpochMilli() },
+        ).recover("application_startup")
+
+        assertEquals(ReminderStatus.DELIVERED, current(created.id).status)
+        assertTrue(repository.pendingNotificationDeliveries().isEmpty())
+        assertTrue(repository.ringingDeliveries().isEmpty())
+        assertEquals(postsBeforeStartup, sink.reminderPosts)
+        assertEquals(1, scheduler.requests.size)
+        assertEquals(
+            1,
+            database.reminderDao().eventCount(
+                created.id,
+                ReminderEventKind.DELIVERY_CLAIMED.name,
+            ),
+        )
     }
 
     private suspend fun createNotification(title: String): ReminderSnapshot =
@@ -249,9 +309,11 @@ class ReminderDeliveryDispatcherTest {
         override fun snapshot(): ReminderPermissionSnapshot = current
     }
 
-    private object AlwaysScheduled : ReminderPlatformScheduler {
+    private class RecordingScheduler : ReminderPlatformScheduler {
+        val requests = mutableListOf<ReminderScheduleRequest>()
+
         override fun schedule(request: ReminderScheduleRequest): ReminderScheduleResult =
-            ReminderScheduleResult.Scheduled
+            ReminderScheduleResult.Scheduled.also { requests += request }
 
         override fun cancel(reminderId: String) = Unit
     }

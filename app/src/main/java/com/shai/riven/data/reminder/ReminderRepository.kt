@@ -392,6 +392,39 @@ class ReminderRepository(
         return isCurrentDelivery(reminderId, scheduleRevision, deliveryToken)
     }
 
+    suspend fun finishTimedOutAlarmFollowupFailure(
+        reminderId: String,
+        scheduleRevision: Long,
+        deliveryToken: String,
+        code: ReminderFailureCode,
+        detail: String,
+    ): ReminderSnapshot? {
+        val changed = dao.markTimedOutAlarmFollowupFailure(
+            reminderId = reminderId,
+            scheduleRevision = scheduleRevision,
+            deliveryToken = deliveryToken,
+            failureCode = code.name,
+            failureDetail = detail,
+            now = timePolicy.nowMillis(),
+        )
+        val reminder = dao.reminder(reminderId) ?: return null
+        if (changed == 1) {
+            deliveryEffects.cancelDelivery(reminderId, deliveryToken)
+            recordEvent(
+                reminder,
+                ReminderEventKind.FOLLOWUP_NOTIFICATION_FAILED,
+                detail,
+                deliveryToken,
+            )
+        }
+        return reminder.toSnapshot().takeIf {
+            changed == 1 ||
+                (it.scheduleRevision == scheduleRevision &&
+                    it.deliveryToken == deliveryToken &&
+                    it.status == ReminderStatus.DELIVERED)
+        }
+    }
+
     override suspend fun updateQuietHours(settings: ReminderQuietHours) {
         dao.upsertQuietHours(
             ReminderQuietHoursEntity(
