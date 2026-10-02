@@ -150,9 +150,33 @@ class WorkManagerRivenBackgroundWorkSchedulerTest {
         val automaticMemory = workManager
             .getWorkInfosForUniqueWork(RivenBackgroundWorkNames.PERIODIC_AUTOMATIC_MEMORY_SWEEP)
             .get(10, TimeUnit.SECONDS)
+        val lifecycle = workManager
+            .getWorkInfosForUniqueWork(RivenBackgroundWorkNames.PERIODIC_MEMORY_LIFECYCLE_SWEEP)
+            .get(10, TimeUnit.SECONDS)
         assertEquals(1, attachment.count { !it.state.isFinished })
         assertEquals(1, repair.count { !it.state.isFinished })
         assertEquals(1, automaticMemory.count { !it.state.isFinished })
+        assertEquals(1, lifecycle.count { !it.state.isFinished })
+    }
+
+    @Test
+    fun shortWindowSweepUsesReplaceableFiveMinuteInactivityDelay() {
+        scheduler.enqueueAutomaticMemoryShortWindowSweep()
+        scheduler.enqueueAutomaticMemoryShortWindowSweep()
+
+        val work = workManager
+            .getWorkInfosForUniqueWork(RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SHORT_WINDOW)
+            .get(10, TimeUnit.SECONDS)
+        assertEquals(1, work.count { !it.state.isFinished })
+        val request = scheduler.createOneTimeRequest(
+            kind = RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
+            initialDelayMs = AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+        )
+        assertEquals(AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS, request.workSpec.initialDelay)
+        assertEquals(
+            setOf(RivenBackgroundWorkData.KIND),
+            request.workSpec.input.keyValueMap.keys,
+        )
     }
 
     @Test

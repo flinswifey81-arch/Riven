@@ -6,6 +6,7 @@ import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.entity.CandidateMemoryEntity
 import com.shai.riven.data.persistence.entity.CandidateMemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
+import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
@@ -19,6 +20,7 @@ import com.shai.riven.data.persistence.model.DerivedArtifactState
 import com.shai.riven.data.persistence.model.EvidenceRole
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.MemoryAuditAction
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
@@ -42,6 +44,7 @@ class MemoryTransactionService(
 ) {
     private val memoryDao = database.memoryDao()
     private val maintenanceDao = database.maintenanceDao()
+    private val lifecycleDao = database.memoryLifecycleDao()
     private val validationRecallFence = database.validationRecallCorpusFence()
 
     suspend fun createCandidate(input: CreateCandidateMemoryInput): MemoryWriteResult =
@@ -373,6 +376,7 @@ class MemoryTransactionService(
                 updatedAt = input.occurredAt,
             )
             memoryDao.updateMemory(forgotten)
+            lifecycleDao.deleteAccessibility(memory.id)
             evidence.forEach { source ->
                 ensureForgetTombstone(
                     sourceClaimHash = sourceClaimSuppressionHash(source.experienceId, source.lineageKey),
@@ -413,6 +417,23 @@ class MemoryTransactionService(
         }
         val changed = memory.copy(retentionState = targetState, updatedAt = input.occurredAt)
         memoryDao.updateMemory(changed)
+        lifecycleDao.upsertAccessibility(
+            MemoryAccessibilityEntity(
+                memoryId = memory.id,
+                band = if (targetState == MemoryRetentionState.DORMANT) {
+                    MemoryAccessibilityBand.DORMANT
+                } else {
+                    MemoryAccessibilityBand.ORDINARY
+                },
+                reasonCode = if (targetState == MemoryRetentionState.DORMANT) {
+                    "RETENTION_DORMANT"
+                } else {
+                    "EXPLICIT_REACTIVATION"
+                },
+                evaluatedAt = input.occurredAt,
+                sourceUpdatedAt = input.occurredAt,
+            ),
+        )
         insertAudit(
             memoryId = memory.id,
             action = auditAction,
@@ -513,7 +534,17 @@ class MemoryTransactionService(
         memoryDao.updateMemory(
             memory.copy(
                 lastConfirmedAt = input.confirmedAt,
+                retentionState = MemoryRetentionState.ACTIVE,
                 updatedAt = input.occurredAt,
+            ),
+        )
+        lifecycleDao.upsertAccessibility(
+            MemoryAccessibilityEntity(
+                memoryId = memory.id,
+                band = MemoryAccessibilityBand.ORDINARY,
+                reasonCode = "REINFORCED",
+                evaluatedAt = input.occurredAt,
+                sourceUpdatedAt = input.occurredAt,
             ),
         )
         insertAudit(
@@ -522,6 +553,16 @@ class MemoryTransactionService(
             triggeringExperienceId = input.triggeringExperienceId,
             occurredAt = input.occurredAt,
         )
+        if (memory.retentionState == MemoryRetentionState.DORMANT) {
+            insertAudit(
+                memoryId = memory.id,
+                action = MemoryAuditAction.REACTIVATED,
+                triggeringExperienceId = input.triggeringExperienceId,
+                fromRetentionState = MemoryRetentionState.DORMANT,
+                toRetentionState = MemoryRetentionState.ACTIVE,
+                occurredAt = input.occurredAt,
+            )
+        }
         return MemoryWriteResult.Success(MemoryWriteOperation.REINFORCE, setOf(memory.id))
     }
 
@@ -846,12 +887,14 @@ class MemoryTransactionService(
             state = DerivedArtifactState.STALE,
             invalidatedAt = occurredAt,
         )
+        lifecycleDao.deleteDerivedPayloadsForMemories(canonicalMemoryIds)
         if (experienceIds.isNotEmpty()) {
             maintenanceDao.markExperienceDerivedArtifacts(
                 experienceIds = experienceIds,
                 state = DerivedArtifactState.STALE,
                 invalidatedAt = occurredAt,
             )
+            lifecycleDao.deleteDerivedPayloadsForExperiences(experienceIds)
         }
         if (messageIds.isNotEmpty()) {
             maintenanceDao.markMessageDerivedArtifacts(
@@ -859,6 +902,7 @@ class MemoryTransactionService(
                 state = DerivedArtifactState.STALE,
                 invalidatedAt = occurredAt,
             )
+            lifecycleDao.deleteDerivedPayloadsForMessages(messageIds)
         }
         if (openLoopIds.isNotEmpty()) {
             maintenanceDao.markOpenLoopDerivedArtifacts(
@@ -866,6 +910,7 @@ class MemoryTransactionService(
                 state = DerivedArtifactState.STALE,
                 invalidatedAt = occurredAt,
             )
+            lifecycleDao.deleteDerivedPayloadsForOpenLoops(openLoopIds)
         }
         memoryIds.forEach { memoryId ->
             maintenanceDao.insertRepairJob(

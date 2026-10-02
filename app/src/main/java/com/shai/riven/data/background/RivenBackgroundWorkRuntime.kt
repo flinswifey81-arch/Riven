@@ -10,6 +10,7 @@ import com.shai.riven.data.attachment.AttachmentService
 import com.shai.riven.data.attachment.FileAttachmentBlobStore
 import com.shai.riven.data.credential.ProviderCredentialStore
 import com.shai.riven.data.persistence.RivenDatabaseLease
+import com.shai.riven.data.memory.MemoryAgingService
 import com.shai.riven.data.persistence.RivenDatabaseProvider
 import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
 import com.shai.riven.data.provider.ProviderProfileService
@@ -42,8 +43,9 @@ class RivenBackgroundWorkRuntime private constructor(
                     attachmentDao = database.attachmentDao(),
                     attachmentService = attachmentService,
                 )
-                // Real repair behavior is intentionally absent until a future feature supplies handlers.
-                val repairRegistry = RepairJobHandlerRegistry(emptyList())
+                val repairRegistry = RepairJobHandlerRegistry(
+                    derivedArtifactRepairHandlers(DerivedArtifactRepairService(database)),
+                )
                 val repairRunner = RepairJobRunner(
                     database = database,
                     handlerRegistry = repairRegistry,
@@ -66,6 +68,7 @@ class RivenBackgroundWorkRuntime private constructor(
                     ),
                 )
                 val automaticMemorySweep = AutomaticMemorySweepService(automaticMemoryQueue)
+                val memoryLifecycleSweep = MemoryLifecycleSweepService(MemoryAgingService(database))
                 return RivenBackgroundWorkRuntime(
                     databaseLease = databaseLease,
                     executor = RivenBackgroundWorkExecutor(
@@ -74,6 +77,7 @@ class RivenBackgroundWorkRuntime private constructor(
                         repairSweep = repairSweep,
                         automaticMemoryJobRunner = automaticMemoryJobRunner,
                         automaticMemorySweep = automaticMemorySweep,
+                        memoryLifecycleSweep = memoryLifecycleSweep,
                     ),
                 )
             } catch (failure: Exception) {

@@ -920,6 +920,32 @@ class AutomaticMemoryPipelineIntegrationTest {
         assertEquals(callsAfterSuccess, model.totalCalls)
     }
 
+    @Test
+    fun consolidationStageSurvivesInterruptionRelaunchAndOverlappingClaim() = runBlocking {
+        enqueueAndRun(appendSuccessfulTurn("I love sardines.", "Noted."))
+        val second = appendSuccessfulTurn("My favorite tea is oolong.", "Also noted.")
+        val queued = queue.ensureForSucceededRun(second.runId, second.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        val userJob = checkNotNull(database.automaticMemoryDao().jobForMessage(second.userMessageId))
+        model.cancelNextConsolidation = true
+
+        val interrupted = runCatching { runner.run(userJob.id) }.exceptionOrNull()
+
+        assertTrue(interrupted is CancellationException)
+        val durable = checkNotNull(database.automaticMemoryDao().job(userJob.id))
+        assertEquals(AutomaticMemoryJobState.RUNNING, durable.state)
+        assertEquals(AutomaticMemoryJobStage.CONSOLIDATION, durable.nextStage)
+        assertTrue(runner.run(userJob.id) is AutomaticMemoryJobRunResult.AlreadyRunning)
+
+        clock.addAndGet(com.shai.riven.data.background.AUTOMATIC_MEMORY_RUNNING_LEASE_MS + 1L)
+        reopenDatabase()
+        assertTrue(runner.run(userJob.id) is AutomaticMemoryJobRunResult.Succeeded)
+        assertEquals(2L, rowCount("consolidation_checkpoints"))
+        queued.jobIds.filterNot { it == userJob.id }.forEach { jobId ->
+            assertTrue(runner.run(jobId) is AutomaticMemoryJobRunResult.Succeeded)
+        }
+    }
+
     private suspend fun enqueueAndRun(turn: Turn) {
         val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
             as AutomaticMemoryEnqueueResult.Enqueued
@@ -1099,6 +1125,7 @@ class AutomaticMemoryPipelineIntegrationTest {
         var twoFactShortWindow = false
         var extractionOverride: ((CandidateExtractionSnapshot) -> CandidateExtractionProposal)? = null
         var cancelNextSardineAnalysis = false
+        var cancelNextConsolidation = false
         var sardineAnalysisCalls = 0
 
         override suspend fun analyze(snapshot: ImmediateAttentionSnapshot): ImmediateAttentionProposal {
@@ -1277,6 +1304,17 @@ class AutomaticMemoryPipelineIntegrationTest {
                 outcome = CandidateValidationOutcome.ACCEPT_NEW,
                 admission = admission,
             )
+        }
+
+        override suspend fun proposeConsolidation(
+            snapshot: com.shai.riven.data.memory.ConsolidationSnapshot,
+        ): com.shai.riven.data.memory.ConsolidationProposal {
+            totalCalls += 1
+            if (cancelNextConsolidation) {
+                cancelNextConsolidation = false
+                throw CancellationException("simulated consolidation interruption")
+            }
+            return com.shai.riven.data.memory.ConsolidationProposal.NoConsolidation
         }
     }
 

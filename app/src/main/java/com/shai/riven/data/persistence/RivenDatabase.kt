@@ -14,6 +14,7 @@ import com.shai.riven.data.persistence.dao.ExperienceAttentionDao
 import com.shai.riven.data.persistence.dao.AttachmentDao
 import com.shai.riven.data.persistence.dao.MaintenanceDao
 import com.shai.riven.data.persistence.dao.MemoryDao
+import com.shai.riven.data.persistence.dao.MemoryLifecycleDao
 import com.shai.riven.data.persistence.dao.OpenLoopDao
 import com.shai.riven.data.persistence.dao.ProviderProfileDao
 import com.shai.riven.data.persistence.dao.SafeDeleteDao
@@ -27,6 +28,7 @@ import com.shai.riven.data.persistence.entity.ConversationDraftEntity
 import com.shai.riven.data.persistence.entity.ConversationRunEntity
 import com.shai.riven.data.persistence.entity.ConversationTimelineHeadEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DerivedArtifactPayloadEntity
 import com.shai.riven.data.persistence.entity.DraftAttachmentEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactAttachmentDependencyEntity
 import com.shai.riven.data.persistence.entity.DerivedArtifactExperienceDependencyEntity
@@ -42,6 +44,7 @@ import com.shai.riven.data.persistence.entity.GeneratedMediaProvenanceEntity
 import com.shai.riven.data.persistence.entity.KnownEntityEntity
 import com.shai.riven.data.persistence.entity.MemoryAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
+import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
 import com.shai.riven.data.persistence.entity.MemoryEntityLinkEntity
 import com.shai.riven.data.persistence.entity.MemoryEvidenceEntity
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
@@ -50,12 +53,14 @@ import com.shai.riven.data.persistence.entity.MessageAttachmentEntity
 import com.shai.riven.data.persistence.entity.MessageParentEdgeEntity
 import com.shai.riven.data.persistence.entity.OpenLoopAuditHistoryEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntity
+import com.shai.riven.data.persistence.entity.OpenLoopPassCheckpointEntity
 import com.shai.riven.data.persistence.entity.OpenLoopEntityLinkEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileCapabilityEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileEntity
 import com.shai.riven.data.persistence.entity.RepairJobEntity
 import com.shai.riven.data.persistence.entity.SuppressionTombstoneEntity
 import com.shai.riven.data.persistence.entity.SuppressionSourceCoverageEntity
+import com.shai.riven.data.persistence.entity.ConsolidationCheckpointEntity
 import com.shai.riven.data.persistence.entity.ShaiSystemInstructionsEntity
 import com.shai.riven.data.persistence.model.SignificanceLevelConverters
 
@@ -101,8 +106,12 @@ import com.shai.riven.data.persistence.model.SignificanceLevelConverters
         ExperienceAttentionSignalEntity::class,
         ConversationRunEntity::class,
         AutomaticMemoryJobEntity::class,
+        MemoryAccessibilityEntity::class,
+        OpenLoopPassCheckpointEntity::class,
+        ConsolidationCheckpointEntity::class,
+        DerivedArtifactPayloadEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true,
 )
 abstract class RivenDatabase : RoomDatabase() {
@@ -117,6 +126,8 @@ abstract class RivenDatabase : RoomDatabase() {
     abstract fun automaticMemoryDao(): AutomaticMemoryDao
 
     abstract fun memoryDao(): MemoryDao
+
+    abstract fun memoryLifecycleDao(): MemoryLifecycleDao
 
     abstract fun experienceAttentionDao(): ExperienceAttentionDao
 
@@ -169,6 +180,7 @@ abstract class RivenDatabase : RoomDatabase() {
             MIGRATION_7_8,
             MIGRATION_8_9,
             MIGRATION_9_10,
+            MIGRATION_10_11,
         )
     }
 }

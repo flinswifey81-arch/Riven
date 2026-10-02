@@ -20,6 +20,7 @@ import com.shai.riven.data.persistence.model.CandidateEvidenceRole
 import com.shai.riven.data.persistence.model.EpistemicBasis
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.MemoryKind
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
@@ -229,7 +230,7 @@ interface MemoryDao {
 
     @Query(
         """
-        SELECT memory_id AS memoryId,
+        SELECT memories.memory_id AS memoryId,
                kind,
                scope,
                substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
@@ -250,9 +251,11 @@ interface MemoryDao {
                practical_significance AS practicalSignificance,
                identity_significance AS identitySignificance,
                sensitivity,
-               updated_at AS updatedAt
+               updated_at AS updatedAt,
+               COALESCE(memory_accessibility.band, 'ORDINARY') AS accessibilityBand
         FROM memories
-        WHERE memory_id > :afterMemoryId
+        LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
+        WHERE memories.memory_id > :afterMemoryId
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -260,7 +263,7 @@ interface MemoryDao {
               WHERE memory_evidence.memory_id = memories.memory_id
                 AND experiences.availability = 'AVAILABLE'
           )
-        ORDER BY memory_id
+        ORDER BY memories.memory_id
         LIMIT :limit
         """,
     )
@@ -272,7 +275,7 @@ interface MemoryDao {
 
     @Query(
         """
-        SELECT memory_id AS memoryId,
+        SELECT memories.memory_id AS memoryId,
                kind,
                scope,
                substr(meaning, 1, :maxMeaningCharsPlusOne) AS meaning,
@@ -293,9 +296,11 @@ interface MemoryDao {
                practical_significance AS practicalSignificance,
                identity_significance AS identitySignificance,
                sensitivity,
-               updated_at AS updatedAt
+               updated_at AS updatedAt,
+               COALESCE(memory_accessibility.band, 'ORDINARY') AS accessibilityBand
         FROM memories
-        WHERE memory_id IN (:memoryIds)
+        LEFT JOIN memory_accessibility ON memory_accessibility.memory_id = memories.memory_id
+        WHERE memories.memory_id IN (:memoryIds)
           AND EXISTS (
               SELECT 1 FROM memory_evidence
               INNER JOIN experiences
@@ -303,7 +308,7 @@ interface MemoryDao {
               WHERE memory_evidence.memory_id = memories.memory_id
                 AND experiences.availability = 'AVAILABLE'
           )
-        ORDER BY memory_id
+        ORDER BY memories.memory_id
         """,
     )
     fun conversationalRecallMemoryRows(
@@ -474,6 +479,7 @@ data class ConversationalRecallMemoryRow(
     val identitySignificance: SignificanceLevel?,
     val sensitivity: SensitivityLevel,
     val updatedAt: Long,
+    val accessibilityBand: MemoryAccessibilityBand = MemoryAccessibilityBand.ORDINARY,
 )
 
 data class ValidationRecallEvidenceRow(

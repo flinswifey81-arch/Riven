@@ -24,6 +24,11 @@ import com.shai.riven.data.persistence.entity.ExperienceEntity
 import com.shai.riven.data.persistence.entity.ExperienceAttentionAssessmentEntity
 import com.shai.riven.data.persistence.entity.ExperienceAttentionSignalEntity
 import com.shai.riven.data.persistence.entity.MemoryEntity
+import com.shai.riven.data.persistence.entity.MemoryAccessibilityEntity
+import com.shai.riven.data.persistence.entity.OpenLoopPassCheckpointEntity
+import com.shai.riven.data.persistence.entity.ConsolidationCheckpointEntity
+import com.shai.riven.data.persistence.entity.DerivedArtifactEntity
+import com.shai.riven.data.persistence.entity.DerivedArtifactPayloadEntity
 import com.shai.riven.data.persistence.entity.MessageEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileCapabilityEntity
 import com.shai.riven.data.persistence.entity.ProviderProfileEntity
@@ -42,6 +47,7 @@ import com.shai.riven.data.persistence.model.ExperienceActor
 import com.shai.riven.data.persistence.model.ExperienceAvailability
 import com.shai.riven.data.persistence.model.ExperienceType
 import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRetentionState
@@ -49,6 +55,8 @@ import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MemoryTruthState
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.DerivedArtifactState
+import com.shai.riven.data.persistence.model.DerivedArtifactType
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.persistence.model.SuppressionKind
 import com.shai.riven.data.persistence.model.TemporalState
@@ -185,6 +193,29 @@ internal fun seedRepresentativeState(database: RivenDatabase) {
             createdAt = 1,
             updatedAt = 1,
         ),
+    )
+    database.memoryLifecycleDao().upsertAccessibility(
+        MemoryAccessibilityEntity("memory", MemoryAccessibilityBand.ORDINARY, "SEEDED", 1, 1),
+    )
+    database.memoryLifecycleDao().upsertOpenLoopCheckpoint(
+        OpenLoopPassCheckpointEntity("experience", 1, null, "input", "result", 1),
+    )
+    database.memoryLifecycleDao().insertConsolidationCheckpoint(
+        ConsolidationCheckpointEntity("checkpoint", "corpus", null, null, "profile", 1),
+    )
+    database.maintenanceDao().insertDerivedArtifact(
+        DerivedArtifactEntity(
+            id = "derived",
+            artifactType = DerivedArtifactType.SUMMARY,
+            state = DerivedArtifactState.CURRENT,
+            producerVersion = "seed",
+            sourceRevision = 1,
+            artifactHash = "hash",
+            createdAt = 1,
+        ),
+    )
+    database.memoryLifecycleDao().upsertDerivedPayload(
+        DerivedArtifactPayloadEntity("derived", 1, "private projection", 1),
     )
     database.maintenanceDao().insertSuppressionTombstone(
         SuppressionTombstoneEntity(

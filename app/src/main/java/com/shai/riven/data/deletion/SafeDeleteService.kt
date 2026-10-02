@@ -497,6 +497,7 @@ class SafeDeleteService(
             state = DerivedArtifactState.INVALIDATED,
             invalidatedAt = accumulator.occurredAt,
         )
+        database.memoryLifecycleDao().deleteDerivedPayloads(newArtifactIds)
         newArtifactIds.forEach { artifactId ->
             accumulator.invalidatedArtifactIds += artifactId
             accumulator.queueRepair(

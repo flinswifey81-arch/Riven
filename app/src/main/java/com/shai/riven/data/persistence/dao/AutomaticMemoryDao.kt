@@ -69,6 +69,41 @@ interface AutomaticMemoryDao {
 
     @Query(
         """
+        SELECT DISTINCT automatic_memory_jobs.* FROM automatic_memory_jobs
+        WHERE automatic_memory_jobs.state = :succeededState
+          AND automatic_memory_jobs.attempt_count < :maxAttempts
+          AND automatic_memory_jobs.updated_at <= :dueBefore
+          AND (
+              EXISTS (
+                  SELECT 1 FROM experience_attention_assessments
+                  WHERE experience_attention_assessments.experience_id =
+                      automatic_memory_jobs.source_experience_id
+                    AND experience_attention_assessments.outcome = 'DEFER_FOR_CONTEXT'
+              )
+              OR EXISTS (
+                  SELECT 1 FROM candidate_memory_evidence
+                  INNER JOIN candidate_memories
+                      ON candidate_memories.candidate_memory_id =
+                          candidate_memory_evidence.candidate_memory_id
+                  WHERE candidate_memory_evidence.experience_id =
+                      automatic_memory_jobs.source_experience_id
+                    AND candidate_memory_evidence.role = 'SEED'
+                    AND candidate_memories.state IN ('PENDING_CONTEXT', 'TENTATIVE')
+              )
+          )
+        ORDER BY automatic_memory_jobs.updated_at, automatic_memory_jobs.automatic_memory_job_id
+        LIMIT :limit
+        """,
+    )
+    fun dueShortWindowJobs(
+        succeededState: AutomaticMemoryJobState,
+        maxAttempts: Int,
+        dueBefore: Long,
+        limit: Int,
+    ): List<AutomaticMemoryJobEntity>
+
+    @Query(
+        """
         UPDATE automatic_memory_jobs
         SET state = :pendingState,
             next_stage = :attentionStage,

@@ -56,6 +56,33 @@ class WorkManagerRivenBackgroundWorkScheduler(
             uniqueWorkName = RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SWEEP,
         )
 
+    override fun enqueueAutomaticMemoryShortWindowSweep(): RivenBackgroundScheduleResult = try {
+        workManager.enqueueUniqueWork(
+            RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SHORT_WINDOW,
+            ExistingWorkPolicy.REPLACE,
+            createOneTimeRequest(
+                kind = RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
+                initialDelayMs = AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS,
+            ),
+        )
+        RivenBackgroundScheduleResult.Enqueued(
+            listOf(RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SHORT_WINDOW),
+        )
+    } catch (failure: Exception) {
+        RivenBackgroundScheduleResult.Failure(
+            RivenBackgroundScheduleError.SchedulerFailure(
+                operation = ENQUEUE_OPERATION,
+                causeType = failure::class.java.simpleName,
+            ),
+        )
+    }
+
+    override fun enqueueMemoryLifecycleSweep(): RivenBackgroundScheduleResult =
+        enqueueSweep(
+            kind = RivenBackgroundWorkKind.MEMORY_LIFECYCLE_SWEEP,
+            uniqueWorkName = RivenBackgroundWorkNames.MEMORY_LIFECYCLE_SWEEP,
+        )
+
     override fun ensurePeriodicMaintenance(): RivenBackgroundScheduleResult = try {
         val requests = listOf(
             RivenBackgroundWorkNames.PERIODIC_ATTACHMENT_MAINTENANCE to
@@ -64,6 +91,8 @@ class WorkManagerRivenBackgroundWorkScheduler(
                 createPeriodicRequest(RivenBackgroundWorkKind.REPAIR_SWEEP),
             RivenBackgroundWorkNames.PERIODIC_AUTOMATIC_MEMORY_SWEEP to
                 createPeriodicRequest(RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP),
+            RivenBackgroundWorkNames.PERIODIC_MEMORY_LIFECYCLE_SWEEP to
+                createPeriodicRequest(RivenBackgroundWorkKind.MEMORY_LIFECYCLE_SWEEP),
         )
         requests.forEach { (name, request) ->
             workManager.enqueueUniquePeriodicWork(
@@ -85,6 +114,7 @@ class WorkManagerRivenBackgroundWorkScheduler(
     internal fun createOneTimeRequest(
         kind: RivenBackgroundWorkKind,
         targetId: String? = null,
+        initialDelayMs: Long = 0L,
     ): OneTimeWorkRequest {
         validateRequest(kind, targetId)?.let { throw InvalidBackgroundWorkRequest(it) }
         val data = if (targetId == null) {
@@ -97,6 +127,11 @@ class WorkManagerRivenBackgroundWorkScheduler(
         }
         return OneTimeWorkRequestBuilder<RivenBackgroundWorker>()
             .setInputData(data)
+            .apply {
+                if (initialDelayMs > 0L) {
+                    setInitialDelay(initialDelayMs, TimeUnit.MILLISECONDS)
+                }
+            }
             .apply {
                 if (kind == RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB) {
                     setConstraints(
@@ -130,6 +165,8 @@ class WorkManagerRivenBackgroundWorkScheduler(
             RivenBackgroundWorkNames.automaticMemoryJob(checkNotNull(targetId))
         RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP ->
             RivenBackgroundWorkNames.AUTOMATIC_MEMORY_SWEEP
+        RivenBackgroundWorkKind.MEMORY_LIFECYCLE_SWEEP ->
+            RivenBackgroundWorkNames.MEMORY_LIFECYCLE_SWEEP
     }
 
     private fun enqueueTargeted(
@@ -199,6 +236,8 @@ class WorkManagerRivenBackgroundWorkScheduler(
                 RivenBackgroundWorkKind.AUTOMATIC_MEMORY_JOB,
                 RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP,
                 -> RivenBackgroundWorkTags.AUTOMATIC_MEMORY
+                RivenBackgroundWorkKind.MEMORY_LIFECYCLE_SWEEP ->
+                    RivenBackgroundWorkTags.AUTOMATIC_MEMORY
             },
         )
     }

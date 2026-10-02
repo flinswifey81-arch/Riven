@@ -23,6 +23,12 @@ import com.shai.riven.data.persistence.model.AutomaticMemoryJobStage
 import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
 import com.shai.riven.data.persistence.model.CandidateMemoryState
 import com.shai.riven.data.persistence.model.ExperienceAvailability
+import com.shai.riven.data.memory.MemoryConsolidationDecider
+import com.shai.riven.data.memory.MemoryConsolidationResult
+import com.shai.riven.data.memory.MemoryConsolidationService
+import com.shai.riven.data.memory.OpenLoopLifecycleDecider
+import com.shai.riven.data.memory.OpenLoopLifecycleResult
+import com.shai.riven.data.memory.OpenLoopLifecycleService
 import com.shai.riven.data.validation.CandidateValidationDecider
 import com.shai.riven.data.validation.CandidateValidationError
 import com.shai.riven.data.validation.CandidateValidationResult
@@ -35,7 +41,9 @@ import kotlinx.coroutines.CancellationException
 interface AutomaticMemoryModel :
     ImmediateAttentionAnalyzer,
     CandidateMemoryExtractor,
-    CandidateValidationDecider
+    CandidateValidationDecider,
+    OpenLoopLifecycleDecider,
+    MemoryConsolidationDecider
 
 sealed interface AutomaticMemoryModelFactoryResult {
     data class Ready(val model: AutomaticMemoryModel) : AutomaticMemoryModelFactoryResult
@@ -151,15 +159,55 @@ class AutomaticMemoryJobRunner(
                     }
                     stage = AutomaticMemoryJobStage.VALIDATION
                 } else {
-                    if (!advance(claimed, stage, AutomaticMemoryJobStage.COMPLETE)) {
+                    if (!advance(claimed, stage, AutomaticMemoryJobStage.CONSOLIDATION)) {
                         return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                     }
-                    stage = AutomaticMemoryJobStage.COMPLETE
+                    stage = AutomaticMemoryJobStage.CONSOLIDATION
                 }
             }
             if (stage == AutomaticMemoryJobStage.VALIDATION) {
                 val result = ensureValidation(claimed, extraction, validation)
                 if (result != null) return finishStageFailure(claimed, result)
+                if (!advance(claimed, stage, AutomaticMemoryJobStage.OPEN_LOOP)) {
+                    return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
+                }
+                stage = AutomaticMemoryJobStage.OPEN_LOOP
+            }
+            if (stage == AutomaticMemoryJobStage.OPEN_LOOP) {
+                when (
+                    val result = OpenLoopLifecycleService(database, model, clock = clock)
+                        .process(claimed.sourceExperienceId)
+                ) {
+                    is OpenLoopLifecycleResult.Failure ->
+                        return finishStageFailure(
+                            claimed,
+                            if (result.retryable) StageFailure.Retryable(result.errorCode)
+                            else StageFailure.Permanent(result.errorCode),
+                        )
+                    else -> Unit
+                }
+                if (!advance(claimed, stage, AutomaticMemoryJobStage.CONSOLIDATION)) {
+                    return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
+                }
+                stage = AutomaticMemoryJobStage.CONSOLIDATION
+            }
+            if (stage == AutomaticMemoryJobStage.CONSOLIDATION) {
+                when (
+                    val result = MemoryConsolidationService(
+                        database = database,
+                        decider = model,
+                        profileId = run.profileId,
+                        clock = clock,
+                    ).consolidate()
+                ) {
+                    is MemoryConsolidationResult.Failure ->
+                        return finishStageFailure(
+                            claimed,
+                            if (result.retryable) StageFailure.Retryable(result.errorCode)
+                            else StageFailure.Permanent(result.errorCode),
+                        )
+                    else -> Unit
+                }
                 if (!advance(claimed, stage, AutomaticMemoryJobStage.COMPLETE)) {
                     return AutomaticMemoryJobRunResult.LeaseLost(claimed.id)
                 }

@@ -15,6 +15,10 @@ class RivenBackgroundWorkExecutor(
         AutomaticMemorySweepOperations {
             AutomaticMemorySweepResult.Completed(emptyList(), emptyList(), false)
         },
+    private val memoryLifecycleSweep: MemoryLifecycleSweepOperations =
+        MemoryLifecycleSweepOperations {
+            MemoryLifecycleSweepResult.Completed(0, 0, false)
+        },
 ) {
     suspend fun execute(
         kind: RivenBackgroundWorkKind,
@@ -95,6 +99,16 @@ class RivenBackgroundWorkExecutor(
                     } else {
                         RivenBackgroundExecutionOutcome.Completed
                     }
+            }
+        }
+        RivenBackgroundWorkKind.MEMORY_LIFECYCLE_SWEEP -> {
+            if (targetId != null) return RivenBackgroundExecutionOutcome.Failed
+            when (val result = memoryLifecycleSweep.runSweep()) {
+                is MemoryLifecycleSweepResult.RetryableFailure ->
+                    RivenBackgroundExecutionOutcome.Retryable
+                is MemoryLifecycleSweepResult.Completed ->
+                    if (result.moreWorkRemaining) RivenBackgroundExecutionOutcome.Retryable
+                    else RivenBackgroundExecutionOutcome.Completed
             }
         }
         }

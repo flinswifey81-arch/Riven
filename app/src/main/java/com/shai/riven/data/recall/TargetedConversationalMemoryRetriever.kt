@@ -7,6 +7,7 @@ import com.shai.riven.data.persistence.dao.MemoryDao
 import com.shai.riven.data.persistence.dao.ValidationRecallEntityRow
 import com.shai.riven.data.persistence.entity.MemoryRelationshipEntity
 import com.shai.riven.data.persistence.model.MemoryCertainty
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
 import com.shai.riven.data.persistence.model.MemoryRelationshipType
 import com.shai.riven.data.persistence.model.MemoryRetentionState
@@ -463,6 +464,7 @@ private class ConversationalDocumentBuilder private constructor(
             val broad = row.truthState == MemoryTruthState.SUPPORTED &&
                 row.certainty != MemoryCertainty.DISPUTED &&
                 row.retentionState == MemoryRetentionState.ACTIVE &&
+                row.accessibilityBand == MemoryAccessibilityBand.ORDINARY &&
                 row.lifecycleState == MemoryLifecycleState.VALIDATED &&
                 row.temporalState in BROAD_TEMPORAL_STATES &&
                 row.sensitivity == SensitivityLevel.STANDARD
@@ -639,6 +641,12 @@ private class ConversationalRecallIndex(
                 row.memoryId !in cues.disputedMemoryIds
             ) return false
             if (row.retentionState == MemoryRetentionState.DORMANT && row.memoryId !in cues.dormantMemoryIds) return false
+            if (row.accessibilityBand == MemoryAccessibilityBand.DORMANT &&
+                row.memoryId !in cues.dormantMemoryIds
+            ) return false
+            if (row.accessibilityBand == MemoryAccessibilityBand.LIMITED &&
+                row.memoryId !in cues.allMemoryCueIds()
+            ) return false
             if (row.lifecycleState in HISTORICAL_LIFECYCLE_STATES && row.memoryId !in cues.historicalMemoryIds) return false
             if (row.temporalState == TemporalState.HISTORICAL && row.memoryId !in cues.historicalMemoryIds) return false
             if (row.temporalState == TemporalState.TIME_BOUNDED &&

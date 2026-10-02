@@ -12,6 +12,7 @@ import com.shai.riven.data.persistence.model.DerivedArtifactType
 import com.shai.riven.data.persistence.model.EntityLinkRole
 import com.shai.riven.data.persistence.model.EpistemicBasis
 import com.shai.riven.data.persistence.model.MemoryAuditAction
+import com.shai.riven.data.persistence.model.MemoryAccessibilityBand
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryLifecycleState
@@ -205,6 +206,87 @@ data class SuppressionTombstoneEntity(
     val formatVersion: Int,
 )
 
+/** Durable semantic-pass fence; a restarted job never applies one source revision twice. */
+@Entity(
+    tableName = "open_loop_pass_checkpoints",
+    foreignKeys = [
+        ForeignKey(
+            entity = ExperienceEntity::class,
+            parentColumns = ["experience_id"],
+            childColumns = ["experience_id"],
+            onDelete = ForeignKey.CASCADE,
+            onUpdate = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index(value = ["input_fingerprint"], unique = true)],
+)
+data class OpenLoopPassCheckpointEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "experience_id")
+    val experienceId: String,
+    @ColumnInfo(name = "attention_revision")
+    val attentionRevision: Long,
+    @ColumnInfo(name = "timeline_revision")
+    val timelineRevision: Long?,
+    @ColumnInfo(name = "input_fingerprint")
+    val inputFingerprint: String,
+    @ColumnInfo(name = "result_fingerprint")
+    val resultFingerprint: String,
+    @ColumnInfo(name = "updated_at")
+    val updatedAt: Long,
+)
+
+/** Records an independently grounded consolidation corpus and the exact source set it admitted. */
+@Entity(
+    tableName = "consolidation_checkpoints",
+    indices = [
+        Index(value = ["corpus_fingerprint"], unique = true),
+        Index(value = ["source_set_hash"], unique = true),
+    ],
+)
+data class ConsolidationCheckpointEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "checkpoint_id")
+    val id: String,
+    @ColumnInfo(name = "corpus_fingerprint")
+    val corpusFingerprint: String,
+    @ColumnInfo(name = "source_set_hash")
+    val sourceSetHash: String?,
+    @ColumnInfo(name = "result_memory_id")
+    val resultMemoryId: String?,
+    @ColumnInfo(name = "profile_id")
+    val profileId: String,
+    @ColumnInfo(name = "created_at")
+    val createdAt: Long,
+)
+
+/** Deterministic, rebuildable accessibility metadata for one canonical Memory. */
+@Entity(
+    tableName = "memory_accessibility",
+    foreignKeys = [
+        ForeignKey(
+            entity = MemoryEntity::class,
+            parentColumns = ["memory_id"],
+            childColumns = ["memory_id"],
+            onDelete = ForeignKey.CASCADE,
+            onUpdate = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index(value = ["band", "evaluated_at"])],
+)
+data class MemoryAccessibilityEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "memory_id")
+    val memoryId: String,
+    val band: MemoryAccessibilityBand,
+    @ColumnInfo(name = "reason_code")
+    val reasonCode: String,
+    @ColumnInfo(name = "evaluated_at")
+    val evaluatedAt: Long,
+    @ColumnInfo(name = "source_updated_at")
+    val sourceUpdatedAt: Long,
+)
+
 @Entity(
     tableName = "suppression_source_coverages",
     foreignKeys = [
@@ -256,6 +338,30 @@ data class DerivedArtifactEntity(
     val createdAt: Long,
     @ColumnInfo(name = "invalidated_at")
     val invalidatedAt: Long? = null,
+)
+
+/** Rebuildable materialization. It is never admissible as Memory evidence. */
+@Entity(
+    tableName = "derived_artifact_payloads",
+    foreignKeys = [
+        ForeignKey(
+            entity = DerivedArtifactEntity::class,
+            parentColumns = ["derived_artifact_id"],
+            childColumns = ["derived_artifact_id"],
+            onDelete = ForeignKey.CASCADE,
+            onUpdate = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class DerivedArtifactPayloadEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "derived_artifact_id")
+    val derivedArtifactId: String,
+    @ColumnInfo(name = "format_version")
+    val formatVersion: Int,
+    val content: String,
+    @ColumnInfo(name = "built_at")
+    val builtAt: Long,
 )
 
 @Entity(

@@ -110,6 +110,8 @@ enum class AutomaticMemoryJobStage {
     EXTRACTION,
     REFRESH_EXTRACTION,
     VALIDATION,
+    OPEN_LOOP,
+    CONSOLIDATION,
     COMPLETE,
 }
 
@@ -203,6 +205,13 @@ enum class MemoryRetentionState {
     ACTIVE,
     DORMANT,
     FORGOTTEN,
+}
+
+/** Rebuildable recall accessibility. This never changes truth, certainty, or provenance. */
+enum class MemoryAccessibilityBand {
+    ORDINARY,
+    LIMITED,
+    DORMANT,
 }
 
 enum class MemoryLifecycleState {

@@ -9,6 +9,7 @@ enum class RivenBackgroundWorkKind(val requiresTargetId: Boolean) {
     REPAIR_SWEEP(requiresTargetId = false),
     AUTOMATIC_MEMORY_JOB(requiresTargetId = true),
     AUTOMATIC_MEMORY_SWEEP(requiresTargetId = false),
+    MEMORY_LIFECYCLE_SWEEP(requiresTargetId = false),
 }
 
 fun interface RivenBackgroundClock {
@@ -63,6 +64,20 @@ interface RivenBackgroundWorkScheduler {
             ),
         )
 
+    fun enqueueAutomaticMemoryShortWindowSweep(): RivenBackgroundScheduleResult =
+        RivenBackgroundScheduleResult.Failure(
+            RivenBackgroundScheduleError.UnsupportedWorkKind(
+                RivenBackgroundWorkKind.AUTOMATIC_MEMORY_SWEEP.name,
+            ),
+        )
+
+    fun enqueueMemoryLifecycleSweep(): RivenBackgroundScheduleResult =
+        RivenBackgroundScheduleResult.Failure(
+            RivenBackgroundScheduleError.UnsupportedWorkKind(
+                RivenBackgroundWorkKind.MEMORY_LIFECYCLE_SWEEP.name,
+            ),
+        )
+
     fun ensurePeriodicMaintenance(): RivenBackgroundScheduleResult
 }
 
@@ -91,6 +106,9 @@ internal object RivenBackgroundWorkNames {
     const val PERIODIC_REPAIR_SWEEP = "riven.repair.sweep.periodic"
     const val AUTOMATIC_MEMORY_SWEEP = "riven.automatic-memory.sweep"
     const val PERIODIC_AUTOMATIC_MEMORY_SWEEP = "riven.automatic-memory.sweep.periodic"
+    const val AUTOMATIC_MEMORY_SHORT_WINDOW = "riven.automatic-memory.short-window"
+    const val MEMORY_LIFECYCLE_SWEEP = "riven.memory-lifecycle.sweep"
+    const val PERIODIC_MEMORY_LIFECYCLE_SWEEP = "riven.memory-lifecycle.sweep.periodic"
 
     fun attachmentCleanup(attachmentId: String): String =
         "riven.attachment.cleanup.${stableTargetHash(attachmentId)}"
@@ -117,3 +135,4 @@ const val MAX_AUTOMATIC_MEMORY_ATTEMPTS = 5
 const val DEFAULT_AUTOMATIC_MEMORY_SWEEP_LIMIT = 25
 const val RIVEN_WORK_BACKOFF_SECONDS = 30L
 const val RIVEN_PERIODIC_MAINTENANCE_HOURS = 6L
+const val AUTOMATIC_MEMORY_SHORT_WINDOW_DELAY_MS = 5L * 60L * 1_000L
