@@ -1,8 +1,24 @@
 package com.shai.riven.data.runtime
 
 import android.content.Context
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.core.content.edit
 import androidx.work.WorkManager
+import com.shai.riven.data.attachment.AttachmentBlobReadResult
+import com.shai.riven.data.attachment.AttachmentBlobStore
+import com.shai.riven.data.attachment.AttachmentMetadataResult
+import com.shai.riven.data.attachment.AttachmentProviderImageResolver
+import com.shai.riven.data.attachment.AttachmentService
+import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.ImageAttachmentImportError
+import com.shai.riven.data.attachment.ImageAttachmentImportResult
+import com.shai.riven.data.attachment.ImageAttachmentImportService
+import com.shai.riven.data.attachment.ImageMetadataDecoder
+import com.shai.riven.data.attachment.AndroidImageMetadataDecoder
+import com.shai.riven.data.attachment.SelectedImageInput
+import com.shai.riven.data.attachment.MAX_IMPORTED_IMAGE_BYTES
 import com.shai.riven.data.automaticmemory.AutomaticMemoryQueueService
 import com.shai.riven.data.automaticmemory.AutomaticMemoryStatusSnapshot
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
@@ -25,6 +41,7 @@ import com.shai.riven.data.conversation.engine.ConversationEngineResult
 import com.shai.riven.data.conversation.engine.ProviderAdapterRegistry
 import com.shai.riven.data.conversation.engine.ProviderNeutralConversationEngine
 import com.shai.riven.data.conversation.engine.StartConversationRunInput
+import com.shai.riven.data.conversation.engine.ImageInputAuthorization
 import com.shai.riven.data.credential.HasProviderCredentialResult
 import com.shai.riven.data.credential.DeleteProviderCredentialResult
 import com.shai.riven.data.credential.ProviderCredentialStore
@@ -63,6 +80,8 @@ import com.shai.riven.data.persistence.model.MemoryKind
 import com.shai.riven.data.persistence.model.MemoryScope
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.AttachmentKind
+import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.SensitivityLevel
 import com.shai.riven.data.provider.CreateProviderProfileInput
 import com.shai.riven.data.provider.CreateProviderProfileResult
@@ -77,6 +96,7 @@ import com.shai.riven.data.provider.UpdateProviderProfileResult
 import com.shai.riven.data.provider.openrouter.OpenRouterConversationAdapter
 import com.shai.riven.data.provider.openrouter.OpenRouterContextBudgetPolicy
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpClient
+import com.shai.riven.data.provider.openrouter.OpenRouterImageInputCapability
 import com.shai.riven.data.provider.openrouter.OpenRouterModel
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalog
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
@@ -101,6 +121,14 @@ data class RivenChatMessage(
     val deliveryState: MessageDeliveryState,
     val content: String,
     val providerModel: String?,
+    val images: List<RivenImageAttachment> = emptyList(),
+)
+
+data class RivenImageAttachment(
+    val attachmentId: String,
+    val mimeType: String,
+    val byteSize: Long,
+    val previewBytes: ByteArray,
 )
 
 data class RivenMemoryItem(
@@ -115,6 +143,7 @@ data class RivenRuntimeSnapshot(
     val timelineRevision: Long,
     val messages: List<RivenChatMessage>,
     val draft: String,
+    val draftImages: List<RivenImageAttachment> = emptyList(),
     val profiles: List<ProviderProfileSnapshot>,
     val selectedProfileId: String?,
     val selectedProfileHasCredential: Boolean,
@@ -134,7 +163,15 @@ interface RivenRuntimeController : AutoCloseable {
     suspend fun initialize(): RivenRuntimeResult
     suspend fun snapshot(): RivenRuntimeResult
     suspend fun saveDraft(content: String): RivenRuntimeResult
+    suspend fun addDraftImage(uri: Uri): RivenRuntimeResult =
+        RivenRuntimeResult.Failure("Image input is unavailable.")
+    suspend fun removeDraftImage(attachmentId: String): RivenRuntimeResult =
+        RivenRuntimeResult.Failure("Image input is unavailable.")
     suspend fun send(content: String, onDelta: suspend (String) -> Unit = {}): RivenRuntimeResult
+    suspend fun sendWithUnknownImageCapabilityConfirmation(
+        content: String,
+        onDelta: suspend (String) -> Unit = {},
+    ): RivenRuntimeResult = send(content, onDelta)
     suspend fun retry(onDelta: suspend (String) -> Unit = {}): RivenRuntimeResult
     suspend fun regenerate(onDelta: suspend (String) -> Unit = {}): RivenRuntimeResult
     suspend fun continueConversation(onDelta: suspend (String) -> Unit = {}): RivenRuntimeResult
@@ -169,6 +206,7 @@ sealed interface RivenRuntimeResult {
         val message: String,
         val engineCode: ConversationEngineErrorCode? = null,
         val snapshot: RivenRuntimeSnapshot? = null,
+        val requiresImageCapabilityConfirmation: Boolean = false,
     ) : RivenRuntimeResult
 }
 
@@ -209,6 +247,10 @@ class RivenConversationRuntime(
     private val backgroundScheduler: RivenBackgroundWorkScheduler,
     private val personalitySource: LockedRivenPersonalityContextSource,
     httpClient: OpenRouterHttpClient,
+    attachmentBlobStore: AttachmentBlobStore? = null,
+    imageMetadataDecoder: ImageMetadataDecoder = AndroidImageMetadataDecoder,
+    private val contentResolver: ContentResolver? = null,
+    private val imageCapabilityStore: ImageInputCapabilityStore = InMemoryImageInputCapabilityStore(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = System::currentTimeMillis,
     private val databaseLease: RivenDatabaseLease? = null,
@@ -222,11 +264,19 @@ class RivenConversationRuntime(
         database = database,
         attachmentCleanupScheduler = backgroundScheduler::enqueueAttachmentCleanup,
     )
+    private val attachmentService = attachmentBlobStore?.let { AttachmentService(database, it) }
+    private val imageImporter = attachmentService?.let {
+        ImageAttachmentImportService(it, imageMetadataDecoder)
+    }
+    private val imageResolver = attachmentService?.let {
+        AttachmentProviderImageResolver(it, imageMetadataDecoder)
+    }
     private val memoryIntents = ManualMemoryIntentService(database, backgroundScheduler)
     private val automaticMemoryQueue = AutomaticMemoryQueueService(database, backgroundScheduler)
     private val adapter = OpenRouterConversationAdapter(httpClient)
     private val modelCatalog = OpenRouterModelCatalog(httpClient)
     private val contextBudgetPolicy = OpenRouterContextBudgetPolicy()
+    private val fetchedModels = mutableMapOf<String, OpenRouterModel>()
     private val engine = ProviderNeutralConversationEngine(
         database = database,
         contextAssembler = ConversationalContextAssembler(
@@ -248,6 +298,7 @@ class RivenConversationRuntime(
         instructionsService = instructionsService,
         ephemeralStateStore = ephemeralStore,
         adapterRegistry = ProviderAdapterRegistry(listOf(adapter)),
+        imageContentResolver = imageResolver ?: com.shai.riven.data.conversation.engine.ProviderImageContentResolver { null },
         contextBudgetResolver = { profile -> contextBudgetPolicy.budgetFor(profile.modelId) },
         clock = clock,
     )
@@ -279,7 +330,7 @@ class RivenConversationRuntime(
                 SaveConversationDraftInput(
                     conversationId = CONVERSATION_ID,
                     content = content,
-                    attachmentIds = emptyList(),
+                    attachmentIds = current.attachmentIds,
                     expectedRevision = current.revision,
                     occurredAt = clock(),
                 ),
@@ -293,8 +344,87 @@ class RivenConversationRuntime(
         }
     }
 
+    override suspend fun addDraftImage(uri: Uri): RivenRuntimeResult = actionMutex.withLock {
+        ensureConversation()
+        val importer = imageImporter
+            ?: return@withLock RivenRuntimeResult.Failure("Image storage is unavailable.")
+        val resolver = contentResolver
+            ?: return@withLock RivenRuntimeResult.Failure("The image picker is unavailable.")
+        val current = readDraft()
+        if (current.attachmentIds.isNotEmpty()) {
+            return@withLock RivenRuntimeResult.Failure(
+                "Remove the current image before selecting another.",
+                snapshot = snapshotOrNull(),
+            )
+        }
+        val selected = selectedImageInput(resolver, uri, clock())
+            ?: return@withLock RivenRuntimeResult.Failure(
+                "The selected image could not be opened.",
+                snapshot = snapshotOrNull(),
+            )
+        val imported = withContext(ioDispatcher) { importer.import(selected) }
+        val image = (imported as? ImageAttachmentImportResult.Success)?.image
+            ?: return@withLock RivenRuntimeResult.Failure(
+                message = (imported as ImageAttachmentImportResult.Failure).error.userMessage(),
+                snapshot = snapshotOrNull(),
+            )
+        val saved = draftService.saveDraft(
+            SaveConversationDraftInput(
+                conversationId = CONVERSATION_ID,
+                content = current.content,
+                attachmentIds = listOf(image.metadata.attachmentId),
+                expectedRevision = current.revision,
+                occurredAt = clock(),
+            ),
+        )
+        if (saved !is SaveConversationDraftResult.Saved) {
+            withContext(ioDispatcher) {
+                attachmentService?.discardUnreferencedAvailable(image.metadata.attachmentId, clock())
+            }
+            return@withLock RivenRuntimeResult.Failure(
+                "The selected image could not be attached.",
+                snapshot = snapshotOrNull(),
+            )
+        }
+        snapshotResult()
+    }
+
+    override suspend fun removeDraftImage(attachmentId: String): RivenRuntimeResult =
+        actionMutex.withLock {
+            val current = readDraft()
+            if (attachmentId !in current.attachmentIds) return@withLock snapshotResult()
+            when (
+                draftService.saveDraft(
+                    SaveConversationDraftInput(
+                        conversationId = CONVERSATION_ID,
+                        content = current.content,
+                        attachmentIds = current.attachmentIds - attachmentId,
+                        expectedRevision = current.revision,
+                        occurredAt = clock(),
+                    ),
+                )
+            ) {
+                is SaveConversationDraftResult.Saved -> snapshotResult()
+                is SaveConversationDraftResult.Failure -> RivenRuntimeResult.Failure(
+                    "The image could not be removed.",
+                    snapshot = snapshotOrNull(),
+                )
+            }
+        }
+
     override suspend fun send(
         content: String,
+        onDelta: suspend (String) -> Unit,
+    ): RivenRuntimeResult = sendInternal(content, false, onDelta)
+
+    override suspend fun sendWithUnknownImageCapabilityConfirmation(
+        content: String,
+        onDelta: suspend (String) -> Unit,
+    ): RivenRuntimeResult = sendInternal(content, true, onDelta)
+
+    private suspend fun sendInternal(
+        content: String,
+        confirmUnknownImageCapability: Boolean,
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult = conversationOperation { operation ->
         ensureConversation()
@@ -302,14 +432,43 @@ class RivenConversationRuntime(
         val saved = saveDraftWithinLock(content)
         if (saved is RivenRuntimeResult.Failure) return@conversationOperation saved
         coroutineContext.ensureActive()
-        val profileId = selectedProfileOrNull()?.profileId
+        val profile = selectedProfileOrNull()
             ?: return@conversationOperation RivenRuntimeResult.Failure(
                 message = "Configure and select an enabled OpenRouter profile before sending.",
                 snapshot = snapshotOrNull(),
             )
+        val draft = readDraft()
+        val imageAuthorization = if (draft.attachmentIds.isEmpty()) {
+            null
+        } else {
+            when (imageCapability(profile)) {
+                OpenRouterImageInputCapability.SUPPORTED ->
+                    ImageInputAuthorization.MODEL_DECLARED_SUPPORTED
+                OpenRouterImageInputCapability.UNSUPPORTED ->
+                    return@conversationOperation RivenRuntimeResult.Failure(
+                        "The selected model does not accept image input. Choose a vision-capable model or remove the image.",
+                        snapshot = snapshotOrNull(),
+                    )
+                OpenRouterImageInputCapability.UNKNOWN -> if (confirmUnknownImageCapability) {
+                    imageCapabilityStore.write(
+                        profile.profileId,
+                        profile.modelId,
+                        OpenRouterImageInputCapability.USER_CONFIRMED_UNKNOWN,
+                    )
+                    ImageInputAuthorization.USER_CONFIRMED_UNKNOWN
+                } else {
+                    return@conversationOperation RivenRuntimeResult.Failure(
+                        "OpenRouter did not declare whether this model accepts images. Confirm Send anyway to try it, or remove the image.",
+                        requiresImageCapabilityConfirmation = true,
+                        snapshot = snapshotOrNull(),
+                    )
+                }
+                OpenRouterImageInputCapability.USER_CONFIRMED_UNKNOWN ->
+                    ImageInputAuthorization.USER_CONFIRMED_UNKNOWN
+            }
+        }
         val timelineSnapshot = activeTimelineOrNull()
             ?: return@conversationOperation RivenRuntimeResult.Failure("Conversation is unavailable.")
-        val draft = readDraft()
         val userMessageId = UUID.randomUUID().toString()
         val committed = draftService.commitDraftAsUserMessage(
             CommitDraftAsUserMessageInput(
@@ -327,10 +486,11 @@ class RivenConversationRuntime(
             )
         executeRun(
             operation = operation,
-            profileId = profileId,
+            profileId = profile.profileId,
             userMessageId = userMessageId,
             expectedTimelineRevision = revision,
             trigger = ConversationRunTrigger.INITIAL,
+            imageInputAuthorization = imageAuthorization,
             onDelta = onDelta,
         )
     }
@@ -453,13 +613,22 @@ class RivenConversationRuntime(
     ): RivenProfileSaveResult = actionMutex.withLock {
         val normalizedDisplayName = displayName.trim()
         val normalizedModelId = modelId.trim()
+        val imageCapability = fetchedModels[normalizedModelId]?.imageInputCapability
+            ?: profileId?.let { imageCapabilityStore.read(it, normalizedModelId) }
+            ?: OpenRouterImageInputCapability.UNKNOWN
+        val profileCapabilities = buildList {
+            addAll(OPENROUTER_CAPABILITIES)
+            if (imageCapability == OpenRouterImageInputCapability.SUPPORTED) {
+                add(ProviderCapability.IMAGE_INPUT)
+            }
+        }
         val validation = profileService.validateCandidate(
             displayName = normalizedDisplayName,
             adapterId = OpenRouterConversationAdapter.ADAPTER_ID,
             endpointBaseUrl = OpenRouterConversationAdapter.DEFAULT_BASE_URL,
             modelId = normalizedModelId,
             credentialSlotId = OPENROUTER_CREDENTIAL_SLOT,
-            capabilities = OPENROUTER_CAPABILITIES,
+            capabilities = profileCapabilities,
         )
         if (validation != null) {
             return@withLock RivenProfileSaveResult.Failure(
@@ -496,7 +665,7 @@ class RivenConversationRuntime(
                     endpointBaseUrl = OpenRouterConversationAdapter.DEFAULT_BASE_URL,
                     modelId = normalizedModelId,
                     credentialSlotId = OPENROUTER_CREDENTIAL_SLOT,
-                    capabilities = OPENROUTER_CAPABILITIES,
+                    capabilities = profileCapabilities,
                     occurredAt = occurredAt,
                 ),
             ).let { created ->
@@ -519,7 +688,7 @@ class RivenConversationRuntime(
                     modelId = normalizedModelId,
                     credentialSlotId = OPENROUTER_CREDENTIAL_SLOT,
                     isEnabled = true,
-                    capabilities = OPENROUTER_CAPABILITIES,
+                    capabilities = profileCapabilities,
                     occurredAt = occurredAt,
                 ),
             ).let { updated ->
@@ -533,6 +702,11 @@ class RivenConversationRuntime(
         }
         if (result is RivenProfileSaveResult.Success) {
             selectedProfileStore.select(result.profile.profileId)
+            imageCapabilityStore.write(
+                result.profile.profileId,
+                result.profile.modelId,
+                imageCapability,
+            )
             backgroundScheduler.enqueueAutomaticMemorySweep()
         }
         result
@@ -570,6 +744,8 @@ class RivenConversationRuntime(
             modelCatalog.models(credential.secret).also { result ->
                 if (result is OpenRouterModelCatalogResult.Success) {
                     contextBudgetPolicy.record(result.models)
+                    fetchedModels.clear()
+                    fetchedModels.putAll(result.models.associateBy(OpenRouterModel::id))
                 }
             }
         } else {
@@ -659,10 +835,21 @@ class RivenConversationRuntime(
         trigger: ConversationRunTrigger,
         retryOfRunId: String? = null,
         regenerateOfMessageId: String? = null,
+        imageInputAuthorization: ImageInputAuthorization? = null,
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult {
         val runId = UUID.randomUUID().toString()
         operation.runId.set(runId)
+        val resolvedImageAuthorization = imageInputAuthorization
+            ?: existingImageAuthorization(userMessageId, profileId)
+        if (database.attachmentDao().attachmentIdsForMessage(userMessageId).isNotEmpty() &&
+            resolvedImageAuthorization == null
+        ) {
+            return RivenRuntimeResult.Failure(
+                "The selected model does not accept this image. Choose a vision-capable model.",
+                snapshot = snapshotOrNull(),
+            )
+        }
         return try {
             val result = engine.execute(
                 StartConversationRunInput(
@@ -677,6 +864,7 @@ class RivenConversationRuntime(
                     regenerateOfMessageId = regenerateOfMessageId,
                     expectedTimelineRevision = expectedTimelineRevision,
                     occurredAt = clock(),
+                    imageInputAuthorization = resolvedImageAuthorization,
                 ),
                 onDelta = onDelta,
             )
@@ -750,7 +938,7 @@ class RivenConversationRuntime(
                 SaveConversationDraftInput(
                     conversationId = CONVERSATION_ID,
                     content = content,
-                    attachmentIds = emptyList(),
+                    attachmentIds = current.attachmentIds,
                     expectedRevision = current.revision,
                     occurredAt = clock(),
                 ),
@@ -780,6 +968,7 @@ class RivenConversationRuntime(
 
     private suspend fun snapshotOrNull(): RivenRuntimeSnapshot? {
         val active = activeTimelineOrNull() ?: return null
+        val draftValue = readDraft()
         val profiles = when (val result = profileService.allProfiles()) {
             is ProviderProfilesReadResult.Success -> result.profiles
             is ProviderProfilesReadResult.Failure -> emptyList()
@@ -799,8 +988,11 @@ class RivenConversationRuntime(
         return RivenRuntimeSnapshot(
             conversationId = CONVERSATION_ID,
             timelineRevision = active.timelineRevision,
-            messages = active.messages.map { it.toRuntimeMessage() },
-            draft = readDraft().content,
+            messages = active.messages.map { message ->
+                message.toRuntimeMessage(runtimeImagesForMessage(message.id))
+            },
+            draft = draftValue.content,
+            draftImages = runtimeImages(draftValue.attachmentIds),
             profiles = profiles.filter { it.adapterId == OpenRouterConversationAdapter.ADAPTER_ID },
             selectedProfileId = selected?.profileId,
             selectedProfileHasCredential = (credential as? HasProviderCredentialResult.Success)?.exists == true,
@@ -835,10 +1027,73 @@ class RivenConversationRuntime(
     }
 
     private suspend fun readDraft(): DraftValue = when (val result = draftService.readDraft(CONVERSATION_ID)) {
-        is ReadConversationDraftResult.Draft -> DraftValue(result.snapshot.content, result.snapshot.revision)
-        is ReadConversationDraftResult.NoDraft -> DraftValue("", 0L)
-        is ReadConversationDraftResult.Failure -> DraftValue("", 0L)
+        is ReadConversationDraftResult.Draft -> DraftValue(
+            result.snapshot.content,
+            result.snapshot.attachmentIds,
+            result.snapshot.revision,
+        )
+        is ReadConversationDraftResult.NoDraft -> DraftValue("", emptyList(), 0L)
+        is ReadConversationDraftResult.Failure -> DraftValue("", emptyList(), 0L)
     }
+
+    private fun imageCapability(profile: ProviderProfileSnapshot): OpenRouterImageInputCapability =
+        imageCapabilityStore.read(profile.profileId, profile.modelId)
+            ?: if (ProviderCapability.IMAGE_INPUT in profile.capabilities) {
+                OpenRouterImageInputCapability.SUPPORTED
+            } else {
+                OpenRouterImageInputCapability.UNKNOWN
+            }
+
+    private suspend fun existingImageAuthorization(
+        userMessageId: String,
+        profileId: String,
+    ): ImageInputAuthorization? {
+        if (database.attachmentDao().attachmentIdsForMessage(userMessageId).isEmpty()) return null
+        val profile = (profileService.profile(profileId) as? ProviderProfileReadResult.Success)?.profile
+            ?: return null
+        return when (imageCapability(profile)) {
+            OpenRouterImageInputCapability.SUPPORTED ->
+                ImageInputAuthorization.MODEL_DECLARED_SUPPORTED
+            OpenRouterImageInputCapability.USER_CONFIRMED_UNKNOWN ->
+                ImageInputAuthorization.USER_CONFIRMED_UNKNOWN
+            OpenRouterImageInputCapability.UNSUPPORTED,
+            OpenRouterImageInputCapability.UNKNOWN,
+            -> null
+        }
+    }
+
+    private suspend fun runtimeImagesForMessage(messageId: String): List<RivenImageAttachment> {
+        val service = attachmentService ?: return emptyList()
+        val metadata = service.orderedAvailableAttachmentsForMessage(messageId)
+        val ids = (metadata as? com.shai.riven.data.attachment.MessageAttachmentsResult.Success)
+            ?.attachments
+            ?.map { it.attachmentId }
+            .orEmpty()
+        return runtimeImages(ids)
+    }
+
+    private suspend fun runtimeImages(attachmentIds: List<String>): List<RivenImageAttachment> =
+        withContext(ioDispatcher) {
+            val service = attachmentService ?: return@withContext emptyList()
+            attachmentIds.mapNotNull { attachmentId ->
+                val metadata = (service.attachmentMetadata(attachmentId) as?
+                    AttachmentMetadataResult.Success)?.attachment ?: return@mapNotNull null
+                if (metadata.kind != AttachmentKind.IMAGE ||
+                    metadata.state != AttachmentState.AVAILABLE ||
+                    metadata.byteSize == null || metadata.byteSize !in 1..MAX_IMPORTED_IMAGE_BYTES
+                ) {
+                    return@mapNotNull null
+                }
+                val bytes = (service.readAvailableBlob(attachmentId) as?
+                    AttachmentBlobReadResult.Success)?.bytes ?: return@mapNotNull null
+                RivenImageAttachment(
+                    attachmentId = attachmentId,
+                    mimeType = metadata.mimeType,
+                    byteSize = metadata.byteSize ?: bytes.size.toLong(),
+                    previewBytes = bytes,
+                )
+            }
+        }
 
     private suspend fun manualMemoryResult(
         result: ManualMemoryIntentResult,
@@ -855,12 +1110,13 @@ class RivenConversationRuntime(
         )
     }
 
-    private fun MessageEntity.toRuntimeMessage() = RivenChatMessage(
+    private fun MessageEntity.toRuntimeMessage(images: List<RivenImageAttachment>) = RivenChatMessage(
         id = id,
         role = role,
         deliveryState = deliveryState,
         content = content,
         providerModel = providerModel,
+        images = images,
     )
 
     private fun MemoryEntity.toRuntimeItem() = RivenMemoryItem(
@@ -889,7 +1145,11 @@ class RivenConversationRuntime(
         else -> "Riven could not complete this reply. Your message is saved and can be retried."
     }
 
-    private data class DraftValue(val content: String, val revision: Long)
+    private data class DraftValue(
+        val content: String,
+        val attachmentIds: List<String>,
+        val revision: Long,
+    )
 
     private data class ActiveConversationOperation(
         val job: Job,
@@ -930,6 +1190,9 @@ class RivenConversationRuntime(
                     ),
                     personalitySource = LockedRivenPersonalityContextSource(appContext),
                     httpClient = httpClient,
+                    attachmentBlobStore = FileAttachmentBlobStore.fromContext(appContext),
+                    contentResolver = appContext.contentResolver,
+                    imageCapabilityStore = AndroidImageInputCapabilityStore(appContext),
                     databaseLease = databaseLease,
                 )
             } catch (failure: Exception) {
@@ -938,4 +1201,47 @@ class RivenConversationRuntime(
             }
         }
     }
+}
+
+private fun selectedImageInput(
+    resolver: ContentResolver,
+    uri: Uri,
+    occurredAt: Long,
+): SelectedImageInput? {
+    val mimeType = try {
+        resolver.getType(uri)
+    } catch (_: SecurityException) {
+        return null
+    }
+    val byteSize = try {
+        resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) null else cursor.getLong(0).takeIf { it >= 0L }
+        }
+    } catch (_: Exception) {
+        null
+    }
+    return SelectedImageInput(
+        declaredMimeType = mimeType,
+        declaredByteSize = byteSize,
+        openStream = {
+            resolver.openInputStream(uri)
+                ?: throw IllegalStateException("Selected content has no readable stream")
+        },
+        occurredAt = occurredAt,
+    )
+}
+
+private fun ImageAttachmentImportError.userMessage(): String = when (this) {
+    ImageAttachmentImportError.UnsupportedMimeType ->
+        "Choose a JPEG, PNG, or WebP image."
+    ImageAttachmentImportError.Oversized ->
+        "That image is too large. Choose one smaller than 8 MB."
+    ImageAttachmentImportError.CorruptOrUndecodable ->
+        "That image is corrupt or could not be decoded."
+    ImageAttachmentImportError.UnsafeDimensions ->
+        "That image's dimensions are too large to process safely."
+    is ImageAttachmentImportError.ReadFailure ->
+        "The selected image could not be read."
+    is ImageAttachmentImportError.StoreFailure ->
+        "The selected image could not be stored privately."
 }

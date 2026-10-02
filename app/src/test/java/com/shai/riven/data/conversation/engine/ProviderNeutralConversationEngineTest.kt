@@ -22,6 +22,7 @@ import com.shai.riven.data.context.PublishEphemeralAppStateInput
 import com.shai.riven.data.context.ProviderProfileReceiptValidator
 import com.shai.riven.data.context.RivenContextBudgetBehavior
 import com.shai.riven.data.context.RivenContextCollectionResult
+import com.shai.riven.data.context.RivenContextCollectionBudget
 import com.shai.riven.data.context.RivenContextContentAuthority
 import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextLayer
@@ -1600,6 +1601,49 @@ class ProviderNeutralConversationEngineTest {
         assertEquals(0, adapter.invocationCount.get())
     }
 
+    @Test
+    fun imageMutationAtDispatchFenceFailsStaleBeforeProviderInvocation() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        insertUserImage("user-1", "attachment-image")
+        val adapter = imageAdapter()
+        val reads = AtomicInteger()
+        val resolver = ProviderImageContentResolver { attachmentId ->
+            if (reads.incrementAndGet() == 1) providerImage(attachmentId) else null
+        }
+
+        val result = engine(adapter, imageContentResolver = resolver).execute(
+            input().copy(imageInputAuthorization = ImageInputAuthorization.MODEL_DECLARED_SUPPORTED),
+        )
+
+        assertTrue(result is ConversationEngineResult.Failed)
+        assertEquals(ConversationEngineErrorCode.CONTEXT_STALE, (result as ConversationEngineResult.Failed).code)
+        assertEquals(0, adapter.invocationCount.get())
+    }
+
+    @Test
+    fun imageReservationParticipatesInMixedContextBudgetBeforeProviderInvocation() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        insertUserImage("user-1", "attachment-budget")
+        val adapter = imageAdapter()
+
+        val result = engine(
+            adapter = adapter,
+            imageContentResolver = ProviderImageContentResolver(::providerImage),
+            contextBudgetResolver = { RivenContextCollectionBudget(16, 1_000) },
+        ).execute(
+            input().copy(imageInputAuthorization = ImageInputAuthorization.MODEL_DECLARED_SUPPORTED),
+        )
+
+        assertTrue(result is ConversationEngineResult.Failed)
+        assertEquals(
+            ConversationEngineErrorCode.CONTEXT_LIMIT_EXCEEDED,
+            (result as ConversationEngineResult.Failed).code,
+        )
+        assertEquals(0, adapter.invocationCount.get())
+    }
+
     private fun engine(
         adapter: ConversationProviderAdapter,
         extraSources: List<RivenContextSource> = emptyList(),
@@ -1616,6 +1660,9 @@ class ProviderNeutralConversationEngineTest {
         limiter: ConversationRunLimiter = ConversationRunLimiterPool.forMaximum(limits.maxConcurrentRuns),
         profileReceiptValidator: ProviderProfileReceiptValidator? = null,
         beforeFinalRoomTransaction: suspend () -> Unit = {},
+        imageContentResolver: ProviderImageContentResolver = ProviderImageContentResolver { null },
+        contextBudgetResolver: (com.shai.riven.data.provider.ProviderProfileSnapshot) ->
+            RivenContextCollectionBudget = { com.shai.riven.data.context.DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET },
     ): ProviderNeutralConversationEngine {
         val registry = RivenContextSourceRegistry(
             listOf(
@@ -1633,6 +1680,8 @@ class ProviderNeutralConversationEngineTest {
             instructionsService = instructions,
             ephemeralStateStore = ephemeral,
             adapterRegistry = ProviderAdapterRegistry(listOf(adapter)),
+            imageContentResolver = imageContentResolver,
+            contextBudgetResolver = contextBudgetResolver,
             limits = limits,
             clock = clock::incrementAndGet,
             limiter = limiter,
@@ -1703,6 +1752,50 @@ class ProviderNeutralConversationEngineTest {
         expectedTimelineRevision = 1,
         occurredAt = 3,
     )
+
+    private fun insertUserImage(userMessageId: String, attachmentId: String) {
+        database.attachmentDao().insertAttachment(
+            AttachmentEntity(
+                id = attachmentId,
+                kind = AttachmentKind.IMAGE,
+                mimeType = "image/png",
+                state = AttachmentState.AVAILABLE,
+                storageKey = "attachments/$attachmentId.blob",
+                byteSize = 4,
+                contentSha256 = "a".repeat(64),
+                source = AttachmentSource.SHAI_IMPORT,
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+        database.attachmentDao().insertMessageAttachment(
+            MessageAttachmentEntity(userMessageId, attachmentId, 0, 1),
+        )
+    }
+
+    private fun providerImage(attachmentId: String) = ProviderImageContent(
+        attachmentId = attachmentId,
+        mimeType = "image/png",
+        bytes = byteArrayOf(1, 2, 3, 4),
+        width = 512,
+        height = 512,
+        contentSha256 = "a".repeat(64),
+    )
+
+    private fun imageAdapter() = FakeAdapter(
+        descriptor = ProviderAdapterDescriptor(
+            adapterId = "fake.adapter",
+            capabilities = setOf(
+                ProviderCapability.TEXT_CHAT,
+                ProviderCapability.IMAGE_INPUT,
+                ProviderCapability.STREAMING,
+            ),
+            systemContextMode = ProviderSystemContextMode.NATIVE_INSTRUCTIONS,
+        ),
+    ) { _, emit ->
+        emit(ProviderStreamEvent.Delta("ok"))
+        emit(ProviderStreamEvent.Completed("provider-image"))
+    }
 
     private class FakeAdapter(
         override val descriptor: ProviderAdapterDescriptor = ProviderAdapterDescriptor(

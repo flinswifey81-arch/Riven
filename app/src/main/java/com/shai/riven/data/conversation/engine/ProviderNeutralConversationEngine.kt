@@ -55,6 +55,7 @@ class ProviderNeutralConversationEngine(
     private val instructionsService: ShaiSystemInstructionsService,
     private val ephemeralStateStore: EphemeralAppStateStore,
     private val adapterRegistry: ProviderAdapterRegistry,
+    private val imageContentResolver: ProviderImageContentResolver = ProviderImageContentResolver { null },
     private val contextBudgetResolver: (ProviderProfileSnapshot) -> RivenContextCollectionBudget = {
         DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET
     },
@@ -126,7 +127,12 @@ class ProviderNeutralConversationEngine(
                 is ReserveConversationRunResult.Failure -> ConversationEngineResult.Failed(null, reservation.code)
                 is ReserveConversationRunResult.Reserved -> {
                     val limited = limiter.withPermitOrNull(limits.concurrencyWaitMillis) {
-                        executeReserved(reservation.run, reservation.userMessage.content, onDelta)
+                        executeReserved(
+                            reservation.run,
+                            reservation.userMessage.content,
+                            input.imageInputAuthorization,
+                            onDelta,
+                        )
                     }
                     limited ?: failRun(
                         reservation.run,
@@ -180,6 +186,7 @@ class ProviderNeutralConversationEngine(
     private suspend fun executeReserved(
         reserved: ConversationRunEntity,
         userContent: String,
+        imageInputAuthorization: ImageInputAuthorization?,
         onDelta: suspend (String) -> Unit,
     ): ConversationEngineResult {
         val job = coroutineContext[Job]
@@ -189,12 +196,21 @@ class ProviderNeutralConversationEngine(
             return ConversationEngineResult.Existing(reserved.toSnapshot())
         }
         try {
-            if (persistence.attachmentIdsForMessage(reserved.userMessageId).isNotEmpty()) {
+            val attachmentIds = persistence.attachmentIdsForMessage(reserved.userMessageId)
+            if (attachmentIds.isNotEmpty() && imageInputAuthorization == null) {
                 return failRun(
                     reserved,
                     ConversationEngineErrorCode.ATTACHMENTS_UNSUPPORTED,
                     ConversationRunState.FAILED,
                 )
+            }
+            val images = attachmentIds.map { attachmentId ->
+                imageContentResolver.resolve(attachmentId)
+                    ?: return failRun(
+                        reserved,
+                        ConversationEngineErrorCode.IMAGE_ATTACHMENT_INVALID,
+                        ConversationRunState.FAILED,
+                    )
             }
             val requiredCapabilities = setOf(
                 ProviderCapability.TEXT_CHAT,
@@ -229,6 +245,15 @@ class ProviderNeutralConversationEngine(
                     ConversationRunState.FAILED,
                 )
             }
+            if (images.isNotEmpty() &&
+                ProviderCapability.IMAGE_INPUT !in adapter.descriptor.capabilities
+            ) {
+                return failRun(
+                    reserved,
+                    ConversationEngineErrorCode.ATTACHMENTS_UNSUPPORTED,
+                    ConversationRunState.FAILED,
+                )
+            }
             val attached = persistence.attachProfile(
                 runId = reserved.runId,
                 ownerSessionToken = ownerSessionToken,
@@ -250,10 +275,11 @@ class ProviderNeutralConversationEngine(
                         currentInteraction = RivenCurrentInteraction(
                             messageId = attachedRun.userMessageId,
                             content = userContent,
+                            hasAttachments = images.isNotEmpty(),
                         ),
                         contextHeadMessageId = attachedRun.contextHeadMessageId,
                     ),
-                    budget = contextBudgetResolver(runtime.profile),
+                    budget = contextBudgetResolver(runtime.profile).withImageReservation(images),
                 ),
             )
             val contextSnapshot = when (assembled) {
@@ -323,6 +349,11 @@ class ProviderNeutralConversationEngine(
                         conversationRole = fragment.conversationRole,
                     )
                 },
+                imagesByFragmentId = if (images.isEmpty()) {
+                    emptyMap()
+                } else {
+                    mapOf(attachedRun.userMessageId to images)
+                },
             )
             val awaiting = persistence.markAwaitingProvider(
                 attachedRun.runId,
@@ -333,6 +364,13 @@ class ProviderNeutralConversationEngine(
                 ?: return mutationFailure(awaiting, attachedRun)
 
             if (!contextIsCurrentAtDispatchBoundary(contextSnapshot)) {
+                return failRun(
+                    awaitingRun,
+                    ConversationEngineErrorCode.CONTEXT_STALE,
+                    ConversationRunState.STALE,
+                )
+            }
+            if (!imagesStillCurrent(images)) {
                 return failRun(
                     awaitingRun,
                     ConversationEngineErrorCode.CONTEXT_STALE,
@@ -488,6 +526,15 @@ class ProviderNeutralConversationEngine(
             RivenContextFreshnessValidation.Current
     }
 
+    private fun imagesStillCurrent(images: List<ProviderImageContent>): Boolean = images.all { expected ->
+        val current = imageContentResolver.resolve(expected.attachmentId) ?: return@all false
+        current.mimeType == expected.mimeType &&
+            current.width == expected.width &&
+            current.height == expected.height &&
+            current.bytes.size == expected.bytes.size &&
+            current.contentSha256 == expected.contentSha256
+    }
+
     private suspend fun settleCancellation(run: ConversationRunEntity) {
         withContext(NonCancellable) {
             persistence.requestCancellation(run.runId, clock())
@@ -602,3 +649,23 @@ private class StreamAccumulator(
 private class ConversationStreamProtocolException(
     val code: ConversationEngineErrorCode,
 ) : IllegalStateException(code.name)
+
+private fun RivenContextCollectionBudget.withImageReservation(
+    images: List<ProviderImageContent>,
+): RivenContextCollectionBudget {
+    val reservedChars = images.sumOf { image ->
+        val horizontalTiles = (image.width + IMAGE_BUDGET_TILE_EDGE - 1) / IMAGE_BUDGET_TILE_EDGE
+        val verticalTiles = (image.height + IMAGE_BUDGET_TILE_EDGE - 1) / IMAGE_BUDGET_TILE_EDGE
+        IMAGE_BUDGET_BASE_CHARS +
+            horizontalTiles.toLong() * verticalTiles.toLong() * IMAGE_BUDGET_CHARS_PER_TILE
+    }
+    return copy(
+        maxAggregateChars = (maxAggregateChars.toLong() - reservedChars)
+            .coerceAtLeast(1L)
+            .toInt(),
+    )
+}
+
+private const val IMAGE_BUDGET_TILE_EDGE = 512
+private const val IMAGE_BUDGET_BASE_CHARS = 1_024L
+private const val IMAGE_BUDGET_CHARS_PER_TILE = 768L

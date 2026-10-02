@@ -117,6 +117,52 @@ class AttachmentService(
         }
     }
 
+    suspend fun discardUnreferencedAvailable(
+        attachmentId: String,
+        occurredAt: Long,
+    ): AttachmentCleanupResult {
+        try {
+            database.withTransaction {
+                val current = dao.attachment(attachmentId)
+                    ?: abort(AttachmentError.MissingAttachment(attachmentId))
+                if (current.state != AttachmentState.AVAILABLE) {
+                    abort(AttachmentError.AttachmentUnavailable(attachmentId, current.state))
+                }
+                val messageReferences = dao.messageReferenceCount(attachmentId)
+                val draftReferences = dao.draftReferenceCount(attachmentId)
+                if (messageReferences != 0 || draftReferences != 0) {
+                    abort(
+                        AttachmentError.AttachmentStillReferenced(
+                            attachmentId,
+                            messageReferences,
+                            draftReferences,
+                        ),
+                    )
+                }
+                if (dao.derivedArtifactDependencyCount(attachmentId) != 0) {
+                    abort(AttachmentError.AttachmentHasDerivedDependencies(attachmentId))
+                }
+                check(
+                    dao.updateAttachment(
+                        current.copy(state = AttachmentState.DELETE_PENDING, updatedAt = occurredAt),
+                    ) == 1,
+                )
+            }
+        } catch (abort: AttachmentAbort) {
+            return AttachmentCleanupResult.Failure(abort.error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            return AttachmentCleanupResult.Failure(
+                AttachmentError.StorageFailure(
+                    AttachmentOperation.DISCARD_UNREFERENCED,
+                    failure::class.java.simpleName,
+                ),
+            )
+        }
+        return finalizePendingDeletion(attachmentId)
+    }
+
     suspend fun cleanupStagingAttachment(
         attachmentId: String,
         occurredAt: Long,

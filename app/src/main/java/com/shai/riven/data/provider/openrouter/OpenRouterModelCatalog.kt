@@ -10,7 +10,22 @@ data class OpenRouterModel(
     val id: String,
     val name: String,
     val contextLength: Int?,
-)
+    val inputModalities: Set<String>? = null,
+) {
+    val imageInputCapability: OpenRouterImageInputCapability
+        get() = when {
+            inputModalities == null -> OpenRouterImageInputCapability.UNKNOWN
+            "image" in inputModalities -> OpenRouterImageInputCapability.SUPPORTED
+            else -> OpenRouterImageInputCapability.UNSUPPORTED
+        }
+}
+
+enum class OpenRouterImageInputCapability {
+    SUPPORTED,
+    UNSUPPORTED,
+    UNKNOWN,
+    USER_CONFIRMED_UNKNOWN,
+}
 
 sealed interface OpenRouterModelCatalogResult {
     data class Success(val models: List<OpenRouterModel>) : OpenRouterModelCatalogResult
@@ -82,6 +97,19 @@ class OpenRouterModelCatalog(
                             id = id,
                             name = item.optString("name").takeIf(String::isNotBlank) ?: id,
                             contextLength = item.optInt("context_length").takeIf { it > 0 },
+                            inputModalities = item.optJSONObject("architecture")
+                                ?.optJSONArray("input_modalities")
+                                ?.let { modalities ->
+                                    buildSet {
+                                        for (modalityIndex in 0 until modalities.length()) {
+                                            modalities.optString(modalityIndex)
+                                                .trim()
+                                                .lowercase()
+                                                .takeIf(String::isNotBlank)
+                                                ?.let(::add)
+                                        }
+                                    }
+                                },
                         ),
                     )
                 }

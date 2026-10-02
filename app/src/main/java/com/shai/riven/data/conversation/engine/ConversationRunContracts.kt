@@ -35,7 +35,13 @@ data class StartConversationRunInput(
     val regenerateOfMessageId: String? = null,
     val expectedTimelineRevision: Long,
     val occurredAt: Long,
+    val imageInputAuthorization: ImageInputAuthorization? = null,
 )
+
+enum class ImageInputAuthorization {
+    MODEL_DECLARED_SUPPORTED,
+    USER_CONFIRMED_UNKNOWN,
+}
 
 data class ConversationRunSnapshot(
     val runId: String,
@@ -80,6 +86,7 @@ enum class ConversationEngineErrorCode {
     ADAPTER_CAPABILITY_MISSING,
     SYSTEM_CONTEXT_UNSUPPORTED,
     ATTACHMENTS_UNSUPPORTED,
+    IMAGE_ATTACHMENT_INVALID,
     CONTEXT_ASSEMBLY_FAILED,
     CONTEXT_LIMIT_EXCEEDED,
     CONTEXT_STALE,

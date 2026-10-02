@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -39,6 +40,7 @@ import com.shai.riven.data.reminder.ReminderSettingsSnapshot
 import com.shai.riven.data.reminder.ReminderSnapshot
 import com.shai.riven.data.runtime.RivenChatMessage
 import com.shai.riven.data.runtime.RivenMemoryItem
+import com.shai.riven.data.runtime.RivenImageAttachment
 import com.shai.riven.data.runtime.RivenProfileSaveResult
 import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
@@ -46,6 +48,7 @@ import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Base64
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -97,6 +100,21 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("credential_status").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_arcade").performClick()
         composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+    }
+
+    @Test
+    fun restoredImageOnlyDraftShowsAccessiblePreviewAndCanBeRemoved() {
+        val runtime = FakeRivenRuntime(configuredSnapshot().withImageDraft())
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+
+        composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Selected image preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_send").assertIsEnabled()
+        composeRule.onNodeWithTag("chat_remove_image").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.removeImageCalls == 1 }
+        composeRule.onAllNodesWithTag("draft_image_preview").assertCountEquals(0)
     }
 
     @Test
@@ -451,6 +469,15 @@ class RivenAppCompactTest {
         composeRule.onNodeWithTag("nav_alarms").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_arcade").assertIsDisplayed()
     }
+
+    @Test
+    fun compactImageDraftKeepsPreviewAndImageOnlySendAvailable() {
+        val runtime = FakeRivenRuntime(configuredSnapshot().withImageDraft())
+        composeRule.setContent { RivenTheme { RivenApp { runtime } } }
+
+        composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_send").assertIsEnabled()
+    }
 }
 
 private class FakeRivenRuntime(
@@ -488,6 +515,8 @@ private class FakeRivenRuntime(
         private set
     var failMemoryWrites = false
     val savedApiKeys = mutableListOf<String>()
+    var removeImageCalls = 0
+        private set
 
     override suspend fun initialize() = success()
     override suspend fun snapshot() = success()
@@ -500,6 +529,14 @@ private class FakeRivenRuntime(
         }
         savedDrafts += content
         current = current.copy(draft = content)
+        return success()
+    }
+
+    override suspend fun removeDraftImage(attachmentId: String): RivenRuntimeResult {
+        removeImageCalls += 1
+        current = current.copy(
+            draftImages = current.draftImages.filterNot { it.attachmentId == attachmentId },
+        )
         return success()
     }
 
@@ -708,4 +745,19 @@ private fun unconfiguredSnapshot() = configuredSnapshot().copy(
     profiles = emptyList(),
     selectedProfileId = null,
     selectedProfileHasCredential = false,
+)
+
+private fun RivenRuntimeSnapshot.withImageDraft() = copy(
+    draftImages = listOf(
+        RivenImageAttachment(
+            attachmentId = "draft-image",
+            mimeType = "image/png",
+            byteSize = TEST_PNG_BYTES.size.toLong(),
+            previewBytes = TEST_PNG_BYTES,
+        ),
+    ),
+)
+
+private val TEST_PNG_BYTES: ByteArray = Base64.getDecoder().decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAALSURBVBhXY2BABwAAEgABp3qZbgAAAABJRU5ErkJggg==",
 )

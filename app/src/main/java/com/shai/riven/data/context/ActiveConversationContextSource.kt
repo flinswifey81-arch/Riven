@@ -48,7 +48,9 @@ class ActiveConversationContextSource(
 
         val eligibleMessages = read.messages.filter { message -> message.isContextEligible() }
         val interaction = conversation.currentInteraction
-        if (interaction.content.isBlank()) return failure("BlankCurrentInteraction")
+        if (interaction.content.isBlank() && !interaction.hasAttachments) {
+            return failure("BlankCurrentInteraction")
+        }
         val matching = interaction.messageId?.let { id -> eligibleMessages.singleOrNull { it.id == id } }
         if (matching != null && matching.content != interaction.content) {
             return failure("CurrentInteractionMismatch")

@@ -5,7 +5,17 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
+import com.shai.riven.data.attachment.AttachmentByteSource
+import com.shai.riven.data.attachment.AttachmentCreateResult
+import com.shai.riven.data.attachment.AttachmentService
+import com.shai.riven.data.attachment.FileAttachmentBlobStore
+import com.shai.riven.data.attachment.ImportedAttachmentInput
+import com.shai.riven.data.attachment.DecodedImageMetadata
+import com.shai.riven.data.attachment.ImageMetadataDecoder
 import com.shai.riven.data.conversation.engine.ConversationEngineErrorCode
+import com.shai.riven.data.draft.ConversationDraftService
+import com.shai.riven.data.draft.SaveConversationDraftInput
+import com.shai.riven.data.draft.SaveConversationDraftResult
 import com.shai.riven.data.credential.ClearProviderCredentialsResult
 import com.shai.riven.data.credential.DeleteProviderCredentialResult
 import com.shai.riven.data.credential.HasProviderCredentialResult
@@ -16,10 +26,14 @@ import com.shai.riven.data.credential.ReadProviderCredentialResult
 import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.AttachmentKind
+import com.shai.riven.data.provider.openrouter.OpenRouterImageInputCapability
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpClient
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpRequest
 import com.shai.riven.data.provider.openrouter.OpenRouterHttpResponse
 import java.util.concurrent.atomic.AtomicLong
+import java.nio.file.Files
+import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
@@ -49,6 +63,9 @@ class RivenConversationRuntimeTest {
     private lateinit var credentials: InMemoryCredentialStore
     private lateinit var selection: InMemorySelectedProfileStore
     private lateinit var scheduler: RecordingScheduler
+    private lateinit var attachmentRoot: java.io.File
+    private lateinit var attachmentBlobStore: FileAttachmentBlobStore
+    private lateinit var imageCapabilities: InMemoryImageInputCapabilityStore
     private val clock = AtomicLong(1_000)
     private val runtimes = mutableListOf<RivenConversationRuntime>()
 
@@ -61,12 +78,16 @@ class RivenConversationRuntimeTest {
         credentials = InMemoryCredentialStore()
         selection = InMemorySelectedProfileStore()
         scheduler = RecordingScheduler()
+        attachmentRoot = Files.createTempDirectory("riven-runtime-images").toFile()
+        attachmentBlobStore = FileAttachmentBlobStore(attachmentRoot)
+        imageCapabilities = InMemoryImageInputCapabilityStore()
     }
 
     @After
     fun tearDown() {
         runtimes.forEach(RivenConversationRuntime::close)
         database.close()
+        attachmentRoot.deleteRecursively()
     }
 
     @Test
@@ -335,6 +356,72 @@ class RivenConversationRuntimeTest {
         )
     }
 
+    @Test
+    fun imageDraftRelaunchConfirmationRegenerateAndContinueUseOnlyCanonicalImage() = runBlocking {
+        val http = QueueHttpClient(
+            success("I can see it."),
+            success("I can still see it."),
+            success("Continuing without resending it."),
+        )
+        val first = runtime(http)
+        first.initialize()
+        val profile = first.saveProfile(null, "Primary", "manual/unknown-vision", "fake-key")
+            as RivenProfileSaveResult.Success
+        attachImageDraft("A small caption")
+        val beforeRelaunch = (first.snapshot() as RivenRuntimeResult.Success).snapshot
+        assertEquals(1, beforeRelaunch.draftImages.size)
+        assertEquals("A small caption", beforeRelaunch.draft)
+        first.close()
+        runtimes.remove(first)
+
+        val reopened = runtime(http)
+        val restored = (reopened.initialize() as RivenRuntimeResult.Success).snapshot
+        assertEquals(1, restored.draftImages.size)
+        val blocked = reopened.send("A small caption")
+        assertTrue(blocked is RivenRuntimeResult.Failure)
+        assertTrue((blocked as RivenRuntimeResult.Failure).requiresImageCapabilityConfirmation)
+        assertEquals(1, checkNotNull(blocked.snapshot).draftImages.size)
+        assertTrue(http.requests.isEmpty())
+
+        val sent = reopened.sendWithUnknownImageCapabilityConfirmation("A small caption")
+        assertTrue("Expected image send success, got $sent", sent is RivenRuntimeResult.Success)
+        assertEquals(
+            OpenRouterImageInputCapability.USER_CONFIRMED_UNKNOWN,
+            imageCapabilities.read(profile.profile.profileId, profile.profile.modelId),
+        )
+        val sentSnapshot = (sent as RivenRuntimeResult.Success).snapshot
+        assertTrue(sentSnapshot.draftImages.isEmpty())
+        assertEquals(1, sentSnapshot.messages.single { it.role == MessageRole.USER }.images.size)
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[0].body)))
+
+        assertTrue(reopened.regenerate() is RivenRuntimeResult.Success)
+        assertEquals(1, imagePartCount(checkNotNull(http.requests[1].body)))
+        assertTrue(reopened.continueConversation() is RivenRuntimeResult.Success)
+        assertEquals(0, imagePartCount(checkNotNull(http.requests[2].body)))
+    }
+
+    @Test
+    fun declaredUnsupportedModelBlocksImageAndPreservesDraftWithoutHttp() = runBlocking {
+        val http = QueueHttpClient(success("must not run"))
+        val runtime = runtime(http)
+        runtime.initialize()
+        val profile = runtime.saveProfile(null, "Text only", "text/model", "fake-key")
+            as RivenProfileSaveResult.Success
+        imageCapabilities.write(
+            profile.profile.profileId,
+            profile.profile.modelId,
+            OpenRouterImageInputCapability.UNSUPPORTED,
+        )
+        attachImageDraft("")
+
+        val result = runtime.send("")
+
+        assertTrue(result is RivenRuntimeResult.Failure)
+        assertFalse((result as RivenRuntimeResult.Failure).requiresImageCapabilityConfirmation)
+        assertEquals(1, checkNotNull(result.snapshot).draftImages.size)
+        assertTrue(http.requests.isEmpty())
+    }
+
     private fun runtime(http: OpenRouterHttpClient) = RivenConversationRuntime(
         database = database,
         credentialStore = credentials,
@@ -342,9 +429,61 @@ class RivenConversationRuntimeTest {
         backgroundScheduler = scheduler,
         personalitySource = LockedRivenPersonalityContextSource(context),
         httpClient = http,
+        attachmentBlobStore = attachmentBlobStore,
+        imageMetadataDecoder = TEST_IMAGE_DECODER,
+        imageCapabilityStore = imageCapabilities,
         ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
         clock = { clock.incrementAndGet() },
     ).also(runtimes::add)
+
+    private suspend fun attachImageDraft(caption: String): String {
+        val attachment = AttachmentService(database, attachmentBlobStore).createImportedAttachment(
+            ImportedAttachmentInput(
+                kind = AttachmentKind.IMAGE,
+                mimeType = "image/png",
+                occurredAt = clock.incrementAndGet(),
+                bytes = AttachmentByteSource.fromBytes(pngBytes()),
+            ),
+        ) as AttachmentCreateResult.Success
+        val saved = ConversationDraftService(database, scheduler::enqueueAttachmentCleanup).saveDraft(
+            SaveConversationDraftInput(
+                conversationId = RivenConversationRuntime.CONVERSATION_ID,
+                content = caption,
+                attachmentIds = listOf(attachment.attachment.attachmentId),
+                expectedRevision = 0,
+                occurredAt = clock.incrementAndGet(),
+            ),
+        )
+        assertTrue(saved is SaveConversationDraftResult.Saved)
+        return attachment.attachment.attachmentId
+    }
+
+    private fun pngBytes(): ByteArray = Base64.getDecoder().decode(VALID_ONE_PIXEL_PNG)
+
+    private fun imagePartCount(body: String): Int {
+        val messages = JSONObject(body).getJSONArray("messages")
+        var count = 0
+        for (messageIndex in 0 until messages.length()) {
+            val content = messages.getJSONObject(messageIndex).optJSONArray("content") ?: continue
+            for (partIndex in 0 until content.length()) {
+                if (content.getJSONObject(partIndex).optString("type") == "image_url") count++
+            }
+        }
+        return count
+    }
+
+    private companion object {
+        val TEST_IMAGE_DECODER = ImageMetadataDecoder { bytes ->
+            if (bytes.size >= 8 && bytes.copyOfRange(0, 8).contentEquals(PNG_SIGNATURE)) {
+                DecodedImageMetadata("image/png", 2, 2)
+            } else {
+                null
+            }
+        }
+        val PNG_SIGNATURE = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
+        const val VALID_ONE_PIXEL_PNG =
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAALSURBVBhXY2BABwAAEgABp3qZbgAAAABJRU5ErkJggg=="
+    }
 
     private fun success(content: String) = listOf(
         "data: {\"id\":\"request-ok\",\"choices\":[{\"delta\":{\"content\":\"$content\"}}]}",

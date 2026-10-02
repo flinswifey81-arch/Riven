@@ -1,8 +1,12 @@
 package com.shai.riven.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -13,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -54,6 +59,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -71,6 +78,8 @@ import com.shai.riven.data.provider.openrouter.OpenRouterModel
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
 import com.shai.riven.data.runtime.RivenConversationRuntime
 import com.shai.riven.data.runtime.RivenMemoryItem
+import com.shai.riven.data.runtime.RivenChatMessage
+import com.shai.riven.data.runtime.RivenImageAttachment
 import com.shai.riven.data.runtime.RivenProfileSaveResult
 import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
@@ -384,6 +393,7 @@ private fun ChatScreen(
     var notice by remember(externalNotice) { mutableStateOf(externalNotice) }
     var conversationJob by remember { mutableStateOf<Job?>(null) }
     var activeSubmissionId by remember { mutableStateOf<Long?>(null) }
+    var awaitingUnknownImageConfirmation by remember { mutableStateOf(false) }
     val latestConversationJob by rememberUpdatedState(conversationJob)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -403,6 +413,7 @@ private fun ChatScreen(
                 if (submissionId != null) onSubmissionSettled(submissionId, result.snapshot)
                 else if (!preserveComposerDraft) onRuntimeDraft(result.snapshot.draft)
                 notice = null
+                awaitingUnknownImageConfirmation = false
                 onSnapshot(result.snapshot)
             }
             is RivenRuntimeResult.Failure -> {
@@ -413,6 +424,14 @@ private fun ChatScreen(
                 }
                 if (submissionId != null) onSubmissionSettled(submissionId, result.snapshot)
                 notice = result.message
+                awaitingUnknownImageConfirmation = result.requiresImageCapabilityConfirmation
+            }
+        }
+    }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                apply(runtimeIo { runtime.addDraftImage(uri) })
             }
         }
     }
@@ -427,6 +446,7 @@ private fun ChatScreen(
         activeSubmissionId = submissionId
         streamedReply = ""
         notice = null
+        awaitingUnknownImageConfirmation = false
         conversationJob = scope.launch {
             try {
                 if (preserveDraft) {
@@ -515,9 +535,20 @@ private fun ChatScreen(
                         )
                     }
                 }
-                items(messages, key = { it.id }) { message -> MessageBubble(message.role, message.content) }
+                items(messages, key = { it.id }) { message -> MessageBubble(message) }
                 if (streamedReply.isNotBlank()) {
-                    item(key = "streaming") { MessageBubble(MessageRole.ASSISTANT, streamedReply, true) }
+                    item(key = "streaming") {
+                        MessageBubble(
+                            RivenChatMessage(
+                                id = "streaming",
+                                role = MessageRole.ASSISTANT,
+                                deliveryState = com.shai.riven.data.persistence.model.MessageDeliveryState.PENDING,
+                                content = streamedReply,
+                                providerModel = null,
+                            ),
+                            streaming = true,
+                        )
+                    }
                 }
             }
             val actions = @Composable {
@@ -601,6 +632,40 @@ private fun ChatScreen(
                 }
             }
             actions()
+            snapshot?.draftImages?.singleOrNull()?.let { image ->
+                DraftImagePreview(
+                    image = image,
+                    pending = sending || cancelling,
+                    onRemove = {
+                        if (!sending && !cancelling) {
+                            scope.launch { apply(runtimeIo { runtime.removeDraftImage(image.attachmentId) }) }
+                        }
+                    },
+                )
+            }
+            if (awaitingUnknownImageConfirmation) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val submissionId = onDraftSubmitted(
+                                snapshot?.messages.orEmpty()
+                                    .filter { it.role == MessageRole.USER }
+                                    .mapTo(linkedSetOf()) { it.id },
+                            )
+                            runConversation(false, submissionId) {
+                                runtime.sendWithUnknownImageCapabilityConfirmation(draft, it)
+                            }
+                        },
+                        enabled = !sending && !cancelling,
+                        modifier = Modifier.testTag("chat_confirm_unknown_image"),
+                    ) {
+                        Text("Send anyway")
+                    }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -615,6 +680,15 @@ private fun ChatScreen(
                     minLines = 1,
                     maxLines = if (compact) 3 else 5,
                 )
+                OutlinedButton(
+                    onClick = { imagePicker.launch(arrayOf("image/jpeg", "image/png", "image/webp")) },
+                    enabled = !sending && !cancelling && snapshot?.draftImages.orEmpty().isEmpty(),
+                    modifier = Modifier.testTag("chat_add_image").semantics {
+                        contentDescription = "Choose an image to send"
+                    },
+                ) {
+                    Text("Photo")
+                }
                 Button(
                     onClick = {
                         val submissionId = onDraftSubmitted(
@@ -624,7 +698,8 @@ private fun ChatScreen(
                         )
                         runConversation(false, submissionId) { runtime.send(draft, it) }
                     },
-                    enabled = !sending && !cancelling && draft.isNotBlank(),
+                    enabled = !sending && !cancelling &&
+                        (draft.isNotBlank() || snapshot?.draftImages.orEmpty().isNotEmpty()),
                     modifier = Modifier.testTag("chat_send"),
                     colors = ButtonDefaults.buttonColors(containerColor = RubyHeart),
                 ) {
@@ -663,8 +738,8 @@ private fun StatusBanner(message: String) {
 }
 
 @Composable
-private fun MessageBubble(role: MessageRole, content: String, streaming: Boolean = false) {
-    val isRiven = role == MessageRole.ASSISTANT
+private fun MessageBubble(message: RivenChatMessage, streaming: Boolean = false) {
+    val isRiven = message.role == MessageRole.ASSISTANT
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isRiven) Arrangement.Start else Arrangement.End,
@@ -680,14 +755,114 @@ private fun MessageBubble(role: MessageRole, content: String, streaming: Boolean
                 Modifier.artDecoBubbleFiligree().padding(horizontal = 32.dp, vertical = 24.dp),
             ) {
                 Text(if (isRiven) "Riven" else "Shai", color = MutedGold, fontWeight = FontWeight.Bold)
-                Text(
-                    content + if (streaming) " …" else "",
-                    color = WarmIvory,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                message.images.forEach { image ->
+                    AttachmentThumbnail(
+                        image = image,
+                        description = if (isRiven) "Image from Riven" else "Image sent by Shai",
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp)
+                            .testTag("message_image_${image.attachmentId}"),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                if (message.content.isNotBlank() || streaming) {
+                    Text(
+                        message.content + if (streaming) " …" else "",
+                        color = WarmIvory,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
             }
         }
     }
+}
+
+@Composable
+private fun DraftImagePreview(
+    image: RivenImageAttachment,
+    pending: Boolean,
+    onRemove: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .testTag("draft_image_preview"),
+        colors = CardDefaults.cardColors(containerColor = TableNavyRaised),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AttachmentThumbnail(
+                image = image,
+                description = if (pending) "Image pending send" else "Selected image preview",
+                modifier = Modifier.size(72.dp),
+            )
+            Column(Modifier.weight(1f)) {
+                Text(if (pending) "Sending image" else "Image ready", color = WarmIvory)
+                Text(
+                    "${image.mimeType} · ${image.byteSize / 1_024} KB",
+                    color = MistBlue,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            TextButton(
+                onClick = onRemove,
+                enabled = !pending,
+                modifier = Modifier.testTag("chat_remove_image").semantics {
+                    contentDescription = "Remove selected image"
+                },
+            ) {
+                Text("Remove")
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentThumbnail(
+    image: RivenImageAttachment,
+    description: String,
+    modifier: Modifier,
+) {
+    val bitmap = remember(image.attachmentId, image.previewBytes) {
+        decodePreviewBitmap(image.previewBytes)
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = description,
+            contentScale = ContentScale.Crop,
+            modifier = modifier.background(DeepInk, RoundedCornerShape(10.dp)),
+        )
+    } else {
+        Box(
+            modifier = modifier.background(DeepInk, RoundedCornerShape(10.dp)).semantics {
+                contentDescription = "$description unavailable"
+            },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Image unavailable", color = MistBlue, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private fun decodePreviewBitmap(bytes: ByteArray): android.graphics.Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / sample > MAX_PREVIEW_EDGE ||
+        bounds.outHeight / sample > MAX_PREVIEW_EDGE
+    ) {
+        sample *= 2
+    }
+    return BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply { inSampleSize = sample },
+    )
 }
 
 private fun Modifier.artDecoBubbleFiligree(): Modifier = drawBehind {
@@ -1096,6 +1271,7 @@ private fun SectionTitle(text: String) {
 
 private const val DRAFT_SAVE_DELAY_MILLIS = 350L
 private const val MAX_VISIBLE_MODEL_CHOICES = 24
+private const val MAX_PREVIEW_EDGE = 1_024
 private val ShaiHunterGreen = Color(0xFF123629)
 
 private suspend fun <T> runtimeIo(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }

@@ -666,6 +666,7 @@ internal class ConversationRunPersistence(
             trigger.name,
             retryOfRunId.orEmpty(),
             regenerateOfMessageId.orEmpty(),
+            imageInputAuthorization?.name.orEmpty(),
             expectedTimelineRevision.toString(),
         ).joinToString("\u0000")
         return MessageDigest.getInstance("SHA-256")

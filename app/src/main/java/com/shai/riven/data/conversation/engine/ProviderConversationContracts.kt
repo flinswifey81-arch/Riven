@@ -45,7 +45,22 @@ data class ProviderConversationRequest(
     val modelId: String,
     val credential: ProviderSecret?,
     val context: List<ProviderContextFragment>,
+    /** Image bytes are keyed by their canonical conversation fragment/message id. */
+    val imagesByFragmentId: Map<String, List<ProviderImageContent>> = emptyMap(),
 )
+
+data class ProviderImageContent(
+    val attachmentId: String,
+    val mimeType: String,
+    val bytes: ByteArray,
+    val width: Int,
+    val height: Int,
+    val contentSha256: String,
+)
+
+fun interface ProviderImageContentResolver {
+    fun resolve(attachmentId: String): ProviderImageContent?
+}
 
 enum class ProviderFailureCode {
     AUTHENTICATION,

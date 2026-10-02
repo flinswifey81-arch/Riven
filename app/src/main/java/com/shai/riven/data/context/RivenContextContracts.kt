@@ -76,6 +76,7 @@ data class RivenContextCollectionBudget(
 data class RivenCurrentInteraction(
     val messageId: String? = null,
     val content: String,
+    val hasAttachments: Boolean = false,
 )
 
 /**

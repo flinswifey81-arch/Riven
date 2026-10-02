@@ -8,6 +8,7 @@ import com.shai.riven.data.context.RivenContextSourceCriticality
 import com.shai.riven.data.conversation.engine.ProviderContextFragment
 import com.shai.riven.data.conversation.engine.ProviderConversationRequest
 import com.shai.riven.data.conversation.engine.ProviderFailureCode
+import com.shai.riven.data.conversation.engine.ProviderImageContent
 import com.shai.riven.data.conversation.engine.ProviderStreamEvent
 import com.shai.riven.data.credential.ProviderSecret
 import com.shai.riven.data.persistence.model.MessageRole
@@ -199,6 +200,45 @@ class OpenRouterConversationAdapterTest {
         assertEquals(listOf(ProviderStreamEvent.Failure(ProviderFailureCode.OTHER)), events)
         assertFalse(events.toString().contains("secret"))
         assertEquals(2, http.consumedLines)
+    }
+
+    @Test
+    fun emitsExactImageAsOpenRouterImageUrlPartOnItsCanonicalMessageOnly() = runBlocking {
+        val http = RecordingHttpClient(
+            200,
+            listOf(
+                "data: {\"id\":\"req-image\",\"choices\":[{\"delta\":{\"content\":\"seen\"}}]}",
+                "",
+                "data: [DONE]",
+                "",
+            ),
+        )
+        val image = ProviderImageContent(
+            attachmentId = "attachment-private-id",
+            mimeType = "image/png",
+            bytes = byteArrayOf(1, 2, 3, 4),
+            width = 2,
+            height = 2,
+            contentSha256 = "a".repeat(64),
+        )
+
+        OpenRouterConversationAdapter(http).stream(
+            request().copy(imagesByFragmentId = mapOf("active-fragment" to listOf(image))),
+        ) {}
+
+        val body = checkNotNull(http.request?.body)
+        val messages = JSONObject(body).getJSONArray("messages")
+        assertTrue(messages.getJSONObject(0).opt("content") is String)
+        assertTrue(messages.getJSONObject(1).opt("content") is String)
+        val parts = messages.getJSONObject(2).getJSONArray("content")
+        assertEquals("text", parts.getJSONObject(0).getString("type"))
+        assertEquals("image_url", parts.getJSONObject(1).getString("type"))
+        assertEquals(
+            "data:image/png;base64,AQIDBA==",
+            parts.getJSONObject(1).getJSONObject("image_url").getString("url"),
+        )
+        assertFalse(body.contains("attachment-private-id"))
+        assertFalse(body.contains("secret-value"))
     }
 
     @Test

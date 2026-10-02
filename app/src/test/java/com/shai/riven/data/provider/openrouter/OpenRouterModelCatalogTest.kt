@@ -50,4 +50,21 @@ class OpenRouterModelCatalogTest {
             malformed.models(ProviderSecret.fromPlaintext("bad")),
         )
     }
+
+    @Test
+    fun distinguishesSupportedUnsupportedAndUnknownImageCapabilities() = runBlocking {
+        val catalog = OpenRouterModelCatalog { _, onLine ->
+            onLine(
+                """{"data":[{"id":"vision","architecture":{"input_modalities":["text","image"]}},{"id":"text","architecture":{"input_modalities":["text"]}},{"id":"unknown"}]}""",
+            )
+            OpenRouterHttpResponse(200, emptyMap())
+        }
+
+        val models = (catalog.models(ProviderSecret.fromPlaintext("key")) as
+            OpenRouterModelCatalogResult.Success).models.associateBy(OpenRouterModel::id)
+
+        assertEquals(OpenRouterImageInputCapability.SUPPORTED, models.getValue("vision").imageInputCapability)
+        assertEquals(OpenRouterImageInputCapability.UNSUPPORTED, models.getValue("text").imageInputCapability)
+        assertEquals(OpenRouterImageInputCapability.UNKNOWN, models.getValue("unknown").imageInputCapability)
+    }
 }
