@@ -64,7 +64,7 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Celestial Spire is playable • Four table previews and live Riven replies remain unconnected.",
+            "Celestial Spire and Comet Trail are playable • Three table previews and live Riven replies remain unconnected.",
         ).assertIsDisplayed()
     }
 
@@ -154,6 +154,26 @@ class ArcadeComposeTest {
     }
 
     @Test
+    fun cometTrailShowsPlayableWrappingControlsAndReviewDefault() {
+        composeRule.setContent {
+            RivenTheme {
+                ArcadeExperience(
+                    state = ArcadeUiState(selectedGameId = ArcadeGame.WRAPPING_SNAKE.gameId),
+                    onAction = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("WRAPPING TRAIL").assertIsDisplayed()
+        composeRule.onNodeWithTag("comet_trail_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Turn Comet Trail left").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Comet Trail").assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "Endless wrapping • Self-contact pauses before contact (review default).",
+        ).assertIsDisplayed()
+    }
+
+    @Test
     fun starstruckUsesDistinctAccessibleCelestialTiles() {
         val actions = mutableListOf<ArcadeAction>()
         composeRule.setContent {
@@ -216,6 +236,16 @@ class ArcadeActivityScreenshotTest {
         composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
         composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
         writeScreenshot("celestial-spire.png")
+    }
+
+    @Test
+    fun rendersPlayableCometTrailToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(5)
+        composeRule.onNodeWithText("Comet Trail").performClick()
+        composeRule.onNodeWithTag("comet_trail_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Comet Trail").performClick()
+        composeRule.onNodeWithContentDescription("Resume Comet Trail").assertIsEnabled()
+        writeScreenshot("comet-trail.png")
     }
 
     @Test
@@ -310,13 +340,25 @@ class ArcadeCompactActivityScreenshotTest {
     @Test
     fun rendersCompactCelestialSpireControlsToInspectablePng() {
         composeRule.onNodeWithText("Celestial Spire").performClick()
-        composeRule.onNodeWithTag("celestial_spire_compact_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
         composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Move piece left").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Hard drop piece").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
         composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
         writeScreenshot("celestial-spire-compact.png")
+    }
+
+    @Test
+    fun rendersCompactCometTrailControlsToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(5)
+        composeRule.onNodeWithText("Comet Trail").performClick()
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("comet_trail_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Turn Comet Trail left").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Comet Trail").performClick()
+        composeRule.onNodeWithContentDescription("Resume Comet Trail").assertIsEnabled()
+        writeScreenshot("comet-trail-compact.png")
     }
 
     private fun writeScreenshot(fileName: String) {
@@ -361,7 +403,7 @@ class ArcadeCompactLayoutTest {
         }
 
         composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
-        composeRule.onNodeWithTag("celestial_spire_compact_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
         composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
         listOf(
             "Move piece left",
@@ -387,6 +429,40 @@ class ArcadeCompactLayoutTest {
             .assertHeightIsAtLeast(48.dp)
             .assertWidthIsAtLeast(48.dp)
             .performClick()
+    }
+
+    @Test
+    fun shortLargeTextCometTrailKeepsBoardAndControlsTogether() {
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(
+                        state = ArcadeUiState(selectedGameId = ArcadeGame.WRAPPING_SNAKE.gameId),
+                        onAction = {},
+                    )
+                }
+            }
+        }
+
+        composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("comet_trail_board").assertIsDisplayed()
+        listOf(
+            "Turn Comet Trail up",
+            "Turn Comet Trail left",
+            "Turn Comet Trail down",
+            "Turn Comet Trail right",
+            "Pause Comet Trail",
+        ).forEach { description ->
+            composeRule.onNodeWithContentDescription(description)
+                .assertIsDisplayed()
+                .assertHeightIsAtLeast(48.dp)
+                .assertWidthIsAtLeast(48.dp)
+        }
+        composeRule.onNodeWithContentDescription("Open Comet Trail settings")
+            .assertIsDisplayed()
+            .assertHeightIsAtLeast(48.dp)
+        composeRule.onNodeWithContentDescription("Open conversation with Riven").assertIsDisplayed()
     }
 
     @Test

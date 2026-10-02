@@ -58,7 +58,7 @@ enum class ArcadeGame(
     ;
 
     val hasPlayableEngine: Boolean
-        get() = this == STACKER
+        get() = this == STACKER || this == WRAPPING_SNAKE
 
     /** Solo tables refresh or continue; only Cosmic Mischief may eventually end in a loss. */
     val allowsLoss: Boolean

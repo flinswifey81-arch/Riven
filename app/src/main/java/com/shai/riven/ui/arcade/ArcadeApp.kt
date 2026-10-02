@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -78,6 +77,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
+import com.shai.riven.ui.arcade.comet.CometTrailGame
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
 import com.shai.riven.ui.theme.AquaHeart
 import com.shai.riven.ui.theme.DeepInk
@@ -260,7 +260,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Celestial Spire is playable • Four table previews and live Riven replies remain unconnected.",
+                text = "Celestial Spire and Comet Trail are playable • Three table previews and live Riven replies remain unconnected.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -334,8 +334,9 @@ private fun ArcadeGameScreen(
             .navigationBarsPadding(),
     ) {
         val useScrollableLayout = maxHeight < 700.dp || LocalDensity.current.fontScale >= 1.3f
-        if (useScrollableLayout && game == ArcadeGame.STACKER) {
-            CompactCelestialSpireScreen(
+        if (useScrollableLayout && game.hasPlayableEngine) {
+            CompactPlayableGameScreen(
+                game = game,
                 state = state,
                 onAction = onAction,
             )
@@ -426,7 +427,8 @@ private fun ArcadeGameScreen(
 }
 
 @Composable
-private fun CompactCelestialSpireScreen(
+private fun CompactPlayableGameScreen(
+    game: ArcadeGame,
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
 ) {
@@ -434,7 +436,7 @@ private fun CompactCelestialSpireScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 8.dp, vertical = 4.dp)
-            .testTag("celestial_spire_compact_screen"),
+            .testTag("compact_playable_game_screen"),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Row(
@@ -449,7 +451,7 @@ private fun CompactCelestialSpireScreen(
                 Text("‹")
             }
             Text(
-                text = "Celestial Spire",
+                text = game.title,
                 modifier = Modifier.weight(1f),
                 color = WarmIvory,
                 style = MaterialTheme.typography.titleSmall,
@@ -469,10 +471,10 @@ private fun CompactCelestialSpireScreen(
             }
         }
         GameBoardCard(
-            game = ArcadeGame.STACKER,
+            game = game,
             externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
             onAction = onAction,
-            compactSpire = true,
+            compactGameLayout = true,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -486,7 +488,7 @@ private fun GameBoardCard(
     externallyPaused: Boolean,
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
-    compactSpire: Boolean = false,
+    compactGameLayout: Boolean = false,
 ) {
     Card(
         modifier = modifier,
@@ -497,11 +499,14 @@ private fun GameBoardCard(
         when (game) {
             ArcadeGame.STACKER -> CelestialSpireGame(
                 externallyPaused = externallyPaused,
-                compactLayout = compactSpire,
+                compactLayout = compactGameLayout,
             )
             ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
             ArcadeGame.HEART_MATCH -> HeartMatchPreview(onAction)
-            ArcadeGame.WRAPPING_SNAKE -> SnakePreview(onAction)
+            ArcadeGame.WRAPPING_SNAKE -> CometTrailGame(
+                externallyPaused = externallyPaused,
+                compactLayout = compactGameLayout,
+            )
             ArcadeGame.RIVEN_CARD_TABLE -> SharedCardTablePreview(onAction)
         }
     }
@@ -527,7 +532,7 @@ private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
     ArcadeGame.STACKER -> error("Celestial Spire uses the responsive compact layout")
     ArcadeGame.KLONDIKE -> 520.dp
     ArcadeGame.HEART_MATCH -> 520.dp
-    ArcadeGame.WRAPPING_SNAKE -> 500.dp
+    ArcadeGame.WRAPPING_SNAKE -> error("Comet Trail uses the responsive compact layout")
     ArcadeGame.RIVEN_CARD_TABLE -> 640.dp
 }
 
@@ -1029,67 +1034,6 @@ private fun CelestialMatchTile(
     }
 }
 
-@Composable
-private fun SnakePreview(onAction: (ArcadeAction) -> Unit) {
-    PreviewBoard(title = "WRAPPING GRID", status = "Mindful endless preview") {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Canvas(
-                modifier = Modifier
-                    .weight(1f)
-                    .aspectRatio(1f)
-                    .background(PenthouseNavy, RoundedCornerShape(18.dp))
-                    .border(1.dp, MutedGold.copy(alpha = 0.45f), RoundedCornerShape(18.dp)),
-            ) {
-                val cell = size.minDimension / 12f
-                for (index in 1 until 12) {
-                    drawLine(
-                        color = MistBlue.copy(alpha = 0.08f),
-                        start = Offset(index * cell, 0f),
-                        end = Offset(index * cell, size.height),
-                    )
-                    drawLine(
-                        color = MistBlue.copy(alpha = 0.08f),
-                        start = Offset(0f, index * cell),
-                        end = Offset(size.width, index * cell),
-                    )
-                }
-                val snake = listOf(Offset(2f, 6f), Offset(3f, 6f), Offset(4f, 6f), Offset(4f, 5f), Offset(5f, 5f))
-                snake.forEachIndexed { index, point ->
-                    drawRoundRect(
-                        color = if (index == snake.lastIndex) MutedGold else AquaHeart,
-                        topLeft = Offset(point.x * cell + 2f, point.y * cell + 2f),
-                        size = androidx.compose.ui.geometry.Size(cell - 4f, cell - 4f),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cell * 0.25f),
-                    )
-                }
-                drawCircle(
-                    color = RubyHeart,
-                    radius = cell * 0.32f,
-                    center = Offset(9.5f * cell, 3.5f * cell),
-                )
-                drawCircle(
-                    color = MutedGold.copy(alpha = 0.38f),
-                    radius = size.minDimension / 2f - 2f,
-                    center = center,
-                    style = Stroke(width = 2f),
-                )
-            }
-            Button(
-                onClick = { onAction(ArcadeAction.PreviewControl("Snake direction pad")) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("DIRECTION PAD PREVIEW")
-            }
-        }
-    }
-}
-
 private enum class CelestialCardMotif {
     ORBIT,
     ECLIPSE,
@@ -1545,7 +1489,8 @@ private fun pendingRulesText(game: ArcadeGame): String = when (game) {
         "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
     ArcadeGame.KLONDIKE -> "Preview only • Draw-one Klondike engine and legal move handling are not implemented."
     ArcadeGame.HEART_MATCH -> "Preview only • Cascade, sound, and power-up thresholds/effects remain to be finalized."
-    ArcadeGame.WRAPPING_SNAKE -> "Preview only • Edge wrapping is intended; self-collision behavior remains undecided."
+    ArcadeGame.WRAPPING_SNAKE ->
+        "Playable default for review • Predicted self-contact pauses before impact so another safe direction can be chosen without losing progress."
     ArcadeGame.RIVEN_CARD_TABLE ->
         "Preview only • Deck, penalties, challenges, trade protocol, and hidden-information engine remain pending."
 }
