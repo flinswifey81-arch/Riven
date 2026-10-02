@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
@@ -29,6 +30,7 @@ import com.shai.riven.MainActivity
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -83,12 +85,25 @@ class ArcadeComposeTest {
         composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
         composeRule.onAllNodesWithContentDescription("Face-down card").assertCountEquals(8)
         composeRule.onNodeWithContentDescription("Eclipse. Skip the next turn.").assertIsDisplayed()
+        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(4)
         composeRule.onNodeWithContentDescription(
             "Double Trouble. The next player draws two cards.",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            "celestial_hand_double-trouble_primary",
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            "celestial_hand_double-trouble_effect",
+            useUnmergedTree = true,
         ).assertIsDisplayed()
         composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
         composeRule.onNodeWithContentDescription(
             "Rewrite the Stars. Choose the next color.",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            "celestial_hand_rewrite-the-stars_effect",
+            useUnmergedTree = true,
         ).assertIsDisplayed()
     }
 
@@ -132,11 +147,12 @@ class ArcadeComposeTest {
 
     @Test
     fun starstruckUsesDistinctAccessibleCelestialTiles() {
+        val actions = mutableListOf<ArcadeAction>()
         composeRule.setContent {
             RivenTheme {
                 ArcadeExperience(
                     state = ArcadeUiState(selectedGameId = ArcadeGame.HEART_MATCH.gameId),
-                    onAction = {},
+                    onAction = actions::add,
                 )
             }
         }
@@ -144,7 +160,19 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("Starstruck").assertIsDisplayed()
         composeRule.onNodeWithText("Moons • hearts • stars").assertIsDisplayed()
         listOf("Aqua moon tile", "Ruby heart tile", "Gold star tile").forEach { label ->
-            assertTrue(composeRule.onAllNodesWithContentDescription(label).fetchSemanticsNodes().isNotEmpty())
+            composeRule.onAllNodesWithContentDescription(label)[0]
+                .assertHasClickAction()
+                .performClick()
+        }
+        composeRule.runOnIdle {
+            assertEquals(
+                listOf(
+                    ArcadeAction.PreviewControl("Celestial tile swap"),
+                    ArcadeAction.PreviewControl("Celestial tile swap"),
+                    ArcadeAction.PreviewControl("Celestial tile swap"),
+                ),
+                actions,
+            )
         }
     }
 }
@@ -254,6 +282,10 @@ class ArcadeCompactActivityScreenshotTest {
         composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
         composeRule.onNodeWithContentDescription(
             "Rewrite the Stars. Choose the next color.",
+        ).assertIsDisplayed()
+        composeRule.onNodeWithTag(
+            "celestial_hand_rewrite-the-stars_effect",
+            useUnmergedTree = true,
         ).assertIsDisplayed()
 
         val output = File(

@@ -951,7 +951,7 @@ private fun CelestialMatchTile(
         modifier = modifier
             .background(TableNavyRaised, RoundedCornerShape(10.dp))
             .border(1.dp, MutedGold.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
-            .clearAndSetSemantics { contentDescription = label }
+            .semantics { contentDescription = label }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -1269,8 +1269,8 @@ private fun CelestialPlayingCard(
     testTag: String,
 ) {
     val largeText = LocalDensity.current.fontScale >= 1.3f
-    val width = if (largeText) 82.dp else 64.dp
-    val height = if (largeText) 120.dp else 94.dp
+    val width = if (largeText) 116.dp else 92.dp
+    val height = if (largeText) 184.dp else 138.dp
     val shape = RoundedCornerShape(if (largeText) 12.dp else 10.dp)
     Box(
         modifier = Modifier
@@ -1296,48 +1296,46 @@ private fun CelestialPlayingCard(
                 Text(
                     text = card.cornerLabel,
                     color = card.color,
-                    fontSize = if (largeText) 11.sp else 9.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                 )
                 Text(
                     text = card.cornerLabel,
                     color = card.color.copy(alpha = 0.72f),
-                    fontSize = if (largeText) 9.sp else 7.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                 )
             }
             Spacer(Modifier.weight(1f))
-            if (card.motif == CelestialCardMotif.ORBIT) {
-                Text(
-                    text = card.cornerLabel,
-                    color = card.color,
-                    fontSize = if (largeText) 32.sp else 27.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                )
-            } else {
-                Spacer(Modifier.height(if (largeText) 31.dp else 23.dp))
-            }
+            Text(
+                text = card.cornerLabel,
+                modifier = Modifier.testTag("${testTag}_primary"),
+                color = card.color,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
             Spacer(Modifier.weight(1f))
             Text(
                 text = card.title,
                 color = DeepInk,
-                fontSize = if (largeText) 8.sp else 7.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                lineHeight = if (largeText) 9.sp else 8.sp,
+                lineHeight = 11.sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
             Text(
                 text = card.effect,
-                color = DeepInk.copy(alpha = 0.76f),
-                fontSize = if (largeText) 6.sp else 5.sp,
+                modifier = Modifier.testTag("${testTag}_effect"),
+                color = DeepInk.copy(alpha = 0.82f),
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Medium,
-                lineHeight = if (largeText) 7.sp else 6.sp,
-                maxLines = 2,
+                lineHeight = 12.sp,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
@@ -1444,18 +1442,6 @@ private fun CelestialCardArtwork(card: DemoCard) {
                     radius = radius * 1.35f,
                     center = center,
                     style = Stroke(width = stroke),
-                )
-                drawLine(
-                    color = card.color,
-                    start = center - Offset(0f, radius * 0.58f),
-                    end = center + Offset(0f, radius * 0.58f),
-                    strokeWidth = stroke * 1.4f,
-                )
-                drawLine(
-                    color = card.color,
-                    start = center - Offset(radius * 0.58f, 0f),
-                    end = center + Offset(radius * 0.58f, 0f),
-                    strokeWidth = stroke * 1.4f,
                 )
             }
 
