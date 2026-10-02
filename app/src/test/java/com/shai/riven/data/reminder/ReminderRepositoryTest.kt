@@ -10,6 +10,8 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -234,6 +236,44 @@ class ReminderRepositoryTest {
     }
 
     @Test
+    fun editReadBeforeClaimRetriesWinningTokenAndStopsActivatedAudio() = runBlocking {
+        val created = repository.create(
+            draft("Edit race", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),
+        ) as ReminderOperationResult.Success
+        val initialRead = CompletableDeferred<Unit>()
+        val resumeMutation = CompletableDeferred<Unit>()
+        repository.hooks = ReminderRepositoryHooks {
+            initialRead.complete(Unit)
+            resumeMutation.await()
+        }
+
+        val edit = async {
+            repository.edit(
+                created.reminder.id,
+                draft("Edited after claim", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),
+            )
+        }
+        initialRead.await()
+        val claim = repository.claimDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+        deliveryEffects.activate(created.reminder.id, claim.deliveryToken)
+        assertEquals(
+            created.reminder.id to claim.deliveryToken,
+            deliveryEffects.audioActivated.await(),
+        )
+        resumeMutation.complete(Unit)
+
+        val edited = edit.await() as ReminderOperationResult.Success
+
+        assertEquals("Edited after claim", edited.reminder.title)
+        assertEquals(ReminderStatus.SCHEDULED, edited.reminder.status)
+        assertTrue(deliveryEffects.activeTokens.isEmpty())
+        assertTrue(deliveryEffects.cancellations.contains(created.reminder.id to claim.deliveryToken))
+    }
+
+    @Test
     fun cancelWinningRaceMakesQueuedOldBroadcastStale() = runBlocking {
         val created = repository.create(draft("Race cancel")) as ReminderOperationResult.Success
 
@@ -261,6 +301,16 @@ class ReminderRepositoryTest {
         assertEquals(2, completed.reminder.scheduleRevision)
         assertNull(repository.isCurrentDelivery(created.reminder.id, 1, claim.deliveryToken))
         assertTrue(deliveryEffects.cancellations.contains(created.reminder.id to claim.deliveryToken))
+    }
+
+    @Test
+    fun completeReadBeforeClaimRetriesWinningTokenAndStopsActivatedAudio() = runBlocking {
+        assertReadBeforeClaimFinishRace(completing = true)
+    }
+
+    @Test
+    fun cancelReadBeforeClaimRetriesWinningTokenAndStopsActivatedAudio() = runBlocking {
+        assertReadBeforeClaimFinishRace(completing = false)
     }
 
     @Test
@@ -325,6 +375,47 @@ class ReminderRepositoryTest {
         deliveryMode = deliveryMode,
     )
 
+    private suspend fun assertReadBeforeClaimFinishRace(completing: Boolean) {
+        val created = repository.create(
+            draft("Finish race", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),
+        ) as ReminderOperationResult.Success
+        val initialRead = CompletableDeferred<Unit>()
+        val resumeMutation = CompletableDeferred<Unit>()
+        repository.hooks = ReminderRepositoryHooks {
+            initialRead.complete(Unit)
+            resumeMutation.await()
+        }
+
+        kotlinx.coroutines.coroutineScope {
+            val finish = async {
+                if (completing) {
+                    repository.complete(created.reminder.id)
+                } else {
+                    repository.cancel(created.reminder.id)
+                }
+            }
+            initialRead.await()
+            val claim = repository.claimDelivery(
+                created.reminder.id,
+                created.reminder.scheduleRevision,
+            ) as ReminderDeliveryClaim.Claimed
+            deliveryEffects.activate(created.reminder.id, claim.deliveryToken)
+            assertEquals(
+                created.reminder.id to claim.deliveryToken,
+                deliveryEffects.audioActivated.await(),
+            )
+            resumeMutation.complete(Unit)
+
+            val finished = finish.await() as ReminderOperationResult.Success
+            assertEquals(
+                if (completing) ReminderStatus.COMPLETED else ReminderStatus.CANCELLED,
+                finished.reminder.status,
+            )
+            assertTrue(deliveryEffects.activeTokens.isEmpty())
+            assertTrue(deliveryEffects.cancellations.contains(created.reminder.id to claim.deliveryToken))
+        }
+    }
+
     private class RecordingScheduler : ReminderPlatformScheduler {
         val schedules = mutableListOf<ReminderScheduleRequest>()
         val cancellations = mutableListOf<String>()
@@ -347,9 +438,18 @@ class ReminderRepositoryTest {
 
     private class RecordingDeliveryEffects : ReminderDeliveryEffects {
         val cancellations = mutableListOf<Pair<String, String?>>()
+        val activeTokens = mutableSetOf<Pair<String, String>>()
+        val audioActivated = CompletableDeferred<Pair<String, String>>()
+
+        fun activate(reminderId: String, deliveryToken: String) {
+            val key = reminderId to deliveryToken
+            activeTokens += key
+            audioActivated.complete(key)
+        }
 
         override fun cancelDelivery(reminderId: String, deliveryToken: String?) {
             cancellations += reminderId to deliveryToken
+            deliveryToken?.let { activeTokens.remove(reminderId to it) }
         }
     }
 }

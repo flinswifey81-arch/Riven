@@ -409,7 +409,7 @@ class RivenRestoreBootstrap(
                 check(cursor.moveToFirst())
                 cursor.getInt(0)
             }
-            require(version == CURRENT_REMINDER_DATABASE_VERSION)
+            require(version in MINIMUM_SUPPORTED_REMINDER_DATABASE_VERSION..CURRENT_REMINDER_DATABASE_VERSION)
             val quick = sqlite.rawQuery("PRAGMA quick_check", null).use { cursor ->
                 cursor.moveToFirst() && cursor.count == 1 && cursor.getString(0) == "ok"
             }
@@ -427,6 +427,22 @@ class RivenRestoreBootstrap(
             restored.openHelper.writableDatabase
         } finally {
             restored.close()
+        }
+        SQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        ).use { sqlite ->
+            val migratedVersion = sqlite.rawQuery("PRAGMA user_version", null).use { cursor ->
+                check(cursor.moveToFirst())
+                cursor.getInt(0)
+            }
+            require(migratedVersion == CURRENT_REMINDER_DATABASE_VERSION)
+            val quick = sqlite.rawQuery("PRAGMA quick_check", null).use { cursor ->
+                cursor.moveToFirst() && cursor.count == 1 && cursor.getString(0) == "ok"
+            }
+            require(quick)
+            require(!sqlite.rawQuery("PRAGMA foreign_key_check", null).use { it.moveToFirst() })
         }
         checkpointSelfContainedDatabase(databaseFile)
     }
@@ -476,4 +492,8 @@ class RivenRestoreBootstrap(
 
     private fun RivenRestoreJournalRecord.reminderDatabaseOrNull(file: File): File? =
         file.takeIf { includesReminderDatabase }
+
+    private companion object {
+        const val MINIMUM_SUPPORTED_REMINDER_DATABASE_VERSION = 1
+    }
 }
