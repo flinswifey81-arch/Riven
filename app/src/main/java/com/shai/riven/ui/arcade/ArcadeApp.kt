@@ -78,6 +78,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
 import com.shai.riven.ui.arcade.comet.CometTrailGame
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireGame
+import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireStore
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
 import com.shai.riven.ui.arcade.starstruck.StarstruckGame
 import com.shai.riven.ui.theme.AquaHeart
@@ -147,6 +149,7 @@ fun ArcadeExperience(
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
     portraitResourceId: Int? = null,
+    solitaireStoreOverride: MidnightSolitaireStore? = null,
 ) {
     val lobbyListState = rememberLazyListState()
     Box(
@@ -172,6 +175,7 @@ fun ArcadeExperience(
                 state = state,
                 onAction = onAction,
                 portraitResourceId = portraitResourceId,
+                solitaireStoreOverride = solitaireStoreOverride,
             )
         }
 
@@ -260,9 +264,9 @@ private fun ArcadeLobby(
                                 "I will stay quiet, but you can tap me whenever you want to chat."
                             } else {
                                 if (portraitResourceId == null) {
-                                    "Five tables are being prepared. Tap this card to open conversation."
+                                    "Four solo tables are ready. Tap this card to open conversation."
                                 } else {
-                                    "Five tables are being prepared. Tap my portrait to open conversation."
+                                    "Four solo tables are ready. Tap my portrait to open conversation."
                                 }
                             },
                             color = MistBlue,
@@ -285,7 +289,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Celestial Spire, Starstruck, and Comet Trail are playable • Two table previews and live Riven replies remain unconnected.",
+                text = "Four solo tables are playable • Cosmic Mischief and live Riven replies remain unconnected.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -352,6 +356,7 @@ private fun ArcadeGameScreen(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
     portraitResourceId: Int?,
+    solitaireStoreOverride: MidnightSolitaireStore?,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -365,6 +370,7 @@ private fun ArcadeGameScreen(
                 game = game,
                 state = state,
                 onAction = onAction,
+                solitaireStoreOverride = solitaireStoreOverride,
             )
         } else if (useScrollableLayout) {
             LazyColumn(
@@ -399,6 +405,7 @@ private fun ArcadeGameScreen(
                         game = game,
                         externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                         onAction = onAction,
+                        solitaireStoreOverride = solitaireStoreOverride,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(compactBoardHeight(game)),
@@ -438,6 +445,7 @@ private fun ArcadeGameScreen(
                     game = game,
                     externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                     onAction = onAction,
+                    solitaireStoreOverride = solitaireStoreOverride,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -459,6 +467,7 @@ private fun CompactPlayableGameScreen(
     game: ArcadeGame,
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
+    solitaireStoreOverride: MidnightSolitaireStore?,
 ) {
     Column(
         modifier = Modifier
@@ -503,6 +512,7 @@ private fun CompactPlayableGameScreen(
             externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
             onAction = onAction,
             compactGameLayout = true,
+            solitaireStoreOverride = solitaireStoreOverride,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -517,6 +527,7 @@ private fun GameBoardCard(
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
     compactGameLayout: Boolean = false,
+    solitaireStoreOverride: MidnightSolitaireStore? = null,
 ) {
     Card(
         modifier = modifier,
@@ -529,7 +540,11 @@ private fun GameBoardCard(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
             )
-            ArcadeGame.KLONDIKE -> SolitairePreview(onAction)
+            ArcadeGame.KLONDIKE -> MidnightSolitaireGame(
+                externallyPaused = externallyPaused,
+                compactLayout = compactGameLayout,
+                storeOverride = solitaireStoreOverride,
+            )
             ArcadeGame.HEART_MATCH -> StarstruckGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
@@ -1505,7 +1520,8 @@ private fun PlayingCard(
 private fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.STACKER ->
         "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
-    ArcadeGame.KLONDIKE -> "Preview only • Draw-one Klondike engine and legal move handling are not implemented."
+    ArcadeGame.KLONDIKE ->
+        "Playable • Draw-one Klondike with unlimited recycling, undo, and confirmed fresh deals; no timer, lives, or loss state."
     ArcadeGame.HEART_MATCH ->
         "Playable defaults for review • Straight four creates a Row Burst; straight five or more creates a Color Nova. Dead boards reshuffle without loss."
     ArcadeGame.WRAPPING_SNAKE ->

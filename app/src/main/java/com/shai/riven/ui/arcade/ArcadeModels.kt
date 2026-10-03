@@ -29,7 +29,7 @@ enum class ArcadeGame(
         eyebrow = "SOLITAIRE • DRAW ONE",
         description = "A familiar draw-one table with room to think ahead.",
         mode = ArcadeGameMode.SOLO,
-        commentary = "The open red seven gives you options. We can take this slowly.",
+        commentary = "Take your time. Tap me whenever you want company and the table will pause.",
     ),
     HEART_MATCH(
         gameId = "heart-match",
@@ -58,7 +58,7 @@ enum class ArcadeGame(
     ;
 
     val hasPlayableEngine: Boolean
-        get() = this == STACKER || this == HEART_MATCH || this == WRAPPING_SNAKE
+        get() = this == STACKER || this == KLONDIKE || this == HEART_MATCH || this == WRAPPING_SNAKE
 
     /** Solo tables refresh or continue; only Cosmic Mischief may eventually end in a loss. */
     val allowsLoss: Boolean
