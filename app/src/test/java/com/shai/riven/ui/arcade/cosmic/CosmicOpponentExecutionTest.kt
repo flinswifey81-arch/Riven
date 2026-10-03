@@ -170,6 +170,48 @@ class CosmicOpponentExecutionTest {
         }
     }
 
+    @Test
+    fun honoredTradeCommentaryReceivesSanitizedPublicEvent() = runBlocking {
+        val initial = CosmicMischiefEngine.newGame(seed = 803L)
+        val offeredCard = initial.hand(CosmicPlayer.SHAI).first()
+        val returnedCard = initial.hand(CosmicPlayer.RIVEN).first()
+        val offered = CosmicMischiefEngine.apply(
+            CosmicMischiefSession(initial),
+            CosmicCommand(
+                CosmicPlayer.SHAI,
+                initial.revision,
+                CosmicAction.OfferTrade(offeredCard.id),
+            ),
+        )
+        assertTrue(offered.changed)
+        var commentaryEvent: CosmicPublicEvent? = null
+        val agent = TestAgent(
+            choose = {
+                CosmicAction.RespondToTrade(
+                    decision = CosmicTradeDecision.HONOR,
+                    returnedCardId = returnedCard.id,
+                )
+            },
+            speak = { _, event ->
+                commentaryEvent = event
+                event.message
+            },
+        )
+
+        val outcome = CosmicOpponentExecution().use { execution ->
+            CosmicOpponentTurnRunner(execution).run(offered.session, agent)
+        }
+
+        assertNotNull(outcome)
+        requireNotNull(outcome)
+        val received = requireNotNull(commentaryEvent)
+        assertEquals(CosmicEventType.BARGAIN_HONORED, received.type)
+        assertEquals(offeredCard.id, received.cardId)
+        assertFalse(received.message.contains(returnedCard.spokenName))
+        assertFalse(outcome.notice.contains(returnedCard.spokenName))
+        assertTrue(outcome.actionResult.events.single().message.contains(returnedCard.spokenName))
+    }
+
     private fun rivenTurnSession(seed: Long): CosmicMischiefSession {
         val state = CosmicMischiefEngine.newGame(seed)
         val result = CosmicMischiefEngine.apply(
@@ -198,7 +240,7 @@ class CosmicOpponentExecutionTest {
 
     private class TestAgent(
         private val choose: (CosmicOpponentObservation) -> CosmicAction,
-        private val speak: (CosmicPublicObservation, CosmicEvent) -> String? = { _, event -> event.message },
+        private val speak: (CosmicPublicObservation, CosmicPublicEvent) -> String? = { _, event -> event.message },
     ) : CosmicOpponentAgent {
         override val displayName: String = "Adversarial test agent"
         val actionCalls = AtomicInteger()
@@ -211,7 +253,7 @@ class CosmicOpponentExecutionTest {
 
         override fun commentary(
             observation: CosmicPublicObservation,
-            event: CosmicEvent,
+            event: CosmicPublicEvent,
         ): String? {
             commentaryCalls.incrementAndGet()
             return speak(observation, event)

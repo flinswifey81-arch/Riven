@@ -183,7 +183,7 @@ class CosmicMischiefComposeTest {
 
             override fun commentary(
                 observation: CosmicPublicObservation,
-                event: CosmicEvent,
+            event: CosmicPublicEvent,
             ): String = "This should never apply."
         }
         composeRule.setContent {
@@ -274,7 +274,7 @@ private object PassiveOpponent : CosmicOpponentAgent {
 
     override fun commentary(
         observation: CosmicPublicObservation,
-        event: CosmicEvent,
+            event: CosmicPublicEvent,
     ): String = event.message
 }
 
@@ -297,7 +297,7 @@ private class IgnoringBlockingOpponent : CosmicOpponentAgent {
 
     override fun commentary(
         observation: CosmicPublicObservation,
-        event: CosmicEvent,
+            event: CosmicPublicEvent,
     ): String = "Stale commentary must not appear."
 }
 

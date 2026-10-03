@@ -114,6 +114,21 @@ data class CosmicEvent(
     val message: String,
 )
 
+/**
+ * Privacy-reviewed event surface for observers outside the authoritative engine.
+ *
+ * Engine events may retain private resolution details for persistence and validation. Public events
+ * intentionally have no secondary-card field, so a privately selected trade return cannot cross
+ * the opponent or commentary boundary.
+ */
+data class CosmicPublicEvent(
+    val type: CosmicEventType,
+    val actor: CosmicPlayer? = null,
+    val target: CosmicPlayer? = null,
+    val cardId: Int? = null,
+    val message: String,
+)
+
 data class CosmicCheatRecord(
     val accused: CosmicPlayer,
     val primaryCardId: Int,
@@ -227,7 +242,7 @@ data class CosmicPublicObservation(
     val visibleTell: CosmicTellObservation?,
     val pendingTrade: CosmicPublicTradeOffer?,
     val grudges: List<Int>,
-    val recentEvents: List<CosmicEvent>,
+    val recentEvents: List<CosmicPublicEvent>,
 )
 
 /** This is the only state supplied to an injected opponent. It never contains the user's hand. */
@@ -243,7 +258,7 @@ interface CosmicOpponentAgent {
 
     fun commentary(
         observation: CosmicPublicObservation,
-        event: CosmicEvent,
+        event: CosmicPublicEvent,
     ): String?
 }
 
@@ -298,7 +313,7 @@ class DeterministicCosmicOpponentAgent : CosmicOpponentAgent {
 
     override fun commentary(
         observation: CosmicPublicObservation,
-        event: CosmicEvent,
+        event: CosmicPublicEvent,
     ): String = when (event.type) {
         CosmicEventType.CHEAT_TELL -> "A card moved twice. Entirely ordinary cosmic weather."
         CosmicEventType.CHEAT_CAUGHT -> "Fine. The stars have receipts."
@@ -433,7 +448,19 @@ object CosmicMischiefEngine {
             )
         },
         grudges = immutableSnapshot(state.grudges),
-        recentEvents = immutableSnapshot(state.events),
+        recentEvents = immutableSnapshot(state.events.map(::publicEvent)),
+    )
+
+    fun publicEvent(event: CosmicEvent): CosmicPublicEvent = CosmicPublicEvent(
+        type = event.type,
+        actor = event.actor,
+        target = event.target,
+        cardId = event.cardId,
+        message = when (event.type) {
+            CosmicEventType.BARGAIN_HONORED ->
+                "Bargain honored. The face-up offer changed hands for one private return card."
+            else -> event.message
+        },
     )
 
     fun opponentObservation(state: CosmicMischiefState): CosmicOpponentObservation = CosmicOpponentObservation(

@@ -1,5 +1,6 @@
 package com.shai.riven.ui.arcade.cosmic
 
+import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -262,7 +263,7 @@ class CosmicMischiefEngineTest {
         assertMutationRejected { (view.ownHand as MutableList<CosmicCard>).clear() }
         assertMutationRejected { (view.public.handCounts as MutableList<Int>).clear() }
         assertMutationRejected { (view.public.grudges as MutableList<Int>)[0] = 99 }
-        assertMutationRejected { (view.public.recentEvents as MutableList<CosmicEvent>).clear() }
+        assertMutationRejected { (view.public.recentEvents as MutableList<CosmicPublicEvent>).clear() }
         assertEquals(original, state)
         assertEquals(listOf(3, 31), view.ownHand.map(CosmicCard::id))
         assertEquals(listOf(2, 4), view.public.grudges)
@@ -399,6 +400,22 @@ class CosmicMischiefEngineTest {
     }
 
     @Test
+    fun honoredTradePublicObservationAndCommentaryEventRedactPrivateReturnsInBothDirections() {
+        assertHonoredTradePrivacy(
+            proposer = CosmicPlayer.SHAI,
+            offeredId = 22,
+            returnedId = 31,
+            privateSentinel = "PRIVATE_RIVEN_RETURN_SENTINEL",
+        )
+        assertHonoredTradePrivacy(
+            proposer = CosmicPlayer.RIVEN,
+            offeredId = 31,
+            returnedId = 22,
+            privateSentinel = "PRIVATE_SHAI_RETURN_SENTINEL",
+        )
+    }
+
+    @Test
     fun illegalCardsWrongActorsAndInvalidWildChoicesAreRejected() {
         val state = rigState(listOf(11, 48), listOf(3, 31), topId = 5, turn = CosmicPlayer.SHAI)
         val wrongColor = CosmicMischiefEngine.apply(
@@ -446,6 +463,83 @@ class CosmicMischiefEngineTest {
         )
         assertTrue(result.changed)
         return result.session.game
+    }
+
+    private fun assertHonoredTradePrivacy(
+        proposer: CosmicPlayer,
+        offeredId: Int,
+        returnedId: Int,
+        privateSentinel: String,
+    ) {
+        val base = rigState(
+            shaiIds = listOf(1, 22),
+            rivenIds = listOf(3, 31),
+            topId = 5,
+            turn = proposer,
+        )
+        val offered = CosmicMischiefEngine.apply(
+            CosmicMischiefSession(base),
+            CosmicCommand(proposer, base.revision, CosmicAction.OfferTrade(offeredId)),
+        )
+        assertTrue(offered.changed)
+        val honored = CosmicMischiefEngine.apply(
+            offered.session,
+            CosmicCommand(
+                proposer.other,
+                offered.session.game.revision,
+                CosmicAction.RespondToTrade(CosmicTradeDecision.HONOR, returnedId),
+            ),
+        )
+        assertTrue(honored.changed)
+
+        val rawHonored = honored.events.single()
+        val returnedCard = requireNotNull(CosmicCard.fromId(returnedId))
+        assertEquals(CosmicEventType.BARGAIN_HONORED, rawHonored.type)
+        assertEquals(returnedId, rawHonored.secondaryCardId)
+        assertTrue(rawHonored.message.contains(returnedCard.spokenName))
+
+        val stateWithSentinel = honored.session.game.copy(
+            events = honored.session.game.events.dropLast(1) + rawHonored.copy(
+                message = "${rawHonored.message} $privateSentinel",
+            ),
+        )
+        val observation = CosmicMischiefEngine.opponentObservation(stateWithSentinel)
+        val publicPayload = serializeAllFields(observation.public)
+        val commentaryEvent = observation.public.recentEvents.last()
+        val commentaryPayload = serializeAllFields(commentaryEvent)
+
+        assertEquals(CosmicEventType.BARGAIN_HONORED, commentaryEvent.type)
+        assertEquals(offeredId, commentaryEvent.cardId)
+        assertFalse(publicPayload.contains("secondaryCardId"))
+        assertFalse(commentaryPayload.contains("secondaryCardId"))
+        listOf(
+            "pendingCheat",
+            "tradeUsedThisTurn",
+            "honoredBargains",
+            "betrayedBargains",
+            "dealSeed",
+            "randomState",
+        )
+            .forEach { privateField -> assertFalse(publicPayload.contains(privateField)) }
+        assertFalse(publicPayload.contains(privateSentinel))
+        assertFalse(commentaryPayload.contains(privateSentinel))
+        assertFalse(publicPayload.contains(returnedCard.spokenName))
+        assertFalse(commentaryPayload.contains(returnedCard.spokenName))
+        assertFalse(publicPayload.contains("id=$returnedId"))
+        assertFalse(commentaryPayload.contains("id=$returnedId"))
+        val spoken = DeterministicCosmicOpponentAgent().commentary(observation.public, commentaryEvent)
+        assertFalse(spoken.contains(privateSentinel))
+        assertFalse(spoken.contains(returnedCard.spokenName))
+
+        val opponentPayload = serializeAllFields(observation)
+        assertFalse(opponentPayload.contains(privateSentinel))
+        if (proposer == CosmicPlayer.RIVEN) {
+            assertTrue(observation.ownHand.any { it.id == returnedId })
+            assertTrue(opponentPayload.contains("id=$returnedId"))
+        } else {
+            assertTrue(observation.ownHand.none { it.id == returnedId })
+            assertFalse(opponentPayload.contains("id=$returnedId"))
+        }
     }
 
     private fun applyOne(
@@ -517,6 +611,22 @@ class CosmicMischiefEngineTest {
             rejected = true
         }
         assertTrue("Observation collection must be immutable", rejected)
+    }
+
+    /** Serializes every declared DTO field so newly added leak-prone fields fail these tests. */
+    private fun serializeAllFields(value: Any?): String = when (value) {
+        null -> "null"
+        is String -> value
+        is Number, is Boolean -> value.toString()
+        is Enum<*> -> value.name
+        is Iterable<*> -> value.joinToString(prefix = "[", postfix = "]") { serializeAllFields(it) }
+        else -> value.javaClass.declaredFields
+            .filterNot { field -> Modifier.isStatic(field.modifiers) || field.isSynthetic }
+            .sortedBy { field -> field.name }
+            .joinToString(prefix = "{", postfix = "}") { field ->
+                field.isAccessible = true
+                "${field.name}=${serializeAllFields(field.get(value))}"
+            }
     }
 
     private fun assertConserved(state: CosmicMischiefState) {

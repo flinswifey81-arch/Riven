@@ -95,7 +95,7 @@ class CosmicOpponentExecution(
     suspend fun commentary(
         agent: CosmicOpponentAgent,
         observation: CosmicPublicObservation,
-        event: CosmicEvent,
+        event: CosmicPublicEvent,
     ): String? = invokeBounded(commentaryTimeoutMillis) { agent.commentary(observation, event) }
 
     private suspend fun <T> invokeBounded(timeoutMillis: Long, block: () -> T): T? {
@@ -214,7 +214,7 @@ class CosmicOpponentTurnRunner(
             )
         }
         val accepted = actionResult?.takeIf(CosmicActionResult::changed) ?: return null
-        val latestEvent = accepted.events.lastOrNull()
+        val latestEvent = accepted.events.lastOrNull()?.let(CosmicMischiefEngine::publicEvent)
         val spoken = latestEvent?.let { event ->
             execution.commentary(
                 commentaryAgent,

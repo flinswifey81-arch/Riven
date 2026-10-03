@@ -49,13 +49,13 @@ import com.shai.riven.ui.arcade.solitaire.SolitaireTableauCard
 import com.shai.riven.ui.arcade.cosmic.COSMIC_MISCHIEF_PROVISIONAL_RULES
 import com.shai.riven.ui.arcade.cosmic.CosmicAction
 import com.shai.riven.ui.arcade.cosmic.CosmicCommand
-import com.shai.riven.ui.arcade.cosmic.CosmicEvent
 import com.shai.riven.ui.arcade.cosmic.CosmicMischiefEngine
 import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSession
 import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSettings
 import com.shai.riven.ui.arcade.cosmic.CosmicOpponentAgent
 import com.shai.riven.ui.arcade.cosmic.CosmicOpponentObservation
 import com.shai.riven.ui.arcade.cosmic.CosmicPlayer
+import com.shai.riven.ui.arcade.cosmic.CosmicPublicEvent
 import com.shai.riven.ui.arcade.cosmic.CosmicPublicObservation
 import com.shai.riven.ui.arcade.cosmic.SharedPreferencesCosmicMischiefStore
 import com.shai.riven.ui.theme.RivenTheme
@@ -202,7 +202,7 @@ class ArcadeComposeTest {
 
             override fun commentary(
                 observation: CosmicPublicObservation,
-                event: CosmicEvent,
+                event: CosmicPublicEvent,
             ): String = event.message
         }
 
@@ -449,7 +449,7 @@ class ArcadeComposeTest {
 
         override fun commentary(
             observation: CosmicPublicObservation,
-            event: CosmicEvent,
+                event: CosmicPublicEvent,
         ): String = event.message
 
         fun awaitCall(call: Int): Boolean = started[call - 1].await(2L, TimeUnit.SECONDS)
