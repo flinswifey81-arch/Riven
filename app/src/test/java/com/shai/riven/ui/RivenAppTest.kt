@@ -140,7 +140,7 @@ class RivenAppNormalTest {
 
     @Test
     fun assistantMarkdownRendersAsReadableTextWithoutProviderMarkers() {
-        val markdownReply = "## Update\n**Bold** and *careful*\n\n- first\n- `second`"
+        val markdownReply = "role=ASSISTANT\n## Update\n**Bold** and *careful*\n\n- first\n- `second`"
         val snapshot = configuredSnapshot().copy(
             messages = configuredSnapshot().messages.map { message ->
                 if (message.role == MessageRole.ASSISTANT) message.copy(content = markdownReply) else message

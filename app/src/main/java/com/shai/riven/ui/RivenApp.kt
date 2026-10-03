@@ -994,6 +994,15 @@ private fun MessageBubble(
     onLoadImagePreview: (String) -> Unit,
 ) {
     val isRiven = message.role == MessageRole.ASSISTANT
+    val visibleContent = remember(message.content, message.role) {
+        if (message.role == MessageRole.ASSISTANT) {
+            message.content
+                .removePrefix("role=${MessageRole.ASSISTANT.name}\r\n")
+                .removePrefix("role=${MessageRole.ASSISTANT.name}\n")
+        } else {
+            message.content
+        }
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isRiven) Arrangement.Start else Arrangement.End,
@@ -1023,10 +1032,10 @@ private fun MessageBubble(
                     )
                     Spacer(Modifier.height(8.dp))
                 }
-                if (message.content.isNotBlank() || streaming) {
-                    val renderedContent = remember(message.content, streaming) {
+                if (visibleContent.isNotBlank() || streaming) {
+                    val renderedContent = remember(visibleContent, streaming) {
                         buildAnnotatedString {
-                            append(chatMarkdown(message.content))
+                            append(chatMarkdown(visibleContent))
                             if (streaming) append(" ▌")
                         }
                     }
