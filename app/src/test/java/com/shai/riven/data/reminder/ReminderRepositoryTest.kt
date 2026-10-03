@@ -194,6 +194,38 @@ class ReminderRepositoryTest {
     }
 
     @Test
+    fun exhaustedAlarmAudioTerminalizesExactRingingDelivery() = runBlocking {
+        val created = repository.create(
+            draft("Audio cannot start", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),
+        ) as ReminderOperationResult.Success
+        val claim = repository.claimDelivery(
+            created.reminder.id,
+            created.reminder.scheduleRevision,
+        ) as ReminderDeliveryClaim.Claimed
+
+        val result = repository.failClaimedDelivery(
+            reminderId = created.reminder.id,
+            scheduleRevision = created.reminder.scheduleRevision,
+            deliveryToken = claim.deliveryToken,
+            code = ReminderFailureCode.AUDIO_SOURCE_UNAVAILABLE,
+            detail = "Selected alarm audio and Android system alarm fallback both failed.",
+        ) as ReminderOperationResult.Failure
+
+        assertEquals(ReminderStatus.FAILED, result.reminder?.status)
+        assertEquals(ReminderFailureCode.AUDIO_SOURCE_UNAVAILABLE, result.reminder?.lastFailureCode)
+        assertNull(result.reminder?.deliveryToken)
+        assertNull(result.reminder?.ringUntilAt)
+        assertTrue(repository.ringingDeliveries().isEmpty())
+        assertTrue(
+            deliveryEffects.cancellations.contains(created.reminder.id to claim.deliveryToken),
+        )
+        assertEquals(
+            1,
+            database.reminderDao().eventCount(created.reminder.id, ReminderEventKind.FAILED.name),
+        )
+    }
+
+    @Test
     fun staleActionRevisionCannotMutateMatchingDeliveryToken() = runBlocking {
         val created = repository.create(
             draft("Revision guarded", deliveryMode = ReminderDeliveryMode.AUDIBLE_ALARM),

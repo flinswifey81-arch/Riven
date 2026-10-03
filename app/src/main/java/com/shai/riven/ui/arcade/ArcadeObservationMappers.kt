@@ -136,6 +136,7 @@ internal data class ArcadeObservationSignature(
     val tertiary: Int,
     val paused: Boolean,
     val sessionMarker: Int = 0,
+    val direction: String? = null,
 )
 
 internal fun meaningfulArcadeEvent(
@@ -155,6 +156,9 @@ internal fun meaningfulArcadeEvent(
     game == ArcadeGame.HEART_MATCH -> "Completed a match move."
     game == ArcadeGame.WRAPPING_SNAKE && current.tertiary > previous.tertiary -> "The trail board refreshed."
     game == ArcadeGame.WRAPPING_SNAKE && current.secondary > previous.secondary -> "Collected a comet treat."
+    game == ArcadeGame.WRAPPING_SNAKE &&
+        current.direction != null &&
+        current.direction != previous.direction -> "Turned ${current.direction.lowercase()}."
     game == ArcadeGame.WRAPPING_SNAKE -> "The trail needs a safe turn."
     game == ArcadeGame.KLONDIKE -> "Completed a legal solitaire move."
     else -> "The public game state changed."

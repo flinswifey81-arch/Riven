@@ -1,5 +1,7 @@
 package com.shai.riven.data.conversation.engine
 
+import com.shai.riven.data.arcade.ARCADE_TRANSIENT_MEMORY_EXCLUSION
+import com.shai.riven.data.arcade.ArcadeObservationContextBridge
 import com.shai.riven.data.context.ActiveConversationReceiptValidator
 import com.shai.riven.data.context.ActiveConversationContextSource
 import com.shai.riven.data.context.ConversationalContextAssembler
@@ -7,6 +9,7 @@ import com.shai.riven.data.context.ConversationalContextAssemblyInput
 import com.shai.riven.data.context.ConversationalContextFreshnessValidator
 import com.shai.riven.data.context.DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET
 import com.shai.riven.data.context.EphemeralAppStateReceiptValidator
+import com.shai.riven.data.context.EphemeralAppStateContextSource
 import com.shai.riven.data.context.EphemeralAppStateStore
 import com.shai.riven.data.context.ProviderProfileReceiptValidator
 import com.shai.riven.data.context.RivenContextCollectionResult
@@ -67,6 +70,7 @@ class ProviderNeutralConversationEngine(
     private val limiter: ConversationRunLimiter = ConversationRunLimiterPool.forMaximum(limits.maxConcurrentRuns),
     profileReceiptValidator: ProviderProfileReceiptValidator? = null,
     beforeFinalRoomTransaction: suspend () -> Unit = {},
+    beforeAutomaticMemoryExclusionWrite: () -> Unit = {},
     ownerSessionToken: String = ConversationEngineOwnerRegistry.newToken(),
 ) : AutoCloseable {
     private val canonicalImageSelector = CanonicalConversationImageSelector(database)
@@ -75,6 +79,7 @@ class ProviderNeutralConversationEngine(
         database = database,
         ephemeralStateStore = ephemeralStateStore,
         beforeFinalRoomTransaction = beforeFinalRoomTransaction,
+        beforeAutomaticMemoryExclusionWrite = beforeAutomaticMemoryExclusionWrite,
     )
     private val activeCalls = ConcurrentHashMap<String, ActiveCall>()
     private val freshnessValidator = ConversationalContextFreshnessValidator(
@@ -135,6 +140,7 @@ class ProviderNeutralConversationEngine(
                             reservation.run,
                             reservation.userMessage.content,
                             input.imageInputAuthorization,
+                            reservation.memoryDisposition,
                             onDelta,
                         )
                     }
@@ -191,6 +197,7 @@ class ProviderNeutralConversationEngine(
         reserved: ConversationRunEntity,
         userContent: String,
         imageInputAuthorization: ImageInputAuthorization?,
+        requestedMemoryDisposition: ConversationMemoryDisposition,
         onDelta: suspend (String) -> Unit,
     ): ConversationEngineResult {
         val job = coroutineContext[Job]
@@ -339,6 +346,18 @@ class ProviderNeutralConversationEngine(
                     ConversationEngineErrorCode.SYSTEM_CONTEXT_UNSUPPORTED,
                     ConversationRunState.FAILED,
                 )
+            }
+            val memoryDisposition = resolvedMemoryDisposition(requestedMemoryDisposition, contextSnapshot)
+            if (memoryDisposition is ConversationMemoryDisposition.Excluded) {
+                val excluded = persistence.ensureUserMemoryExclusion(
+                    runId = attachedRun.runId,
+                    ownerSessionToken = ownerSessionToken,
+                    reasonCode = memoryDisposition.reasonCode,
+                    occurredAt = clock(),
+                )
+                if (excluded !is RunMutationResult.Unchanged) {
+                    return mutationFailure(excluded, attachedRun)
+                }
             }
             val request = ProviderConversationRequest(
                 runId = attachedRun.runId,
@@ -496,12 +515,14 @@ class ProviderNeutralConversationEngine(
                         providerRequestId = terminal.providerRequestId,
                         occurredAt = commitNow,
                         eligibilityClock = clock,
+                        memoryDisposition = memoryDisposition,
                     )
                 }
             ) {
                 is CompleteConversationRunResult.Committed -> ConversationEngineResult.Succeeded(
                     completed.run.toSnapshot(),
                     completed.timelineRevision,
+                    memoryDisposition,
                 )
                 is CompleteConversationRunResult.AlreadyTerminal -> ConversationEngineResult.Existing(
                     completed.run.toSnapshot(),
@@ -583,6 +604,18 @@ class ProviderNeutralConversationEngine(
             current.height == expected.height &&
             current.bytes.size == expected.bytes.size &&
             current.contentSha256 == expected.contentSha256
+    }
+
+    private fun resolvedMemoryDisposition(
+        requested: ConversationMemoryDisposition,
+        snapshot: RivenContextSnapshot,
+    ): ConversationMemoryDisposition = when {
+        requested is ConversationMemoryDisposition.Excluded -> requested
+        snapshot.fragments.any { fragment ->
+            fragment.sourceId == EphemeralAppStateContextSource.SOURCE_ID &&
+                fragment.fragmentId == ArcadeObservationContextBridge.STATE_ID
+        } -> ConversationMemoryDisposition.Excluded(ARCADE_TRANSIENT_MEMORY_EXCLUSION)
+        else -> ConversationMemoryDisposition.Eligible
     }
 
     private suspend fun settleCancellation(run: ConversationRunEntity) {

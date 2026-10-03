@@ -5,6 +5,11 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.shai.riven.data.background.RivenBackgroundScheduleResult
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
+import com.shai.riven.data.arcade.ARCADE_TRANSIENT_MEMORY_EXCLUSION
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.data.arcade.ArcadeObservationFact
+import com.shai.riven.data.arcade.ArcadeObservationView
+import com.shai.riven.data.arcade.ArcadeObservationWriteResult
 import com.shai.riven.data.attachment.AttachmentByteSource
 import com.shai.riven.data.attachment.AttachmentBlobStore
 import com.shai.riven.data.attachment.AttachmentBlobWriteResult
@@ -36,6 +41,7 @@ import com.shai.riven.data.credential.ReadProviderCredentialResult
 import com.shai.riven.data.personality.LockedRivenPersonalityContextSource
 import com.shai.riven.data.persistence.RivenDatabase
 import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
 import com.shai.riven.data.persistence.model.AttachmentKind
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.provider.openrouter.OpenRouterImageInputCapability
@@ -199,6 +205,51 @@ class RivenConversationRuntimeTest {
         )
         assertEquals("Keep this retry draft", retried.snapshot.draft)
         assertEquals(2, http.requests.size)
+    }
+
+    @Test
+    fun failedArcadeOriginSurvivesClearAndRestartThenExcludesChatRetryFromMemory() = runBlocking {
+        val first = runtime(QueueHttpClient(providerFailure()))
+        assertTrue(first.initialize() is RivenRuntimeResult.Success)
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "key") is RivenProfileSaveResult.Success)
+        assertTrue(
+            first.publishArcadeObservation(
+                ArcadeGameObservation(
+                    gameId = "stacker",
+                    gameTitle = "Celestial Spire",
+                    sessionId = "arcade-origin",
+                    sequence = 1,
+                    view = ArcadeObservationView.SOLO_PUBLIC,
+                    phase = "playing",
+                    facts = listOf(ArcadeObservationFact("Lines", "0")),
+                    observedAt = clock.incrementAndGet(),
+                ),
+            ) is ArcadeObservationWriteResult.Published,
+        )
+
+        val failed = first.sendFromArcade("Keep this game turn transient")
+        assertTrue(failed is RivenRuntimeResult.Failure)
+        assertTrue(first.clearArcadeObservation() is ArcadeObservationWriteResult.Cleared)
+        first.close()
+        runtimes.remove(first)
+
+        val second = runtime(QueueHttpClient(success("Recovered outside Arcade.")))
+        assertTrue(second.initialize() is RivenRuntimeResult.Success)
+        val retried = second.retry()
+
+        assertTrue("Expected retry success, got $retried", retried is RivenRuntimeResult.Success)
+        val messages = (retried as RivenRuntimeResult.Success).snapshot.messages
+        assertEquals(
+            listOf("Keep this game turn transient", "Recovered outside Arcade."),
+            messages.map { it.content },
+        )
+        messages.forEach { message ->
+            val job = checkNotNull(database.automaticMemoryDao().jobForMessage(message.id))
+            assertEquals(AutomaticMemoryJobState.EXCLUDED, job.state)
+            assertEquals(ARCADE_TRANSIENT_MEMORY_EXCLUSION, job.lastErrorCode)
+        }
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+        assertEquals(0, database.memoryDao().memoryCount())
     }
 
     @Test
@@ -370,6 +421,13 @@ class RivenConversationRuntimeTest {
         assertEquals(
             com.shai.riven.data.persistence.model.ConversationRunState.CANCELLED,
             database.conversationRunDao().runsForConversation(RivenConversationRuntime.CONVERSATION_ID).last().state,
+        )
+
+        val next = runtime.send("Next message after cancellation")
+        assertTrue(next is RivenRuntimeResult.Success)
+        assertEquals(
+            listOf("Cancel this reply", "Next message after cancellation", "Recovered reply."),
+            (next as RivenRuntimeResult.Success).snapshot.messages.map { it.content },
         )
     }
 
@@ -1099,13 +1157,24 @@ class RivenConversationRuntimeTest {
 
     private class HoldingHttpClient : OpenRouterHttpClient {
         val entered = CompletableDeferred<Unit>()
+        private var calls = 0
 
         override suspend fun execute(
             request: OpenRouterHttpRequest,
             onLine: suspend (String) -> Boolean,
         ): OpenRouterHttpResponse {
-            entered.complete(Unit)
-            awaitCancellation()
+            calls += 1
+            if (calls == 1) {
+                entered.complete(Unit)
+                awaitCancellation()
+            }
+            listOf(
+                "data: {\"id\":\"request-recovered\",\"choices\":[{\"delta\":{\"content\":\"Recovered reply.\"}}]}",
+                "",
+                "data: [DONE]",
+                "",
+            ).forEach { line -> onLine(line) }
+            return OpenRouterHttpResponse(200, emptyMap())
         }
     }
 

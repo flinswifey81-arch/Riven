@@ -30,9 +30,9 @@ Factory Reset explicitly cancels every app-owned `AlarmManager` entry, cancels n
 
 ## Audio asset status
 
-System-default alarm sound and user-selected local audio through Android's document picker are supported. Durable URI permission is requested only after the user selects a file.
+Riven's bundled voice is the default alarm source, while user-selected local audio remains supported through Android's document picker. Durable URI permission is requested only after the user selects a file. If either selected source returns a failure or throws while preparing or playing, the service attempts Android's system alarm exactly once. If that fallback also fails, the exact claimed delivery is terminalized as `FAILED` instead of remaining silently `RINGING`, and service-owned audio, focus, foreground, and wake-lock resources are released.
 
-The supplied Drive `Riven-Alarm.mp3` metadata was verified as `audio/mpeg`, 74,464 bytes. Streamed materialization failed with `cannot create attachment directory: Access is denied. (os error 5)`. No bundled Riven voice asset is claimed by this branch; attaching that exact verified file through an approved local materialization path remains pending.
+The approved source `Riven-Alarm.mp3` remains unchanged at 74,464 bytes with SHA-256 `1D3675E99BEA57F7D9C90D6191FE8886BEEF9E6286EAA399BF5C42EC6AC7643B`. Its only ID3v2 metadata was one non-audio provider task identifier. The bundled derivative removes that 69-byte tag without decoding or re-encoding: all audio-frame bytes are unchanged, the derivative is 74,395 bytes, and its SHA-256/audio-payload SHA-256 is `DDE1CF60AE822A4B058D9CE0FBF9D41241D510C86BC9E84FBA2390FEED3A0E15`.
 
 ## Integration point
 

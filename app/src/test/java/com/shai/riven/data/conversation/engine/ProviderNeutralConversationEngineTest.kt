@@ -3,6 +3,8 @@ package com.shai.riven.data.conversation.engine
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.shai.riven.data.arcade.ARCADE_TRANSIENT_MEMORY_EXCLUSION
+import com.shai.riven.data.arcade.ArcadeObservationContextBridge
 import com.shai.riven.data.candidate.CandidateExtractionProposal
 import com.shai.riven.data.candidate.CandidateExtractionResult
 import com.shai.riven.data.candidate.CandidateExtractionService
@@ -73,6 +75,8 @@ import com.shai.riven.data.persistence.model.AttentionOutcome
 import com.shai.riven.data.persistence.model.AttentionSignal
 import com.shai.riven.data.persistence.model.AttentionSignalPolarity
 import com.shai.riven.data.persistence.model.AttachmentKind
+import com.shai.riven.data.persistence.model.AutomaticMemoryJobStage
+import com.shai.riven.data.persistence.model.AutomaticMemoryJobState
 import com.shai.riven.data.persistence.model.AttachmentSource
 import com.shai.riven.data.persistence.model.AttachmentState
 import com.shai.riven.data.persistence.model.CandidateMemoryState
@@ -208,6 +212,145 @@ class ProviderNeutralConversationEngineTest {
                 ConversationExperienceLookupResult.Found,
         )
         assertEquals(1, adapter.invocationCount.get())
+    }
+
+    @Test
+    fun explicitTransientDispositionCommitsBothExclusionBarriersWithSuccessfulTurn() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val adapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("Public table commentary"))
+            emit(ProviderStreamEvent.Completed("arcade-request"))
+        }
+
+        val result = engine(adapter).execute(
+            input().copy(
+                memoryDisposition = ConversationMemoryDisposition.Excluded(
+                    ARCADE_TRANSIENT_MEMORY_EXCLUSION,
+                ),
+            ),
+        ) as ConversationEngineResult.Succeeded
+
+        assertEquals(
+            ConversationMemoryDisposition.Excluded(ARCADE_TRANSIENT_MEMORY_EXCLUSION),
+            result.memoryDisposition,
+        )
+        listOf("user-1", "assistant-1").forEachIndexed { index, messageId ->
+            val job = checkNotNull(database.automaticMemoryDao().jobForMessage(messageId))
+            assertEquals(AutomaticMemoryJobState.EXCLUDED, job.state)
+            assertEquals(AutomaticMemoryJobStage.COMPLETE, job.nextStage)
+            assertEquals(ARCADE_TRANSIENT_MEMORY_EXCLUSION, job.lastErrorCode)
+            assertEquals(result.timelineRevision - 1L + index, job.sourceTimelineRevision)
+        }
+        assertTrue(
+            database.conversationRunDao().succeededRunsMissingAutomaticMemoryJobs(
+                ConversationRunState.SUCCEEDED,
+                10,
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun arcadeEphemeralFragmentExcludesEvenOrdinaryEntrypoint() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        assertTrue(
+            ephemeral.publish(
+                PublishEphemeralAppStateInput(
+                    stateId = ArcadeObservationContextBridge.STATE_ID,
+                    content = "Transient Arcade gameplay context (not durable memory).",
+                    exposure = EphemeralAppStateExposure.RIVEN_CONTEXT,
+                    priority = 75,
+                    expectedRevision = 0,
+                    observedAt = 100,
+                    validUntil = 10_000,
+                ),
+            ) is EphemeralAppStateWriteResult.Published,
+        )
+        val adapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("I can see the public position."))
+            emit(ProviderStreamEvent.Completed("arcade-context-request"))
+        }
+
+        val result = engine(adapter).execute(input()) as ConversationEngineResult.Succeeded
+
+        assertEquals(
+            ConversationMemoryDisposition.Excluded(ARCADE_TRANSIENT_MEMORY_EXCLUSION),
+            result.memoryDisposition,
+        )
+        assertEquals(
+            2,
+            database.automaticMemoryDao().countInState(AutomaticMemoryJobState.EXCLUDED),
+        )
+    }
+
+    @Test
+    fun expiredArcadeFragmentDoesNotExcludeAnOrdinaryChatTurn() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        assertTrue(
+            ephemeral.publish(
+                PublishEphemeralAppStateInput(
+                    stateId = ArcadeObservationContextBridge.STATE_ID,
+                    content = "Expired Arcade gameplay context.",
+                    exposure = EphemeralAppStateExposure.RIVEN_CONTEXT,
+                    priority = 75,
+                    expectedRevision = 0,
+                    observedAt = 100,
+                    validUntil = 150,
+                ),
+            ) is EphemeralAppStateWriteResult.Published,
+        )
+        clock.set(200)
+        val adapter = FakeAdapter { request, emit ->
+            assertTrue(request.context.none { fragment ->
+                fragment.sourceId == EphemeralAppStateContextSource.SOURCE_ID &&
+                    fragment.fragmentId == ArcadeObservationContextBridge.STATE_ID
+            })
+            emit(ProviderStreamEvent.Delta("Ordinary chat reply"))
+            emit(ProviderStreamEvent.Completed("ordinary-request"))
+        }
+
+        val result = engine(adapter).execute(input()) as ConversationEngineResult.Succeeded
+
+        assertEquals(ConversationMemoryDisposition.Eligible, result.memoryDisposition)
+        assertEquals(0, database.automaticMemoryDao().countInState(AutomaticMemoryJobState.EXCLUDED))
+    }
+
+    @Test
+    fun exclusionWriteFaultRollsBackSuccessAndLeavesNoExtractableGap() = runBlocking {
+        createConversationAndUser()
+        createProfile()
+        val adapter = FakeAdapter { _, emit ->
+            emit(ProviderStreamEvent.Delta("Must roll back"))
+            emit(ProviderStreamEvent.Completed("faulted-request"))
+        }
+        val engine = engine(
+            adapter = adapter,
+            beforeAutomaticMemoryExclusionWrite = { error("simulated exclusion fault") },
+        )
+
+        val result = engine.execute(
+            input().copy(
+                memoryDisposition = ConversationMemoryDisposition.Excluded(
+                    ARCADE_TRANSIENT_MEMORY_EXCLUSION,
+                ),
+            ),
+        ) as ConversationEngineResult.Failed
+
+        assertEquals(ConversationEngineErrorCode.STORAGE_FAILURE, result.code)
+        assertEquals(ConversationRunState.FAILED, result.run?.state)
+        assertEquals(1, database.automaticMemoryDao().countInState(AutomaticMemoryJobState.EXCLUDED))
+        assertEquals(
+            ARCADE_TRANSIENT_MEMORY_EXCLUSION,
+            database.automaticMemoryDao().jobForMessage("user-1")?.lastErrorCode,
+        )
+        assertNull(database.automaticMemoryDao().jobForMessage("assistant-1"))
+        assertEquals("", database.conversationTimelineDao().message("assistant-1")?.content)
+        assertTrue(
+            ConversationExperienceService(database).conversationExperienceForMessage("assistant-1") is
+                ConversationExperienceLookupResult.NotRecorded,
+        )
     }
 
     @Test
@@ -1660,6 +1803,7 @@ class ProviderNeutralConversationEngineTest {
         limiter: ConversationRunLimiter = ConversationRunLimiterPool.forMaximum(limits.maxConcurrentRuns),
         profileReceiptValidator: ProviderProfileReceiptValidator? = null,
         beforeFinalRoomTransaction: suspend () -> Unit = {},
+        beforeAutomaticMemoryExclusionWrite: () -> Unit = {},
         imageContentResolver: ProviderImageContentResolver = ProviderImageContentResolver { null },
         contextBudgetResolver: (com.shai.riven.data.provider.ProviderProfileSnapshot) ->
             RivenContextCollectionBudget = { com.shai.riven.data.context.DEFAULT_CONVERSATIONAL_CONTEXT_BUDGET },
@@ -1687,6 +1831,7 @@ class ProviderNeutralConversationEngineTest {
             limiter = limiter,
             profileReceiptValidator = profileReceiptValidator,
             beforeFinalRoomTransaction = beforeFinalRoomTransaction,
+            beforeAutomaticMemoryExclusionWrite = beforeAutomaticMemoryExclusionWrite,
         ).also(engines::add)
     }
 

@@ -80,6 +80,17 @@ class ArcadeObservationMappersTest {
         )
     }
 
+    @Test
+    fun cometDirectionOnlyTurnIsACompleteMeaningfulObservationChange() {
+        val before = ArcadeObservationSignature(0, 0, 0, paused = false, direction = "UP")
+        val after = before.copy(direction = "LEFT")
+
+        assertEquals(
+            "Turned left.",
+            meaningfulArcadeEvent(ArcadeGame.WRAPPING_SNAKE, before, after),
+        )
+    }
+
     private fun observation(sequence: Long, observedAt: Long) = ArcadeGameObservation(
         gameId = "stacker",
         gameTitle = "Celestial Spire",

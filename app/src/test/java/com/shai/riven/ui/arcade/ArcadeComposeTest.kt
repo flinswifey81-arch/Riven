@@ -25,10 +25,13 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
@@ -288,6 +291,15 @@ class ArcadeActivityScreenshotTest {
     }
 
     @Test
+    fun rendersPlayableMidnightSolitaireToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(3)
+        composeRule.onNodeWithText("Midnight Solitaire").performClick()
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+        composeRule.onNodeWithTag("solitaire_stock").assertIsEnabled()
+        writeScreenshot("midnight-solitaire.png")
+    }
+
+    @Test
     fun rendersPlayableCometTrailToInspectablePng() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(5)
         composeRule.onNodeWithText("Comet Trail").performClick()
@@ -403,7 +415,31 @@ class ArcadeCompactActivityScreenshotTest {
         composeRule.onNodeWithContentDescription("Hard drop piece").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Pause Celestial Spire").performClick()
         composeRule.onNodeWithContentDescription("Resume Celestial Spire").assertIsEnabled()
+        val textLayouts = mutableListOf<TextLayoutResult>()
+        composeRule.onNodeWithTag("celestial_spire_pause_overlay")
+            .assertIsDisplayed()
+            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { action ->
+                action(textLayouts)
+            }
+        assertEquals(1, textLayouts.single().lineCount)
+        val boardBounds = composeRule.onNodeWithTag("celestial_spire_board").fetchSemanticsNode().boundsInRoot
+        val overlayBounds = composeRule.onNodeWithTag("celestial_spire_pause_overlay")
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(overlayBounds.left >= boardBounds.left && overlayBounds.right <= boardBounds.right)
+        assertTrue(overlayBounds.top >= boardBounds.top && overlayBounds.bottom <= boardBounds.bottom)
         writeScreenshot("celestial-spire-compact.png")
+    }
+
+    @Test
+    fun rendersCompactMidnightSolitaireControlsToInspectablePng() {
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(3)
+        composeRule.onNodeWithText("Midnight Solitaire").performClick()
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Pause Midnight Solitaire").performClick()
+        composeRule.onNodeWithContentDescription("Resume Midnight Solitaire").assertIsEnabled()
+        composeRule.onNodeWithText("PAUSED").assertIsDisplayed()
+        writeScreenshot("midnight-solitaire-compact.png")
     }
 
     @Test

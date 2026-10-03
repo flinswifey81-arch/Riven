@@ -36,7 +36,18 @@ data class StartConversationRunInput(
     val expectedTimelineRevision: Long,
     val occurredAt: Long,
     val imageInputAuthorization: ImageInputAuthorization? = null,
+    val memoryDisposition: ConversationMemoryDisposition = ConversationMemoryDisposition.Eligible,
 )
+
+sealed interface ConversationMemoryDisposition {
+    data object Eligible : ConversationMemoryDisposition
+
+    data class Excluded(val reasonCode: String) : ConversationMemoryDisposition {
+        init {
+            require(reasonCode.isNotBlank() && reasonCode.length <= 64)
+        }
+    }
+}
 
 enum class ImageInputAuthorization {
     MODEL_DECLARED_SUPPORTED,
@@ -105,6 +116,7 @@ sealed interface ConversationEngineResult {
     data class Succeeded(
         val run: ConversationRunSnapshot,
         val timelineRevision: Long,
+        val memoryDisposition: ConversationMemoryDisposition,
     ) : ConversationEngineResult
 
     data class Existing(

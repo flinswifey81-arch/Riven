@@ -3,6 +3,7 @@ package com.shai.riven.data.arcade
 const val MAX_ARCADE_OBSERVATION_FACTS = 12
 const val MAX_ARCADE_OBSERVATION_EVENTS = 5
 const val MAX_ARCADE_OBSERVATION_CONTENT_CHARS = 4_096
+const val ARCADE_TRANSIENT_MEMORY_EXCLUSION = "ARCADE_TRANSIENT_CONTEXT"
 
 /**
  * Declares the exact player-visible boundary represented by an Arcade observation.

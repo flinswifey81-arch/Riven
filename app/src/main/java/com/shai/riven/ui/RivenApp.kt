@@ -50,7 +50,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -73,7 +72,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.data.arcade.ArcadeObservationCommandCoordinator
 import com.shai.riven.data.arcade.ArcadeObservationWriteResult
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.presence.RivenPresenceSnapshot
@@ -130,6 +129,13 @@ fun RivenApp(
 ) {
     val context = LocalContext.current
     val runtime = remember(context, runtimeFactory) { runtimeFactory(context.applicationContext) }
+    val appScope = rememberCoroutineScope()
+    val arcadeObservationCoordinator = remember(runtime) {
+        ArcadeObservationCommandCoordinator(
+            publish = runtime::publishArcadeObservation,
+            clear = runtime::clearArcadeObservation,
+        )
+    }
     var destination by rememberSaveable { mutableStateOf(RivenDestination.CHAT) }
     var snapshot by remember { mutableStateOf<RivenRuntimeSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }
@@ -143,8 +149,7 @@ fun RivenApp(
     }
     var nextSubmissionId by rememberSaveable { mutableStateOf(0L) }
     var activeConversationJob by remember { mutableStateOf<Job?>(null) }
-    var arcadeObservation by remember { mutableStateOf<ArcadeGameObservation?>(null) }
-    var arcadeObservationCommandRevision by remember { mutableStateOf(0L) }
+    var navigationPending by remember { mutableStateOf(false) }
 
     fun beginSubmission(baselineUserMessageIds: Set<String>): Long {
         val submissionId = ++nextSubmissionId
@@ -172,10 +177,61 @@ fun RivenApp(
     }
 
     fun navigateTo(target: RivenDestination) {
-        if (destination != target) {
-            activeConversationJob?.cancel(CancellationException("Conversation surface left"))
+        if (destination == target || navigationPending) return
+        val source = destination
+        val jobToSettle = activeConversationJob
+        val leavingArcade = source == RivenDestination.ARCADE && target != RivenDestination.ARCADE
+        if (!leavingArcade && (jobToSettle == null || !jobToSettle.isActive)) {
+            destination = target
+            return
         }
-        destination = target
+        navigationPending = true
+        appScope.launch {
+            try {
+                if (jobToSettle?.isActive == true) {
+                    val cancellation = try {
+                        runtimeIo { runtime.cancel() }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        null
+                    }
+                    jobToSettle.cancel(CancellationException("Conversation surface left after runtime cancellation"))
+                    jobToSettle.join()
+                    when (cancellation) {
+                        is RivenRuntimeResult.Success -> snapshot = cancellation.snapshot
+                        is RivenRuntimeResult.Failure -> {
+                            cancellation.snapshot?.let { snapshot = it }
+                            notice = cancellation.message
+                        }
+                        null -> notice = "Riven could not confirm cancellation. Your draft is still saved."
+                    }
+                    activeConversationJob = null
+                }
+
+                if (leavingArcade) {
+                    arcadeObservationCoordinator.submit(null)
+                    when (
+                        val cleared = withContext(Dispatchers.IO) {
+                            arcadeObservationCoordinator.flushLatest()
+                        }
+                    ) {
+                        is ArcadeObservationWriteResult.Cleared -> Unit
+                        is ArcadeObservationWriteResult.Failure -> {
+                            notice = cleared.message
+                            return@launch
+                        }
+                        is ArcadeObservationWriteResult.Published -> {
+                            notice = "Arcade gameplay context could not be cleared."
+                            return@launch
+                        }
+                    }
+                }
+                destination = target
+            } finally {
+                navigationPending = false
+            }
+        }
     }
 
     DisposableEffect(runtime) { onDispose(runtime::close) }
@@ -228,16 +284,6 @@ fun RivenApp(
         }
     }
 
-    LaunchedEffect(runtime, arcadeObservationCommandRevision) {
-        if (arcadeObservationCommandRevision > 0L) {
-            val result = withContext(Dispatchers.IO) {
-                arcadeObservation?.let { runtime.publishArcadeObservation(it) }
-                    ?: runtime.clearArcadeObservation()
-            }
-            if (result is ArcadeObservationWriteResult.Failure) notice = result.message
-        }
-    }
-
     BackHandler(enabled = destination == RivenDestination.ALARMS) {
         navigateTo(RivenDestination.CHAT)
     }
@@ -280,14 +326,31 @@ fun RivenApp(
                     },
                     onOpenSettings = { navigateTo(RivenDestination.SETTINGS) },
                     onConversationJobChanged = { activeConversationJob = it },
+                    prepareProviderRequest = {
+                        withContext(Dispatchers.IO) {
+                            arcadeObservationCoordinator.prepareForProvider()
+                        }
+                    },
                 ),
                 onObservation = { observation ->
-                    arcadeObservation = observation
-                    arcadeObservationCommandRevision += 1L
+                    if (!navigationPending) {
+                        arcadeObservationCoordinator.submit(observation)
+                        appScope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                arcadeObservationCoordinator.flushLatest()
+                            }
+                            if (result is ArcadeObservationWriteResult.Failure) notice = result.message
+                        }
+                    }
                 },
                 onObservationCleared = {
-                    arcadeObservation = null
-                    arcadeObservationCommandRevision += 1L
+                    arcadeObservationCoordinator.submit(null)
+                    appScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            arcadeObservationCoordinator.flushLatest()
+                        }
+                        if (result is ArcadeObservationWriteResult.Failure) notice = result.message
+                    }
                 },
             )
             loading -> LoadingScreen(padding)
@@ -469,13 +532,8 @@ private fun ChatScreen(
     var activeSubmissionId by remember { mutableStateOf<Long?>(null) }
     var awaitingUnknownImageConfirmation by remember { mutableStateOf(false) }
     var floorPlanOpen by rememberSaveable { mutableStateOf(false) }
-    val latestConversationJob by rememberUpdatedState(conversationJob)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-
-    DisposableEffect(runtime) {
-        onDispose { latestConversationJob?.cancel(CancellationException("Chat screen left")) }
-    }
 
     fun apply(
         result: RivenRuntimeResult,
@@ -715,7 +773,6 @@ private fun ChatScreen(
                                     cancelling = true
                                     val submissionId = activeSubmissionId
                                     val jobToCancel = conversationJob
-                                    jobToCancel?.cancel(CancellationException("Conversation cancelled by user"))
                                     scope.launch {
                                         try {
                                             val cancellationResult = try {
@@ -725,6 +782,9 @@ private fun ChatScreen(
                                             } catch (_: Exception) {
                                                 null
                                             }
+                                            jobToCancel?.cancel(
+                                                CancellationException("Conversation cancelled by user after runtime cancellation"),
+                                            )
                                             jobToCancel?.join()
                                             val reconciled = try {
                                                 runtimeIo { runtime.snapshot() }

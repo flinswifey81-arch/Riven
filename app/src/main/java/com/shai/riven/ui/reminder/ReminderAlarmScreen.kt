@@ -418,7 +418,7 @@ private fun ReminderEditor(
         }
         if (audible) {
             Text("ALARM SOUND", color = MutedGold, style = MaterialTheme.typography.labelMedium)
-            SoundChip("System default", soundKind == ReminderSoundKind.SYSTEM_DEFAULT) {
+            SoundChip("Riven voice", soundKind == ReminderSoundKind.SYSTEM_DEFAULT) {
                 onSoundKindChange(ReminderSoundKind.SYSTEM_DEFAULT)
             }
             SoundChip(

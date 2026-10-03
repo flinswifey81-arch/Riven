@@ -2,6 +2,7 @@ package com.shai.riven.data.conversation.engine
 
 import android.database.sqlite.SQLiteConstraintException
 import androidx.room.withTransaction
+import com.shai.riven.data.automaticmemory.AutomaticMemoryExclusionWriter
 import com.shai.riven.data.context.EphemeralAppStateStore
 import com.shai.riven.data.context.RivenContextFreshnessReceipt
 import com.shai.riven.data.context.RivenContextSnapshot
@@ -28,6 +29,7 @@ internal sealed interface ReserveConversationRunResult {
     data class Reserved(
         val run: ConversationRunEntity,
         val userMessage: MessageEntity,
+        val memoryDisposition: ConversationMemoryDisposition,
     ) : ReserveConversationRunResult
 
     data class Existing(val run: ConversationRunEntity) : ReserveConversationRunResult
@@ -55,6 +57,7 @@ internal class ConversationRunPersistence(
     private val database: RivenDatabase,
     private val ephemeralStateStore: EphemeralAppStateStore,
     private val beforeFinalRoomTransaction: suspend () -> Unit = {},
+    private val beforeAutomaticMemoryExclusionWrite: () -> Unit = {},
 ) {
     private val runDao = database.conversationRunDao()
     private val timelineDao = database.conversationTimelineDao()
@@ -62,6 +65,7 @@ internal class ConversationRunPersistence(
     private val profileDao = database.providerProfileDao()
     private val instructionsDao = database.shaiSystemInstructionsDao()
     private val experiences = ConversationExperienceService(database)
+    private val automaticMemoryExclusions = AutomaticMemoryExclusionWriter(database)
 
     suspend fun reserve(
         input: StartConversationRunInput,
@@ -178,6 +182,14 @@ internal class ConversationRunPersistence(
                         userMessage.id
                     }
                 }
+                val memoryDisposition = when (val requested = input.memoryDisposition) {
+                    is ConversationMemoryDisposition.Excluded -> requested
+                    ConversationMemoryDisposition.Eligible ->
+                        automaticMemoryExclusions.exclusionReasonForMessageInCurrentTransaction(
+                            userMessage.id,
+                        )?.let { reason -> ConversationMemoryDisposition.Excluded(reason) }
+                            ?: ConversationMemoryDisposition.Eligible
+                }
 
                 when (experiences.recordMessageInCurrentTransaction(userMessage, input.occurredAt)) {
                     is ConversationExperienceRecordResult.Created,
@@ -244,7 +256,16 @@ internal class ConversationRunPersistence(
                     updatedAt = input.occurredAt,
                 )
                 runDao.insert(run)
-                ReserveConversationRunResult.Reserved(run, userMessage)
+                if (memoryDisposition is ConversationMemoryDisposition.Excluded) {
+                    automaticMemoryExclusions.excludeMessageInCurrentTransaction(
+                        run = run,
+                        messageId = run.userMessageId,
+                        sourceTimelineRevision = reservedRevision,
+                        occurredAt = input.occurredAt,
+                        reasonCode = memoryDisposition.reasonCode,
+                    )
+                }
+                ReserveConversationRunResult.Reserved(run, userMessage, memoryDisposition)
             }
         } catch (abort: ConversationExperienceAbort) {
             ReserveConversationRunResult.Failure(ConversationEngineErrorCode.STORAGE_FAILURE)
@@ -255,6 +276,34 @@ internal class ConversationRunPersistence(
         } catch (_: Exception) {
             ReserveConversationRunResult.Failure(ConversationEngineErrorCode.STORAGE_FAILURE)
         }
+    }
+
+    suspend fun ensureUserMemoryExclusion(
+        runId: String,
+        ownerSessionToken: String,
+        reasonCode: String,
+        occurredAt: Long,
+    ): RunMutationResult = try {
+        database.withTransaction {
+            val run = runDao.run(runId) ?: return@withTransaction RunMutationResult.Missing
+            if (run.ownerSessionToken != ownerSessionToken || run.state.isTerminal()) {
+                return@withTransaction RunMutationResult.Failure(
+                    ConversationEngineErrorCode.STATE_CONTROL_REJECTED,
+                )
+            }
+            automaticMemoryExclusions.excludeMessageInCurrentTransaction(
+                run = run,
+                messageId = run.userMessageId,
+                sourceTimelineRevision = run.reservedTimelineRevision,
+                occurredAt = occurredAt,
+                reasonCode = reasonCode,
+            )
+            RunMutationResult.Unchanged(run)
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        RunMutationResult.Failure(ConversationEngineErrorCode.STORAGE_FAILURE)
     }
 
     suspend fun attachProfile(
@@ -410,6 +459,7 @@ internal class ConversationRunPersistence(
         providerRequestId: String?,
         occurredAt: Long,
         eligibilityClock: () -> Long,
+        memoryDisposition: ConversationMemoryDisposition,
     ): CompleteConversationRunResult {
         if (content.isBlank() || providerRequestId?.length ?: 0 > MAX_PROVIDER_REQUEST_ID_CHARS) {
             return CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.PROVIDER_PROTOCOL)
@@ -435,6 +485,7 @@ internal class ConversationRunPersistence(
                         content = content,
                         providerRequestId = providerRequestId,
                         occurredAt = occurredAt,
+                        memoryDisposition = memoryDisposition,
                     )
                 } ?: CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.CONTEXT_STALE)
             }
@@ -504,6 +555,7 @@ internal class ConversationRunPersistence(
         content: String,
         providerRequestId: String?,
         occurredAt: Long,
+        memoryDisposition: ConversationMemoryDisposition,
     ): CompleteConversationRunResult {
         val run = runDao.run(runId)
             ?: return CompleteConversationRunResult.Rejected(ConversationEngineErrorCode.STALE_TIMELINE)
@@ -573,6 +625,15 @@ internal class ConversationRunPersistence(
             finishedAt = occurredAt,
         )
         check(runDao.update(succeededRun) == 1)
+        if (memoryDisposition is ConversationMemoryDisposition.Excluded) {
+            beforeAutomaticMemoryExclusionWrite()
+            automaticMemoryExclusions.excludeRunInCurrentTransaction(
+                run = succeededRun,
+                sourceTimelineRevision = nextRevision,
+                occurredAt = occurredAt,
+                reasonCode = memoryDisposition.reasonCode,
+            )
+        }
         return CompleteConversationRunResult.Committed(succeededRun, nextRevision)
     }
 
@@ -679,6 +740,10 @@ internal class ConversationRunPersistence(
             retryOfRunId.orEmpty(),
             regenerateOfMessageId.orEmpty(),
             imageInputAuthorization?.name.orEmpty(),
+            when (val disposition = memoryDisposition) {
+                ConversationMemoryDisposition.Eligible -> "ELIGIBLE"
+                is ConversationMemoryDisposition.Excluded -> "EXCLUDED:${disposition.reasonCode}"
+            },
             expectedTimelineRevision.toString(),
         ).joinToString("\u0000")
         return MessageDigest.getInstance("SHA-256")

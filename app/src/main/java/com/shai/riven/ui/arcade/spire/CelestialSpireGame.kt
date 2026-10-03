@@ -609,6 +609,9 @@ private fun CelestialSpireBoard(
     ) {
         val boardWidth = minOf(maxWidth, maxHeight / 2)
         val boardHeight = boardWidth * 2
+        val pauseOverlayMaxWidth = if (boardWidth > 8.dp) boardWidth - 8.dp else boardWidth
+        val pauseOverlayFontSize = if (boardWidth < 120.dp) 9.sp else 12.sp
+        val pauseOverlayHorizontalPadding = if (boardWidth < 120.dp) 6.dp else 10.dp
         Box(
             modifier = Modifier
                 .width(boardWidth)
@@ -674,12 +677,18 @@ private fun CelestialSpireBoard(
                     text = pauseLabel.uppercase(),
                     modifier = Modifier
                         .align(Alignment.Center)
+                        .widthIn(max = pauseOverlayMaxWidth)
                         .background(DeepInk.copy(alpha = 0.86f), RoundedCornerShape(12.dp))
                         .border(1.dp, SoftAmber.copy(alpha = 0.75f), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = pauseOverlayHorizontalPadding, vertical = 6.dp)
+                        .testTag("celestial_spire_pause_overlay"),
                     color = WarmIvory,
+                    fontSize = pauseOverlayFontSize,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Clip,
                 )
             }
         }

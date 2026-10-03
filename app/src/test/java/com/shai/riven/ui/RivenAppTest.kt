@@ -20,6 +20,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.test.platform.app.InstrumentationRegistry
 import com.shai.riven.MainActivity
 import com.shai.riven.data.instructions.ShaiSystemInstructionsSnapshot
 import com.shai.riven.data.arcade.ArcadeGameObservation
@@ -66,6 +67,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -118,6 +120,86 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("automatic_memory_status").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_arcade").performClick()
         composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+    }
+
+    @Test
+    fun liveArcadeConversationOverlayRendersToInspectablePng() {
+        val runtime = FakeRivenRuntime(configuredSnapshot())
+        composeRule.runOnIdle {
+            composeRule.activity.setContent {
+                RivenTheme {
+                    RivenApp(
+                        uiAssets = RivenUiAssets.Approved,
+                        runtimeFactory = { runtime },
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(3)
+        composeRule.onNodeWithText("Midnight Solitaire").performClick()
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open conversation with Riven").performClick()
+        composeRule.onNodeWithTag("arcade_provider_status").assertIsDisplayed()
+        composeRule.onNodeWithTag("arcade_chat_send").assertIsDisplayed()
+        writeDeviceScreenshot("arcade-live-chat-overlay.png")
+    }
+
+    @Test
+    fun arcadeCancelSettlesBeforeEditorReuseAndTheNextSendWorks() {
+        val runtime = FakeRivenRuntime(configuredSnapshot(), holdSend = true)
+        openLiveSolitaire(runtime)
+        composeRule.onNodeWithTag("arcade_chat_input").performTextReplacement("Cancel Arcade reply")
+        composeRule.onNodeWithTag("arcade_chat_send").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.sendCalls == 1 }
+
+        composeRule.onNodeWithTag("arcade_chat_cancel").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runtime.cancelCompleted && runtime.sendCancelled
+        }
+        composeRule.onNodeWithTag("arcade_chat_input").assertIsEnabled()
+
+        composeRule.onNodeWithTag("arcade_chat_input").performTextReplacement("Next Arcade reply")
+        composeRule.onNodeWithTag("arcade_chat_send").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runtime.sentContents.lastOrNull() == "Next Arcade reply" && runtime.sendCalls == 2
+        }
+        composeRule.onNodeWithText("Streamed reply.").assertIsDisplayed()
+    }
+
+    @Test
+    fun dismissDuringArcadeStreamSettlesBeforeClosingOverlay() {
+        val runtime = FakeRivenRuntime(configuredSnapshot(), holdSend = true)
+        openLiveSolitaire(runtime)
+        composeRule.onNodeWithTag("arcade_chat_input").performTextReplacement("Dismiss this reply")
+        composeRule.onNodeWithTag("arcade_chat_send").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.sendCalls == 1 }
+
+        composeRule.onNodeWithText("Dismiss").performClick()
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runtime.cancelCompleted && runtime.sendCancelled &&
+                composeRule.onAllNodesWithTag("arcade_chat_input").fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+    }
+
+    @Test
+    fun systemBackDuringArcadeStreamSettlesBeforeClosingOverlay() {
+        val runtime = FakeRivenRuntime(configuredSnapshot(), holdSend = true)
+        openLiveSolitaire(runtime)
+        composeRule.onNodeWithTag("arcade_chat_input").performTextReplacement("Back out of this reply")
+        composeRule.onNodeWithTag("arcade_chat_send").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.sendCalls == 1 }
+
+        composeRule.runOnIdle { composeRule.activity.onBackPressedDispatcher.onBackPressed() }
+
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            runtime.cancelCompleted && runtime.sendCancelled &&
+                composeRule.onAllNodesWithTag("arcade_chat_input").fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
     }
 
     @Test
@@ -296,6 +378,30 @@ class RivenAppNormalTest {
     }
 
     @Test
+    fun leavingArcadeBlocksChatUntilGameplayContextClearIsAcknowledged() {
+        val runtime = FakeRivenRuntime(configuredSnapshot(), delayArcadeClear = true)
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(3)
+        composeRule.onNodeWithText("Midnight Solitaire").performClick()
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.arcadeObservations.isNotEmpty() }
+
+        composeRule.onNodeWithTag("nav_chat").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.arcadeClearEntered.isCompleted }
+        composeRule.onAllNodesWithTag("chat_input").assertCountEquals(0)
+        assertTrue(runtime.sendCalls == 0)
+
+        runtime.releaseArcadeClear()
+        composeRule.onNodeWithTag("chat_input").assertIsDisplayed().performTextReplacement("Safe after clear")
+        composeRule.onNodeWithTag("chat_send").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) { runtime.sendCalls == 1 }
+        assertNull(runtime.arcadeObservationAtLastSend)
+    }
+
+    @Test
     fun repeatedIdenticalTextCancelledBeforeCommitRemainsADraftAndAutosaveResumes() {
         val repeated = "Do you remember our plan?"
         val runtime = FakeRivenRuntime(
@@ -341,9 +447,7 @@ class RivenAppNormalTest {
 
         runtime.releaseCancel()
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.cancelCompleted }
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
-        }
+        waitUntilChatEditorEnabled()
         composeRule.onNodeWithTag("chat_input").assertIsEnabled().assertTextContains("Cancelled draft")
         composeRule.waitUntil(timeoutMillis = 5_000) {
             runtime.savedDrafts.lastOrNull() == "Cancelled draft"
@@ -373,9 +477,7 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("chat_input").assertIsNotEnabled()
 
         runtime.releaseDraftSave()
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
-        }
+        waitUntilChatEditorEnabled()
         composeRule.onNodeWithTag("chat_input").assertIsEnabled()
         assertTrue(runtime.retryCalls == 0)
     }
@@ -399,9 +501,7 @@ class RivenAppNormalTest {
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.cancelCompleted }
         composeRule.onNodeWithTag("chat_input").assertIsNotEnabled()
         runtime.releaseDraftSave()
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            composeRule.onAllNodesWithText("Cancel").fetchSemanticsNodes().isEmpty()
-        }
+        waitUntilChatEditorEnabled()
 
         composeRule.onNodeWithTag("chat_input").assertIsEnabled().assertTextContains(freshDraft)
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.savedDrafts.lastOrNull() == freshDraft }
@@ -470,6 +570,43 @@ class RivenAppNormalTest {
         }
         assertTrue(output.isFile)
         assertTrue(output.length() > 0L)
+    }
+
+    private fun waitUntilChatEditorEnabled() {
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            try {
+                composeRule.onNodeWithTag("chat_input").assertIsEnabled()
+                true
+            } catch (_: AssertionError) {
+                false
+            }
+        }
+    }
+
+    private fun writeDeviceScreenshot(name: String) {
+        val output = File(System.getProperty("user.dir"), "build/reports/riven-runtime-preview/$name")
+        output.parentFile?.mkdirs()
+        composeRule.waitForIdle()
+        val bitmap = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        FileOutputStream(output).use { stream ->
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream))
+        }
+        assertTrue(output.isFile)
+        assertTrue(output.length() > 0L)
+    }
+
+    private fun openLiveSolitaire(runtime: FakeRivenRuntime) {
+        composeRule.runOnIdle {
+            composeRule.activity.setContent {
+                RivenTheme { RivenApp(runtimeFactory = { runtime }) }
+            }
+        }
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(3)
+        composeRule.onNodeWithText("Midnight Solitaire").performClick()
+        composeRule.onNodeWithTag("midnight_solitaire_board").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Open conversation with Riven").performClick()
+        composeRule.onNodeWithTag("arcade_chat_input").assertIsDisplayed()
     }
 }
 
@@ -628,6 +765,7 @@ private class FakeRivenRuntime(
     private val failUnconfiguredSend: Boolean = false,
     delayDraftSave: Boolean = false,
     private val failImagePreflight: Boolean = false,
+    private val delayArcadeClear: Boolean = false,
 ) : RivenRuntimeController {
     private var current = initial
     private var holdNextSend = holdSend
@@ -655,6 +793,13 @@ private class FakeRivenRuntime(
         private set
     val arcadeObservations = CopyOnWriteArrayList<ArcadeGameObservation>()
     @Volatile
+    private var currentArcadeObservation: ArcadeGameObservation? = null
+    @Volatile
+    var arcadeObservationAtLastSend: ArcadeGameObservation? = null
+        private set
+    val arcadeClearEntered = CompletableDeferred<Unit>()
+    private val arcadeClearRelease = CompletableDeferred<Unit>()
+    @Volatile
     var arcadeClearCalls = 0
         private set
     var failMemoryWrites = false
@@ -675,6 +820,7 @@ private class FakeRivenRuntime(
         observation: ArcadeGameObservation,
     ): ArcadeObservationWriteResult {
         arcadeObservations += observation
+        currentArcadeObservation = observation
         return ArcadeObservationWriteResult.Published(
             gameId = observation.gameId,
             sessionId = observation.sessionId,
@@ -684,6 +830,11 @@ private class FakeRivenRuntime(
 
     override suspend fun clearArcadeObservation(): ArcadeObservationWriteResult {
         arcadeClearCalls += 1
+        if (delayArcadeClear) {
+            arcadeClearEntered.complete(Unit)
+            arcadeClearRelease.await()
+        }
+        currentArcadeObservation = null
         return ArcadeObservationWriteResult.Cleared(changed = true)
     }
 
@@ -742,6 +893,7 @@ private class FakeRivenRuntime(
     override suspend fun send(content: String, onDelta: suspend (String) -> Unit): RivenRuntimeResult {
         sendCalls += 1
         sentContents += content
+        arcadeObservationAtLastSend = currentArcadeObservation
         if (failUnconfiguredSend) {
             current = current.copy(draft = content)
             return RivenRuntimeResult.Failure("Configure a profile first.", snapshot = current)
@@ -821,6 +973,10 @@ private class FakeRivenRuntime(
 
     fun releaseDraftSave() {
         saveDraftRelease.complete(Unit)
+    }
+
+    fun releaseArcadeClear() {
+        arcadeClearRelease.complete(Unit)
     }
 
     override suspend fun saveProfile(

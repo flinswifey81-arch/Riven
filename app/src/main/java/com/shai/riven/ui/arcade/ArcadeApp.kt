@@ -81,6 +81,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
 import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.data.arcade.ArcadeObservationWriteResult
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
@@ -120,6 +121,7 @@ data class ArcadeConversationHost(
     val onRuntimeSnapshot: (RivenRuntimeSnapshot) -> Unit,
     val onOpenSettings: () -> Unit,
     val onConversationJobChanged: (Job?) -> Unit,
+    val prepareProviderRequest: suspend () -> ArcadeObservationWriteResult,
 )
 
 private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
@@ -860,6 +862,9 @@ private fun StatusPill(text: String) {
             .padding(horizontal = 9.dp, vertical = 4.dp),
         color = MutedGold,
         style = MaterialTheme.typography.labelSmall,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Clip,
     )
 }
 
@@ -910,6 +915,17 @@ private fun ConversationOverlay(
                         }
                     }
                 }
+                when (val prepared = withContext(Dispatchers.IO) { host.prepareProviderRequest() }) {
+                    is ArcadeObservationWriteResult.Published -> Unit
+                    is ArcadeObservationWriteResult.Failure -> {
+                        runtimeNotice = prepared.message
+                        return@launch
+                    }
+                    is ArcadeObservationWriteResult.Cleared -> {
+                        runtimeNotice = "Current Arcade gameplay context is unavailable; no provider request was made."
+                        return@launch
+                    }
+                }
                 val result = withContext(Dispatchers.IO) {
                     block { delta ->
                         withContext(Dispatchers.Main.immediate) { streamedReply += delta }
@@ -930,19 +946,51 @@ private fun ConversationOverlay(
         host.onConversationJobChanged(conversationJob)
     }
 
-    DisposableEffect(host?.runtime) {
-        onDispose {
-            conversationJob?.cancel(CancellationException("Arcade conversation closed"))
-            host?.onConversationJobChanged?.invoke(null)
+    fun cancelConversation(onSettled: (() -> Unit)? = null) {
+        if (host == null || cancelling) return
+        val jobToCancel = conversationJob
+        if (jobToCancel == null || !jobToCancel.isActive) {
+            onSettled?.invoke()
+            return
+        }
+        cancelling = true
+        scope.launch {
+            var cancellationResult: RivenRuntimeResult? = null
+            try {
+                cancellationResult = withContext(Dispatchers.IO) { host.runtime.cancel() }
+            } catch (_: CancellationException) {
+                runtimeNotice = "Reply cancelled. Your message remains in the persistent conversation."
+            } catch (_: Exception) {
+                runtimeNotice = "Riven could not confirm cancellation. Your draft remains saved."
+            } finally {
+                jobToCancel.cancel(
+                    CancellationException("Arcade reply cancelled after runtime cancellation attempt"),
+                )
+                jobToCancel.join()
+                cancellationResult?.let(::applyResult)
+                cancelling = false
+                onSettled?.invoke()
+            }
         }
     }
 
+    fun requestDismiss() {
+        if (conversationJob?.isActive == true) {
+            cancelConversation { onAction(ArcadeAction.DismissConversation) }
+        } else {
+            onAction(ArcadeAction.DismissConversation)
+        }
+    }
+
+    BackHandler(enabled = true, onBack = ::requestDismiss)
+
     Dialog(
-        onDismissRequest = { onAction(ArcadeAction.DismissConversation) },
+        onDismissRequest = ::requestDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         BoxWithConstraints(
             modifier = Modifier
+                .testTag("arcade_conversation_overlay")
                 .fillMaxSize()
                 .background(DeepInk.copy(alpha = 0.72f))
                 .imePadding()
@@ -985,7 +1033,7 @@ private fun ConversationOverlay(
                                 style = MaterialTheme.typography.labelMedium,
                             )
                         }
-                        TextButton(onClick = { onAction(ArcadeAction.DismissConversation) }) {
+                        TextButton(onClick = ::requestDismiss) {
                             Text("Dismiss")
                         }
                     }
@@ -1094,19 +1142,7 @@ private fun ConversationOverlay(
                                 item {
                                     TextButton(
                                         onClick = {
-                                            if (cancelling) return@TextButton
-                                            cancelling = true
-                                            val jobToCancel = conversationJob
-                                            jobToCancel?.cancel(CancellationException("Arcade reply cancelled by user"))
-                                            scope.launch {
-                                                try {
-                                                    val result = withContext(Dispatchers.IO) { host.runtime.cancel() }
-                                                    jobToCancel?.join()
-                                                    applyResult(result)
-                                                } finally {
-                                                    cancelling = false
-                                                }
-                                            }
+                                            cancelConversation()
                                         },
                                         enabled = !cancelling,
                                         modifier = Modifier.testTag("arcade_chat_cancel"),
@@ -1130,7 +1166,7 @@ private fun ConversationOverlay(
                         )
                     }
                     Button(
-                        onClick = { onAction(ArcadeAction.DismissConversation) },
+                        onClick = ::requestDismiss,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("Return to table")

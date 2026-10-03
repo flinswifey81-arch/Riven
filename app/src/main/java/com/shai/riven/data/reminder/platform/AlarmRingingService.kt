@@ -6,7 +6,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import com.shai.riven.data.reminder.ReminderFailureCode
 import com.shai.riven.data.reminder.ReminderSnapshot
-import com.shai.riven.data.reminder.ReminderSoundKind
 import com.shai.riven.data.reminder.ReminderStatus
 import com.shai.riven.data.reset.RivenStartupMutationGate
 import java.util.LinkedHashMap
@@ -27,6 +26,36 @@ internal fun remainingRingMillis(ringUntilAt: Long, now: Long): Long =
     (ringUntilAt - now).coerceAtLeast(0L)
 
 internal data class AlarmSessionRemoval<V>(val value: V, val wasActive: Boolean)
+
+internal suspend fun settleAlarmAudioStartAttempt(
+    attempt: AlarmAudioStartAttempt,
+    recordWarning: suspend (AlarmAudioResult.Failure) -> Unit,
+    terminalize: suspend (AlarmAudioResult.Failure) -> Unit,
+): Boolean {
+    val primaryFailure = attempt.primary as? AlarmAudioResult.Failure
+    val fallbackFailure = attempt.systemFallback as? AlarmAudioResult.Failure
+    if (attempt.primary == AlarmAudioResult.Started || attempt.systemFallback == AlarmAudioResult.Started) {
+        primaryFailure?.let { recordWarning(it) }
+        fallbackFailure?.let { recordWarning(it) }
+        return true
+    }
+    val lastFailure = fallbackFailure ?: primaryFailure ?: AlarmAudioResult.Failure(
+        ReminderFailureCode.AUDIO_SOURCE_UNAVAILABLE,
+        "Alarm audio did not start.",
+    )
+    try {
+        primaryFailure?.let { recordWarning(it) }
+        fallbackFailure?.let { recordWarning(it) }
+    } finally {
+        terminalize(
+            lastFailure.copy(
+                detail = "Selected alarm audio and Android system alarm fallback both failed. " +
+                    lastFailure.detail,
+            ),
+        )
+    }
+    return false
+}
 
 /** FIFO arbiter used by the service so one alarm action cannot stop a different token. */
 internal class AlarmSessionArbiter<K, V> {
@@ -263,7 +292,7 @@ class AlarmRingingService : Service() {
             val remaining = remainingRingMillis(session.ringUntilAt, System.currentTimeMillis())
             if (remaining > 0L) {
                 wakeLock = acquireWakeLock(session.key, remaining)
-                startAudio(current, session.key.deliveryToken)
+                if (!startAudio(current, session.key.deliveryToken)) return
                 delay(remaining)
             }
             expired = true
@@ -282,28 +311,30 @@ class AlarmRingingService : Service() {
         }
     }
 
-    private suspend fun startAudio(reminder: ReminderSnapshot, deliveryToken: String) {
-        val result = audio.start(reminder)
-        if (result is AlarmAudioResult.Failure) {
-            runtime.repository.recordAudioWarning(
-                reminder.id,
-                reminder.scheduleRevision,
-                deliveryToken,
-                result.code,
-                result.detail,
-            )
-            if (reminder.soundKind != ReminderSoundKind.SYSTEM_DEFAULT) {
-                val fallback = audio.startFallback()
-                if (fallback is AlarmAudioResult.Failure) {
+    private suspend fun startAudio(reminder: ReminderSnapshot, deliveryToken: String): Boolean {
+        val attempt = audio.startWithSystemFallback(reminder)
+        return withContext(NonCancellable) {
+            settleAlarmAudioStartAttempt(
+                attempt = attempt,
+                recordWarning = { failure ->
                     runtime.repository.recordAudioWarning(
                         reminder.id,
                         reminder.scheduleRevision,
                         deliveryToken,
-                        fallback.code,
-                        fallback.detail,
+                        failure.code,
+                        failure.detail,
                     )
-                }
-            }
+                },
+                terminalize = { failure ->
+                    runtime.repository.failClaimedDelivery(
+                        reminderId = reminder.id,
+                        scheduleRevision = reminder.scheduleRevision,
+                        deliveryToken = deliveryToken,
+                        code = failure.code,
+                        detail = failure.detail,
+                    )
+                },
+            )
         }
     }
 

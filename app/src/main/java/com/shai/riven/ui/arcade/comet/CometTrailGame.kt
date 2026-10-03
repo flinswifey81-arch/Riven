@@ -137,6 +137,7 @@ fun CometTrailGame(
         secondary = state.treatsEaten,
         tertiary = state.boardRefreshes,
         paused = paused,
+        direction = state.direction.name,
     )
     LaunchedEffect(observationSignature, observationSessionId) {
         observationSequence += 1L

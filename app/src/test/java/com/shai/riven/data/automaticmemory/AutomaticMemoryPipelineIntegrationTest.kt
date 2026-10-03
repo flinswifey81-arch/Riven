@@ -179,10 +179,17 @@ class AutomaticMemoryPipelineIntegrationTest {
         assertTrue(scheduler.automaticMemoryJobIds.isEmpty())
         assertTrue(queue.schedulePending(limit = 10).isEmpty())
 
+        reopenDatabase()
+        excluded.jobIds.forEach { jobId ->
+            assertTrue(runner.run(jobId) is AutomaticMemoryJobRunResult.NoOp)
+        }
+
         val reconciliation = queue.reconcileSucceededRuns(limit = 10, occurredAt = now())
         assertEquals(0, reconciliation.inspectedRuns)
         assertTrue(reconciliation.jobIds.isEmpty())
         assertTrue(scheduler.automaticMemoryJobIds.isEmpty())
+        assertEquals(0, database.memoryDao().candidateMemoryCount())
+        assertEquals(0, database.memoryDao().memoryCount())
         assertEquals(0, model.totalCalls)
     }
 

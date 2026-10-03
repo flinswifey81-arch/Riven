@@ -27,6 +27,7 @@ import com.shai.riven.data.automaticmemory.AutomaticMemoryStatusSnapshot
 import com.shai.riven.data.arcade.ArcadeGameObservation
 import com.shai.riven.data.arcade.ArcadeObservationContextBridge
 import com.shai.riven.data.arcade.ArcadeObservationWriteResult
+import com.shai.riven.data.arcade.ARCADE_TRANSIENT_MEMORY_EXCLUSION
 import com.shai.riven.data.background.RivenBackgroundWorkScheduler
 import com.shai.riven.data.background.WorkManagerRivenBackgroundWorkScheduler
 import com.shai.riven.data.context.ActiveConversationContextSource
@@ -44,7 +45,9 @@ import com.shai.riven.data.conversation.NewTimelineMessageInput
 import com.shai.riven.data.conversation.TimelineReadResult
 import com.shai.riven.data.conversation.TimelineWriteResult
 import com.shai.riven.data.conversation.engine.ConversationEngineErrorCode
+import com.shai.riven.data.conversation.engine.ConversationMemoryDisposition
 import com.shai.riven.data.conversation.engine.ConversationEngineResult
+import com.shai.riven.data.conversation.engine.ConversationRunControlResult
 import com.shai.riven.data.conversation.engine.CanonicalConversationImageSelector
 import com.shai.riven.data.conversation.engine.ProviderAdapterRegistry
 import com.shai.riven.data.conversation.engine.ProviderNeutralConversationEngine
@@ -118,6 +121,7 @@ import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogResult
 import com.shai.riven.data.recall.ConversationalMemoryContextSource
 import com.shai.riven.data.recall.TargetedConversationalMemoryRetriever
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
@@ -607,22 +611,37 @@ class RivenConversationRuntime(
     override suspend fun send(
         content: String,
         onDelta: suspend (String) -> Unit,
-    ): RivenRuntimeResult = sendInternal(content, false, automaticMemoryEligible = true, onDelta)
+    ): RivenRuntimeResult = sendInternal(
+        content,
+        false,
+        ConversationMemoryDisposition.Eligible,
+        onDelta,
+    )
 
     override suspend fun sendFromArcade(
         content: String,
         onDelta: suspend (String) -> Unit,
-    ): RivenRuntimeResult = sendInternal(content, false, automaticMemoryEligible = false, onDelta)
+    ): RivenRuntimeResult = sendInternal(
+        content,
+        false,
+        ConversationMemoryDisposition.Excluded(ARCADE_TRANSIENT_MEMORY_EXCLUSION),
+        onDelta,
+    )
 
     override suspend fun sendWithUnknownImageCapabilityConfirmation(
         content: String,
         onDelta: suspend (String) -> Unit,
-    ): RivenRuntimeResult = sendInternal(content, true, automaticMemoryEligible = true, onDelta)
+    ): RivenRuntimeResult = sendInternal(
+        content,
+        true,
+        ConversationMemoryDisposition.Eligible,
+        onDelta,
+    )
 
     private suspend fun sendInternal(
         content: String,
         confirmUnknownImageCapability: Boolean,
-        automaticMemoryEligible: Boolean,
+        memoryDisposition: ConversationMemoryDisposition,
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult = conversationOperation { operation ->
         ensureConversation()
@@ -691,19 +710,22 @@ class RivenConversationRuntime(
             expectedTimelineRevision = revision,
             trigger = ConversationRunTrigger.INITIAL,
             imageInputAuthorization = imageAuthorization,
-            automaticMemoryEligible = automaticMemoryEligible,
+            memoryDisposition = memoryDisposition,
             onDelta = onDelta,
         )
     }
 
     override suspend fun retry(onDelta: suspend (String) -> Unit): RivenRuntimeResult =
-        retryInternal(automaticMemoryEligible = true, onDelta)
+        retryInternal(ConversationMemoryDisposition.Eligible, onDelta)
 
     override suspend fun retryFromArcade(onDelta: suspend (String) -> Unit): RivenRuntimeResult =
-        retryInternal(automaticMemoryEligible = false, onDelta)
+        retryInternal(
+            ConversationMemoryDisposition.Excluded(ARCADE_TRANSIENT_MEMORY_EXCLUSION),
+            onDelta,
+        )
 
     private suspend fun retryInternal(
-        automaticMemoryEligible: Boolean,
+        memoryDisposition: ConversationMemoryDisposition,
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult = conversationOperation { operation ->
         val profile = selectedProfileOrNull()
@@ -728,7 +750,7 @@ class RivenConversationRuntime(
             trigger = ConversationRunTrigger.RETRY,
             retryOfRunId = failed.runId,
             canonicalImageContextHeadMessageId = failed.contextHeadMessageId,
-            automaticMemoryEligible = automaticMemoryEligible,
+            memoryDisposition = memoryDisposition,
             onDelta = onDelta,
         )
     }
@@ -763,14 +785,17 @@ class RivenConversationRuntime(
 
     override suspend fun continueConversation(
         onDelta: suspend (String) -> Unit,
-    ): RivenRuntimeResult = continueInternal(automaticMemoryEligible = true, onDelta)
+    ): RivenRuntimeResult = continueInternal(ConversationMemoryDisposition.Eligible, onDelta)
 
     override suspend fun continueFromArcade(
         onDelta: suspend (String) -> Unit,
-    ): RivenRuntimeResult = continueInternal(automaticMemoryEligible = false, onDelta)
+    ): RivenRuntimeResult = continueInternal(
+        ConversationMemoryDisposition.Excluded(ARCADE_TRANSIENT_MEMORY_EXCLUSION),
+        onDelta,
+    )
 
     private suspend fun continueInternal(
-        automaticMemoryEligible: Boolean,
+        memoryDisposition: ConversationMemoryDisposition,
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult = conversationOperation { operation ->
         ensureConversation()
@@ -830,7 +855,7 @@ class RivenConversationRuntime(
             expectedTimelineRevision = revision,
             trigger = ConversationRunTrigger.INITIAL,
             imageInputAuthorization = imageAuthorization,
-            automaticMemoryEligible = automaticMemoryEligible,
+            memoryDisposition = memoryDisposition,
             onDelta = onDelta,
         )
     }
@@ -841,11 +866,27 @@ class RivenConversationRuntime(
                 message = "There is no active reply to cancel.",
                 snapshot = snapshotOrNull(),
             )
-        operation.job.cancel(CancellationException("Conversation operation cancelled"))
-        operation.runId.get()?.let { runId ->
-            withContext(NonCancellable) { engine.cancel(runId) }
+        operation.cancelRequested.set(true)
+        val runId = operation.runId.get()
+        if (runId == null) {
+            operation.job.cancel(CancellationException("Conversation operation cancelled before run creation"))
+            return withContext(NonCancellable) { snapshotResult() }
         }
-        return withContext(NonCancellable) { snapshotResult() }
+        val control = withContext(NonCancellable) { engine.cancel(runId) }
+        operation.job.cancel(CancellationException("Conversation operation cancelled after run terminalization"))
+        return withContext(NonCancellable) {
+            when (control) {
+                is ConversationRunControlResult.Failure -> RivenRuntimeResult.Failure(
+                    message = control.code.userMessage(),
+                    engineCode = control.code,
+                    snapshot = snapshotOrNull(),
+                )
+                ConversationRunControlResult.Missing,
+                is ConversationRunControlResult.Unchanged,
+                is ConversationRunControlResult.Updated,
+                -> snapshotResult()
+            }
+        }
     }
 
     override suspend fun publishArcadeObservation(
@@ -1095,11 +1136,15 @@ class RivenConversationRuntime(
         regenerateOfMessageId: String? = null,
         imageInputAuthorization: ImageInputAuthorization? = null,
         canonicalImageContextHeadMessageId: String = userMessageId,
-        automaticMemoryEligible: Boolean = true,
+        memoryDisposition: ConversationMemoryDisposition = ConversationMemoryDisposition.Eligible,
         onDelta: suspend (String) -> Unit,
     ): RivenRuntimeResult {
         val runId = UUID.randomUUID().toString()
         operation.runId.set(runId)
+        if (operation.cancelRequested.get()) {
+            operation.job.cancel(CancellationException("Conversation operation cancelled before run dispatch"))
+            coroutineContext.ensureActive()
+        }
         val canonicalImageIds = canonicalImageSelector.select(
             conversationId = CONVERSATION_ID,
             userMessageId = userMessageId,
@@ -1128,51 +1173,24 @@ class RivenConversationRuntime(
                     expectedTimelineRevision = expectedTimelineRevision,
                     occurredAt = clock(),
                     imageInputAuthorization = resolvedImageAuthorization,
+                    memoryDisposition = memoryDisposition,
                 ),
                 onDelta = onDelta,
             )
             when (result) {
                 is ConversationEngineResult.Succeeded -> {
                     withContext(ioDispatcher) {
-                        if (automaticMemoryEligible) {
+                        if (result.memoryDisposition == ConversationMemoryDisposition.Eligible) {
                             automaticMemoryQueue.ensureForSucceededRun(
                                 runId = result.run.runId,
                                 sourceTimelineRevision = result.timelineRevision,
                                 occurredAt = clock(),
-                            )
-                        } else {
-                            automaticMemoryQueue.excludeSucceededRun(
-                                runId = result.run.runId,
-                                sourceTimelineRevision = result.timelineRevision,
-                                occurredAt = clock(),
-                                reasonCode = ARCADE_TRANSIENT_MEMORY_EXCLUSION,
                             )
                         }
                     }
                     RivenRuntimeResult.Success(checkNotNull(snapshotOrNull()), result)
                 }
                 is ConversationEngineResult.Existing -> {
-                    if (result.run.state == ConversationRunState.SUCCEEDED) {
-                        val currentRevision = activeTimelineOrNull()?.timelineRevision
-                        if (currentRevision != null) {
-                            withContext(ioDispatcher) {
-                                if (automaticMemoryEligible) {
-                                    automaticMemoryQueue.ensureForSucceededRun(
-                                        runId = result.run.runId,
-                                        sourceTimelineRevision = currentRevision,
-                                        occurredAt = clock(),
-                                    )
-                                } else {
-                                    automaticMemoryQueue.excludeSucceededRun(
-                                        runId = result.run.runId,
-                                        sourceTimelineRevision = currentRevision,
-                                        occurredAt = clock(),
-                                        reasonCode = ARCADE_TRANSIENT_MEMORY_EXCLUSION,
-                                    )
-                                }
-                            }
-                        }
-                    }
                     RivenRuntimeResult.Success(checkNotNull(snapshotOrNull()), result)
                 }
                 is ConversationEngineResult.Failed -> RivenRuntimeResult.Failure(
@@ -1183,6 +1201,7 @@ class RivenConversationRuntime(
             }
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
+                engine.cancel(runId)
                 RivenRuntimeResult.Failure(
                     message = "Reply cancelled.",
                     engineCode = ConversationEngineErrorCode.CANCELLED,
@@ -1510,13 +1529,13 @@ class RivenConversationRuntime(
     private data class ActiveConversationOperation(
         val job: Job,
         val runId: AtomicReference<String?> = AtomicReference(null),
+        val cancelRequested: AtomicBoolean = AtomicBoolean(false),
     )
 
     companion object {
         const val CONVERSATION_ID = "riven-primary-conversation"
         const val OPENROUTER_CREDENTIAL_SLOT = "openrouter-account-key"
         const val CONTINUE_MESSAGE = "Continue."
-        const val ARCADE_TRANSIENT_MEMORY_EXCLUSION = "ARCADE_TRANSIENT_CONTEXT"
         const val MAX_VISIBLE_MEMORIES = 100
         const val AUTOMATIC_MEMORY_RECONCILIATION_LIMIT = 25
         val OPENROUTER_CAPABILITIES = listOf(
