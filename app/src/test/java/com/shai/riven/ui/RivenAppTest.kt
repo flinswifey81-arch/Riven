@@ -52,11 +52,26 @@ import com.shai.riven.data.runtime.RivenProfileSaveResult
 import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
+import com.shai.riven.ui.arcade.ArcadeGame
+import com.shai.riven.ui.arcade.cosmic.CosmicAction
+import com.shai.riven.ui.arcade.cosmic.CosmicCommand
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefEngine
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSession
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentAgent
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentExecution
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentObservation
+import com.shai.riven.ui.arcade.cosmic.CosmicPlayer
+import com.shai.riven.ui.arcade.cosmic.CosmicPublicEvent
+import com.shai.riven.ui.arcade.cosmic.CosmicPublicObservation
+import com.shai.riven.ui.arcade.cosmic.SharedPreferencesCosmicMischiefStore
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -67,6 +82,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -399,6 +415,73 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("chat_send").performClick()
         composeRule.waitUntil(timeoutMillis = 5_000) { runtime.sendCalls == 1 }
         assertNull(runtime.arcadeObservationAtLastSend)
+    }
+
+    @Test
+    fun failedGlobalNavigationClearRestartsCosmicAfterRejectingTheStaleTurn() {
+        val runtime = FakeRivenRuntime(configuredSnapshot(), failArcadeClear = true)
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = InstrumentationRegistry.getInstrumentation().targetContext,
+            preferenceName = "riven-app-cosmic-clear-failure-${System.nanoTime()}",
+        )
+        val fresh = CosmicMischiefSession(CosmicMischiefEngine.newGame(seed = 1_037L))
+        val initialResult = CosmicMischiefEngine.apply(
+            fresh,
+            CosmicCommand(CosmicPlayer.SHAI, fresh.game.revision, CosmicAction.DrawCard),
+        )
+        assertTrue(initialResult.changed)
+        val initial = initialResult.session
+        store.saveSession(initial)
+        val expectedResult = CosmicMischiefEngine.apply(
+            initial,
+            CosmicCommand(CosmicPlayer.RIVEN, initial.game.revision, CosmicAction.DrawCard),
+        )
+        assertTrue(expectedResult.changed)
+        val opponent = TwoTurnBlockingOpponent()
+        val execution = CosmicOpponentExecution(actionTimeoutMillis = 5_000L)
+
+        composeRule.runOnIdle {
+            composeRule.activity.setContent {
+                RivenTheme {
+                    RivenApp(
+                        runtimeFactory = { runtime },
+                        arcadeCosmicStoreOverride = store,
+                        arcadeCosmicOpponentOverride = opponent,
+                        arcadeCosmicOpponentExecutionOverride = execution,
+                    )
+                }
+            }
+        }
+
+        try {
+            composeRule.onNodeWithTag("nav_arcade").performClick()
+            val cosmicIndex = ArcadeGame.entries.indexOf(ArcadeGame.RIVEN_CARD_TABLE) + 2
+            composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(cosmicIndex)
+            composeRule.onNodeWithText("Cosmic Mischief").performClick()
+            composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+            assertTrue(opponent.awaitCall(1))
+
+            composeRule.onNodeWithTag("nav_chat").performClick()
+            composeRule.waitUntil(timeoutMillis = 5_000L) { runtime.arcadeClearCalls == 1 }
+            composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+            assertTrue(opponent.awaitCall(2))
+
+            opponent.releaseCall(1)
+            Thread.sleep(150L)
+            composeRule.waitForIdle()
+            assertEquals(initial, store.loadSession())
+            assertEquals(2, opponent.calls.get())
+
+            opponent.releaseCall(2)
+            composeRule.waitUntil(timeoutMillis = 5_000L) {
+                store.loadSession() == expectedResult.session
+            }
+        } finally {
+            opponent.releaseAll()
+        }
+
+        assertEquals(expectedResult.session, store.loadSession())
+        assertEquals(2, opponent.calls.get())
     }
 
     @Test
@@ -766,6 +849,7 @@ private class FakeRivenRuntime(
     delayDraftSave: Boolean = false,
     private val failImagePreflight: Boolean = false,
     private val delayArcadeClear: Boolean = false,
+    private val failArcadeClear: Boolean = false,
 ) : RivenRuntimeController {
     private var current = initial
     private var holdNextSend = holdSend
@@ -833,6 +917,9 @@ private class FakeRivenRuntime(
         if (delayArcadeClear) {
             arcadeClearEntered.complete(Unit)
             arcadeClearRelease.await()
+        }
+        if (failArcadeClear) {
+            return ArcadeObservationWriteResult.Failure("Controlled Arcade clear failure")
         }
         currentArcadeObservation = null
         return ArcadeObservationWriteResult.Cleared(changed = true)
@@ -1006,6 +1093,44 @@ private class FakeRivenRuntime(
         RivenRuntimeResult.Failure("Controlled memory failure", snapshot = current)
     } else {
         success()
+    }
+}
+
+private class TwoTurnBlockingOpponent : CosmicOpponentAgent {
+    override val displayName: String = "Blocked review opponent"
+    val calls = AtomicInteger()
+    private val started = List(2) { CountDownLatch(1) }
+    private val releases = List(2) { CountDownLatch(1) }
+
+    override fun chooseAction(observation: CosmicOpponentObservation): CosmicAction {
+        val call = calls.incrementAndGet()
+        val index = call - 1
+        started.getOrNull(index)?.countDown()
+        releases.getOrNull(index)?.let { release ->
+            while (true) {
+                try {
+                    if (release.await(20L, TimeUnit.MILLISECONDS)) break
+                } catch (_: InterruptedException) {
+                    // The stale callback deliberately outlives cancellation to prove its commit is fenced.
+                }
+            }
+        }
+        return CosmicAction.DrawCard
+    }
+
+    override fun commentary(
+        observation: CosmicPublicObservation,
+        event: CosmicPublicEvent,
+    ): String = event.message
+
+    fun awaitCall(call: Int): Boolean = started[call - 1].await(2L, TimeUnit.SECONDS)
+
+    fun releaseCall(call: Int) {
+        releases[call - 1].countDown()
+    }
+
+    fun releaseAll() {
+        releases.forEach(CountDownLatch::countDown)
     }
 }
 

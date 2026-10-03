@@ -84,6 +84,7 @@ fun CosmicMischiefGame(
     opponentOverride: CosmicOpponentAgent? = null,
     opponentExecutionOverride: CosmicOpponentExecution? = null,
     opponentTurnGateOverride: CosmicOpponentTurnGate? = null,
+    resumeGeneration: Long = 0L,
     initialSeed: Long? = null,
 ) {
     val context = LocalContext.current
@@ -147,7 +148,9 @@ fun CosmicMischiefGame(
         state.dealSeed,
         state.status,
         externallyWaiting,
+        resumeGeneration,
         opponent,
+        opponentTurnGate,
     ) {
         opponentTurnGate.updatePaused(externallyWaiting)
         if (

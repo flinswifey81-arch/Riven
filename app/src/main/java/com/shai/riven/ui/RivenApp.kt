@@ -47,6 +47,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -93,6 +94,9 @@ import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.ArcadeApp
 import com.shai.riven.ui.arcade.ArcadeConversationHost
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefStore
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentAgent
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentExecution
 import com.shai.riven.ui.arcade.cosmic.CosmicOpponentTurnGate
 import com.shai.riven.ui.reminder.ReminderAlarmScreen
 import com.shai.riven.ui.theme.DeepInk
@@ -124,6 +128,9 @@ fun RivenApp(
         ReminderRuntime.from(it).repository
     },
     uiAssets: RivenUiAssets = RivenUiAssets.Empty,
+    arcadeCosmicStoreOverride: CosmicMischiefStore? = null,
+    arcadeCosmicOpponentOverride: CosmicOpponentAgent? = null,
+    arcadeCosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
     runtimeFactory: (android.content.Context) -> RivenRuntimeController = {
         RivenConversationRuntime.fromContext(it)
     },
@@ -139,6 +146,8 @@ fun RivenApp(
     }
     var destination by rememberSaveable { mutableStateOf(RivenDestination.CHAT) }
     val arcadeOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    var arcadeNavigationWaiting by remember { mutableStateOf(false) }
+    var arcadeOpponentResumeGeneration by remember { mutableLongStateOf(0L) }
     var snapshot by remember { mutableStateOf<RivenRuntimeSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -178,13 +187,23 @@ fun RivenApp(
         draftInitialized = true
     }
 
+    fun resumeArcadeOpponent() {
+        arcadeOpponentTurnGate.updatePaused(false)
+        arcadeNavigationWaiting = false
+        arcadeOpponentResumeGeneration += 1L
+    }
+
     fun navigateTo(target: RivenDestination) {
         if (destination == target || navigationPending) return
         val source = destination
         val jobToSettle = activeConversationJob
         val leavingArcade = source == RivenDestination.ARCADE && target != RivenDestination.ARCADE
-        if (leavingArcade) arcadeOpponentTurnGate.pause()
+        if (leavingArcade) {
+            arcadeNavigationWaiting = true
+            arcadeOpponentTurnGate.pause()
+        }
         if (!leavingArcade && (jobToSettle == null || !jobToSettle.isActive)) {
+            if (target == RivenDestination.ARCADE) resumeArcadeOpponent()
             destination = target
             return
         }
@@ -230,9 +249,11 @@ fun RivenApp(
                         }
                     }
                 }
+                if (target == RivenDestination.ARCADE) resumeArcadeOpponent()
                 destination = target
             } finally {
                 navigationPending = false
+                if (leavingArcade && destination == source) resumeArcadeOpponent()
             }
         }
     }
@@ -355,7 +376,12 @@ fun RivenApp(
                         if (result is ArcadeObservationWriteResult.Failure) notice = result.message
                     }
                 },
+                cosmicStoreOverride = arcadeCosmicStoreOverride,
+                cosmicOpponentOverride = arcadeCosmicOpponentOverride,
+                cosmicOpponentExecutionOverride = arcadeCosmicOpponentExecutionOverride,
                 cosmicOpponentTurnGateOverride = arcadeOpponentTurnGate,
+                cosmicExternalWaiting = arcadeNavigationWaiting,
+                cosmicResumeGeneration = arcadeOpponentResumeGeneration,
             )
             loading -> LoadingScreen(padding)
             destination == RivenDestination.SETTINGS || destination == RivenDestination.MEMORY -> SettingsScreen(

@@ -166,6 +166,8 @@ fun ArcadeApp(
     cosmicOpponentOverride: CosmicOpponentAgent? = null,
     cosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
     cosmicOpponentTurnGateOverride: CosmicOpponentTurnGate? = null,
+    cosmicExternalWaiting: Boolean = false,
+    cosmicResumeGeneration: Long = 0L,
 ) {
     var state by rememberSaveable(stateSaver = ArcadeUiStateSaver) {
         mutableStateOf(ArcadeUiState())
@@ -207,6 +209,8 @@ fun ArcadeApp(
         cosmicOpponentOverride = cosmicOpponentOverride,
         cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
         cosmicOpponentTurnGateOverride = cosmicOpponentTurnGate,
+        cosmicExternalWaiting = cosmicExternalWaiting,
+        cosmicResumeGeneration = cosmicResumeGeneration,
     )
 }
 
@@ -223,6 +227,8 @@ fun ArcadeExperience(
     cosmicOpponentOverride: CosmicOpponentAgent? = null,
     cosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
     cosmicOpponentTurnGateOverride: CosmicOpponentTurnGate? = null,
+    cosmicExternalWaiting: Boolean = false,
+    cosmicResumeGeneration: Long = 0L,
 ) {
     val lobbyListState = rememberLazyListState()
     val localCosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
@@ -264,6 +270,8 @@ fun ArcadeExperience(
                 cosmicOpponentOverride = cosmicOpponentOverride,
                 cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
                 cosmicOpponentTurnGate = cosmicOpponentTurnGate,
+                cosmicExternalWaiting = cosmicExternalWaiting,
+                cosmicResumeGeneration = cosmicResumeGeneration,
             )
         }
 
@@ -469,6 +477,8 @@ private fun ArcadeGameScreen(
     cosmicOpponentOverride: CosmicOpponentAgent?,
     cosmicOpponentExecutionOverride: CosmicOpponentExecution?,
     cosmicOpponentTurnGate: CosmicOpponentTurnGate,
+    cosmicExternalWaiting: Boolean,
+    cosmicResumeGeneration: Long,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -488,6 +498,8 @@ private fun ArcadeGameScreen(
                 cosmicOpponentOverride = cosmicOpponentOverride,
                 cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
                 cosmicOpponentTurnGate = cosmicOpponentTurnGate,
+                cosmicExternalWaiting = cosmicExternalWaiting,
+                cosmicResumeGeneration = cosmicResumeGeneration,
             )
         } else if (useScrollableLayout) {
             LazyColumn(
@@ -531,6 +543,8 @@ private fun ArcadeGameScreen(
                         cosmicOpponentOverride = cosmicOpponentOverride,
                         cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
                         cosmicOpponentTurnGate = cosmicOpponentTurnGate,
+                        cosmicExternalWaiting = cosmicExternalWaiting,
+                        cosmicResumeGeneration = cosmicResumeGeneration,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(compactBoardHeight(game)),
@@ -579,6 +593,8 @@ private fun ArcadeGameScreen(
                     cosmicOpponentOverride = cosmicOpponentOverride,
                     cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
                     cosmicOpponentTurnGate = cosmicOpponentTurnGate,
+                    cosmicExternalWaiting = cosmicExternalWaiting,
+                    cosmicResumeGeneration = cosmicResumeGeneration,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -606,6 +622,8 @@ private fun CompactPlayableGameScreen(
     cosmicOpponentOverride: CosmicOpponentAgent?,
     cosmicOpponentExecutionOverride: CosmicOpponentExecution?,
     cosmicOpponentTurnGate: CosmicOpponentTurnGate,
+    cosmicExternalWaiting: Boolean,
+    cosmicResumeGeneration: Long,
 ) {
     Column(
         modifier = Modifier
@@ -658,6 +676,8 @@ private fun CompactPlayableGameScreen(
             cosmicOpponentOverride = cosmicOpponentOverride,
             cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
             cosmicOpponentTurnGate = cosmicOpponentTurnGate,
+            cosmicExternalWaiting = cosmicExternalWaiting,
+            cosmicResumeGeneration = cosmicResumeGeneration,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -677,6 +697,8 @@ private fun GameBoardCard(
     cosmicOpponentOverride: CosmicOpponentAgent? = null,
     cosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
     cosmicOpponentTurnGate: CosmicOpponentTurnGate,
+    cosmicExternalWaiting: Boolean = false,
+    cosmicResumeGeneration: Long = 0L,
 ) {
     Card(
         modifier = modifier,
@@ -707,12 +729,13 @@ private fun GameBoardCard(
                 onObservation = onObservation,
             )
             ArcadeGame.RIVEN_CARD_TABLE -> CosmicMischiefGame(
-                externallyWaiting = externallyPaused,
+                externallyWaiting = externallyPaused || cosmicExternalWaiting,
                 compactLayout = compactGameLayout,
                 storeOverride = cosmicStoreOverride,
                 opponentOverride = cosmicOpponentOverride,
                 opponentExecutionOverride = cosmicOpponentExecutionOverride,
                 opponentTurnGateOverride = cosmicOpponentTurnGate,
+                resumeGeneration = cosmicResumeGeneration,
             )
         }
     }
