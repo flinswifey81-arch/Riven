@@ -53,6 +53,22 @@ class RivenUiAssetsTest {
         assertTrue(placements.values.map { it.heightFraction to it.anchor }.distinct().size > 1)
     }
 
+    @Test
+    fun productionCatalogMaterializesEveryApprovedAssetAndReusesLivingRoomForKitchen() {
+        val assets = RivenUiAssets.Approved
+
+        assertEquals(4, assets.roomBackgrounds.size)
+        assertEquals(RivenSemanticSprite.entries.toSet(), assets.fullBodySprites.keys)
+        assertEquals(
+            assets.roomBackgroundResourceId(RivenRoom.LIVING_ROOM),
+            assets.roomBackgroundResourceId(RivenRoom.KITCHEN),
+        )
+        assertTrue(assets.roomBackgrounds.values.all { it != 0 })
+        assertTrue(assets.fullBodySprites.values.all { it != 0 })
+        assertTrue(assets.brandIconResourceId != null)
+        assertTrue(assets.arcadePortraitResourceId != null)
+    }
+
     private fun snapshot(
         actual: RivenRoom,
         browsed: RivenRoom,

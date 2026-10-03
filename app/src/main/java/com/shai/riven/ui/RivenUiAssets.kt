@@ -1,6 +1,7 @@
 package com.shai.riven.ui
 
 import androidx.annotation.DrawableRes
+import com.shai.riven.R
 import com.shai.riven.data.presence.RivenPresenceSnapshot
 import com.shai.riven.data.presence.RivenRoom
 import com.shai.riven.data.presence.RivenSemanticSprite
@@ -30,6 +31,29 @@ data class RivenUiAssets(
 
     companion object {
         val Empty = RivenUiAssets()
+
+        /**
+         * The versioned, approved production art set. Kitchen intentionally reuses the adjoining
+         * living-room plate because no separate kitchen plate was supplied or approved.
+         */
+        val Approved = RivenUiAssets(
+            roomBackgrounds = mapOf(
+                RivenRoom.BEDROOM to R.drawable.riven_room_bedroom,
+                RivenRoom.LIVING_ROOM to R.drawable.riven_room_living,
+                RivenRoom.STUDY to R.drawable.riven_room_study,
+                RivenRoom.TERRACE to R.drawable.riven_room_terrace,
+            ),
+            fullBodySprites = mapOf(
+                RivenSemanticSprite.STANDING_RELAXED to R.drawable.riven_sprite_standing_relaxed,
+                RivenSemanticSprite.STANDING_WARM_SMILE to R.drawable.riven_sprite_standing_warm_smile,
+                RivenSemanticSprite.STANDING_TEASING to R.drawable.riven_sprite_standing_teasing,
+                RivenSemanticSprite.SEATED_RELAXED to R.drawable.riven_sprite_seated_relaxed,
+                RivenSemanticSprite.SEATED_AMUSED to R.drawable.riven_sprite_seated_amused,
+                RivenSemanticSprite.SEATED_THOUGHTFUL to R.drawable.riven_sprite_seated_thoughtful,
+            ),
+            brandIconResourceId = R.drawable.riven_brand_icon,
+            arcadePortraitResourceId = R.drawable.riven_arcade_portrait,
+        )
     }
 }
 
