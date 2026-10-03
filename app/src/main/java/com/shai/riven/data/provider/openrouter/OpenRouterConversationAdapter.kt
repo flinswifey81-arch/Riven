@@ -313,12 +313,13 @@ internal class OpenRouterStateControlFilter(
             emit(ProviderStreamEvent.Delta(value))
             return
         }
-        if (value.length > maximumControlLineChars && '\n' !in value) {
+        val newline = value.indexOf('\n')
+        val firstLineLength = if (newline < 0) value.length else newline
+        if (firstLineLength > maximumControlLineChars) {
             buffered.clear()
             emit(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID))
             return
         }
-        val newline = value.indexOf('\n')
         if (newline < 0) return
         val line = value.substring(prefix.length, newline).trimEnd('\r')
         val request = parseControl(line)

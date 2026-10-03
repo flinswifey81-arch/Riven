@@ -365,7 +365,9 @@ class RivenConversationRuntime(
                 )
             ) {
                 is RivenPresenceWriteResult.Rejected -> ProviderStateControlResult.Rejected(result.reason)
-                is RivenPresenceWriteResult.Unchanged -> result.snapshot.toProviderStateControlResult()
+                is RivenPresenceWriteResult.Unchanged -> ProviderStateControlResult.Rejected(
+                    "Model state control did not change Riven's presence.",
+                )
                 is RivenPresenceWriteResult.Updated -> result.snapshot.toProviderStateControlResult()
             }
         },

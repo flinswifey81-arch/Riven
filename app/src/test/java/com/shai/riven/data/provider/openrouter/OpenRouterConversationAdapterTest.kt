@@ -75,6 +75,73 @@ class OpenRouterConversationAdapterTest {
     }
 
     @Test
+    fun stateControlFirstLineAtExactLimitIsAccepted() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        filter.accept("${controlLine(OpenRouterStateControlFilter.MAX_CONTROL_LINE_CHARS)}\nNarrative") {
+            events += it
+        }
+
+        assertEquals(
+            listOf(
+                ProviderStreamEvent.StateControlRequested(
+                    ProviderStateControlRequest("study", "standing_relaxed"),
+                ),
+                ProviderStreamEvent.Delta("Narrative"),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun stateControlFirstLineOneOverLimitFailsBeforeNewline() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        filter.accept(controlLine(OpenRouterStateControlFilter.MAX_CONTROL_LINE_CHARS + 1)) {
+            events += it
+        }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID)),
+            events,
+        )
+    }
+
+    @Test
+    fun singleOversizedStateControlDeltaWithNewlineFailsClosed() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        filter.accept(
+            "${controlLine(OpenRouterStateControlFilter.MAX_CONTROL_LINE_CHARS + 1)}\nNarrative",
+        ) { events += it }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID)),
+            events,
+        )
+    }
+
+    @Test
+    fun stateControlLimitCrossingInLaterChunkFailsBeforeNarrative() = runBlocking {
+        val filter = OpenRouterStateControlFilter()
+        val events = mutableListOf<ProviderStreamEvent>()
+
+        filter.accept(controlLine(OpenRouterStateControlFilter.MAX_CONTROL_LINE_CHARS)) {
+            events += it
+        }
+        assertTrue(events.isEmpty())
+        filter.accept(" \nNarrative") { events += it }
+
+        assertEquals(
+            listOf(ProviderStreamEvent.Failure(ProviderFailureCode.STATE_CONTROL_INVALID)),
+            events,
+        )
+    }
+
+    @Test
     fun streamsGroundedRequestAndKeepsSecretOutOfBody() = runBlocking {
         val http = RecordingHttpClient(
             status = 200,
@@ -313,6 +380,12 @@ class OpenRouterConversationAdapterTest {
         assertEquals(null, decoder.accept("data: [DONE]"))
         assertEquals(OpenRouterSseEvent.Done, decoder.accept(""))
         assertEquals(null, decoder.finish())
+    }
+
+    private fun controlLine(totalChars: Int): String {
+        val valid = "RIVEN_STATE_CONTROL {\"room\":\"study\",\"sprite\":\"standing_relaxed\"}"
+        require(totalChars >= valid.length)
+        return valid.padEnd(totalChars, ' ')
     }
 
     private fun request(credential: ProviderSecret? = ProviderSecret.fromPlaintext("secret-value")) =

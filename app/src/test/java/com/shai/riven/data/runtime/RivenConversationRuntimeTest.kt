@@ -869,6 +869,80 @@ class RivenConversationRuntimeTest {
         assertFalse(sent.snapshot.messages.any { it.role == MessageRole.ASSISTANT })
     }
 
+    @Test
+    fun retryRejectsNoOpModelControlBeforeNarrativeIsExposed() = runBlocking {
+        val noOpReply =
+            "RIVEN_STATE_CONTROL {\"room\":\"living_room\",\"sprite\":\"standing_relaxed\"}\nI stayed put."
+        val first = runtime(QueueHttpClient(providerFailure(), successJson(noOpReply)))
+        first.initialize()
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "private-key") is RivenProfileSaveResult.Success)
+        assertTrue(first.send("Try this") is RivenRuntimeResult.Failure)
+        val deltas = mutableListOf<String>()
+
+        val retried = first.retry { deltas += it }
+
+        assertNoOpStateControlRejected(retried, deltas)
+        assertFalse(checkNotNull((retried as RivenRuntimeResult.Failure).snapshot).messages.any {
+            it.role == MessageRole.ASSISTANT
+        })
+    }
+
+    @Test
+    fun regenerateRejectsNoOpModelControlBeforeNarrativeIsExposed() = runBlocking {
+        val noOpReply =
+            "RIVEN_STATE_CONTROL {\"room\":\"living_room\",\"sprite\":\"standing_relaxed\"}\nI stayed put."
+        val first = runtime(QueueHttpClient(success("Original reply."), successJson(noOpReply)))
+        first.initialize()
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "private-key") is RivenProfileSaveResult.Success)
+        assertTrue(first.send("Start here") is RivenRuntimeResult.Success)
+        val deltas = mutableListOf<String>()
+
+        val regenerated = first.regenerate { deltas += it }
+
+        assertNoOpStateControlRejected(regenerated, deltas)
+        assertEquals(
+            listOf("Original reply."),
+            checkNotNull((regenerated as RivenRuntimeResult.Failure).snapshot).messages
+                .filter { it.role == MessageRole.ASSISTANT }
+                .map { it.content },
+        )
+    }
+
+    @Test
+    fun continueRejectsNoOpModelControlBeforeNarrativeIsExposed() = runBlocking {
+        val noOpReply =
+            "RIVEN_STATE_CONTROL {\"room\":\"living_room\",\"sprite\":\"standing_relaxed\"}\nI stayed put."
+        val first = runtime(QueueHttpClient(success("Original reply."), successJson(noOpReply)))
+        first.initialize()
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "private-key") is RivenProfileSaveResult.Success)
+        assertTrue(first.send("Start here") is RivenRuntimeResult.Success)
+        val deltas = mutableListOf<String>()
+
+        val continued = first.continueConversation { deltas += it }
+
+        assertNoOpStateControlRejected(continued, deltas)
+        assertEquals(
+            listOf("Original reply."),
+            checkNotNull((continued as RivenRuntimeResult.Failure).snapshot).messages
+                .filter { it.role == MessageRole.ASSISTANT }
+                .map { it.content },
+        )
+    }
+
+    private fun assertNoOpStateControlRejected(
+        result: RivenRuntimeResult,
+        deltas: List<String>,
+    ) {
+        assertTrue(result is RivenRuntimeResult.Failure)
+        result as RivenRuntimeResult.Failure
+        assertEquals(ConversationEngineErrorCode.STATE_CONTROL_REJECTED, result.engineCode)
+        assertTrue(deltas.isEmpty())
+        assertEquals(
+            com.shai.riven.data.presence.RivenRoom.LIVING_ROOM,
+            checkNotNull(result.snapshot).roomState.actualRoom,
+        )
+    }
+
     private fun runtime(
         http: OpenRouterHttpClient,
         thumbnailGenerator: ImageThumbnailGenerator = ImageThumbnailGenerator { bytes ->
