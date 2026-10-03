@@ -32,6 +32,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +87,11 @@ fun CosmicMischiefGame(
     val context = LocalContext.current
     val store = storeOverride ?: remember(context) { SharedPreferencesCosmicMischiefStore(context) }
     val opponent = opponentOverride ?: remember { DeterministicCosmicOpponentAgent() }
+    val opponentExecution = remember { CosmicOpponentExecution() }
+    val opponentRunner = remember(opponentExecution) { CosmicOpponentTurnRunner(opponentExecution) }
+    DisposableEffect(opponentExecution) {
+        onDispose { opponentExecution.close() }
+    }
     val sessionHolder = remember(store, initialSeed) {
         mutableStateOf(
             store.loadSession() ?: CosmicMischiefSession(
@@ -111,7 +117,7 @@ fun CosmicMischiefGame(
         state.status == CosmicStatus.PLAYING &&
         CosmicMischiefEngine.decisionPlayer(state) == CosmicPlayer.SHAI
 
-    fun applyAction(actor: CosmicPlayer, action: CosmicAction, agentAction: Boolean = false) {
+    fun applyAction(actor: CosmicPlayer, action: CosmicAction) {
         val before = sessionHolder.value
         val result = CosmicMischiefEngine.apply(
             before,
@@ -125,28 +131,38 @@ fun CosmicMischiefGame(
         store.saveSession(result.session)
         selectedCardId = null
         cheatPrimaryId = null
-        val latestEvent = result.events.lastOrNull()
-        notice = if (agentAction && latestEvent != null) {
-            opponent.commentary(
-                CosmicMischiefEngine.publicObservation(result.session.game),
-                latestEvent,
-            ) ?: result.message
-        } else {
-            result.message
-        }
+        notice = result.message
     }
 
     LaunchedEffect(session, store) { store.saveSession(session) }
     LaunchedEffect(settings, store) { store.saveSettings(settings) }
-    LaunchedEffect(state.revision, state.status, externallyWaiting, opponent) {
+    LaunchedEffect(
+        state.revision,
+        state.gameNumber,
+        state.dealSeed,
+        state.status,
+        externallyWaiting,
+        opponent,
+    ) {
         if (
             !externallyWaiting &&
             state.status == CosmicStatus.PLAYING &&
             CosmicMischiefEngine.decisionPlayer(state) == CosmicPlayer.RIVEN
         ) {
-            val observation = CosmicMischiefEngine.opponentObservation(state)
-            val action = opponent.chooseAction(observation)
-            applyAction(CosmicPlayer.RIVEN, action, agentAction = true)
+            val capturedSession = sessionHolder.value
+            val outcome = opponentRunner.run(capturedSession, opponent) ?: return@LaunchedEffect
+            if (
+                sessionHolder.value !== capturedSession ||
+                externallyWaiting ||
+                CosmicMischiefEngine.decisionPlayer(sessionHolder.value.game) != CosmicPlayer.RIVEN
+            ) {
+                return@LaunchedEffect
+            }
+            session = outcome.actionResult.session
+            store.saveSession(outcome.actionResult.session)
+            selectedCardId = null
+            cheatPrimaryId = null
+            notice = outcome.notice
         }
     }
 
@@ -160,7 +176,7 @@ fun CosmicMischiefGame(
         externallyWaiting = externallyWaiting,
         userDecision = userDecision,
         compactLayout = compactLayout,
-        opponentName = opponent.displayName,
+        opponentName = "Offline rival",
         onSelectCard = { cardId ->
             if (userDecision) {
                 selectedCardId = if (selectedCardId == cardId) null else cardId
@@ -364,6 +380,7 @@ private fun CosmicMischiefLayout(
                     CosmicCardBack(
                         width = if (settings.largeCardText) 48.dp else 40.dp,
                         tag = "cosmic_opponent_card_$index",
+                        contentDescription = "Face-down opponent card",
                     )
                 }
             }
@@ -380,6 +397,7 @@ private fun CosmicMischiefLayout(
                 CosmicCardBack(
                     width = if (settings.largeCardText) 72.dp else 62.dp,
                     tag = "cosmic_draw_pile",
+                    contentDescription = "Face-down draw pile",
                 )
                 Text("DRAW ${state.drawPile.size}", color = MistBlue, fontSize = 10.sp)
             }
@@ -429,7 +447,8 @@ private fun CosmicMischiefLayout(
                 border = androidx.compose.foundation.BorderStroke(1.dp, MutedGold),
             ) {
                 Text(
-                    "${trade.proposer.displayName} offers ${trade.offeredCard.spokenName} for one blind chosen card.",
+                    "${trade.proposer.displayName} makes a face-up offer of ${trade.offeredCard.spokenName}; " +
+                        "the responder chooses the return card privately.",
                     modifier = Modifier.padding(9.dp),
                     color = WarmIvory,
                     textAlign = TextAlign.Center,
@@ -503,6 +522,7 @@ private fun CosmicMischiefLayout(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .testTag("cosmic_table_settings")
                 .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -519,8 +539,13 @@ private fun CosmicMischiefLayout(
             )
         }
         Text(
-            "PROVISIONAL DEFAULTS • 52-card deck • caught cheat returns the extra + draw 2 • " +
-                "false callout draws 1 and yields • blind one-for-one trades may be refused, honored, or betrayed",
+            "PROVISIONAL DEFAULTS • DECK: 52 = 4 colors x (0-9 + 1 Eclipse skip + 1 Double Trouble draw 2) " +
+                "+ 4 Rewrite the Stars wilds • CAUGHT CHEAT: extra returns, cheater draws 2 available " +
+                "penalty cards, primary stays discarded but its effect is cancelled • FALSE CALLOUT: caller " +
+                "draws 1 available penalty card and yields • TRADE: face-up offered card for one return " +
+                "chosen privately by the responder; refuse, honor, or betray • BETRAY: responder keeps the " +
+                "offered gift and proposer draws 1 available consolation card • EMPTY DRAW: recycle all but " +
+                "protected top discard cards; if none are available, the draw is waived and the decision or turn resolves",
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp),
@@ -671,7 +696,7 @@ private fun CosmicActionControls(
                 }
                 CosmicButton(
                     text = "TRADE",
-                    description = "Offer selected card for one blind chosen return card",
+                    description = "Make a face-up offer; the responder privately chooses any return card",
                     enabled = userDecision && selected != null && cheatPrimaryId == null && !state.tradeUsedThisTurn,
                     onClick = onOfferTrade,
                 )
@@ -790,10 +815,10 @@ private fun CosmicCardFace(
 }
 
 @Composable
-private fun CosmicCardBack(width: Dp, tag: String) {
+private fun CosmicCardBack(width: Dp, tag: String, contentDescription: String) {
     Image(
         painter = painterResource(R.drawable.riven_card_back),
-        contentDescription = "Face-down opponent card",
+        contentDescription = contentDescription,
         modifier = Modifier
             .width(width)
             .aspectRatio(0.68f)

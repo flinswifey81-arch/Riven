@@ -240,6 +240,127 @@ class CosmicMischiefEngineTest {
     }
 
     @Test
+    fun opponentObservationIsDeeplyDetachedAndRejectsCollectionMutation() {
+        val state = rigState(
+            shaiIds = listOf(1, 17, 22),
+            rivenIds = listOf(3, 31),
+            topId = 5,
+            turn = CosmicPlayer.RIVEN,
+        ).copy(
+            events = mutableListOf(CosmicEvent(CosmicEventType.DEAL_STARTED, message = "Detached")),
+            grudges = mutableListOf(2, 4),
+        )
+        val original = state.copy(
+            drawPile = state.drawPile.toList(),
+            discardPile = state.discardPile.toList(),
+            hands = state.hands.map { it.toList() },
+            events = state.events.toList(),
+            grudges = state.grudges.toList(),
+        )
+        val view = CosmicMischiefEngine.opponentObservation(state)
+
+        assertMutationRejected { (view.ownHand as MutableList<CosmicCard>).clear() }
+        assertMutationRejected { (view.public.handCounts as MutableList<Int>).clear() }
+        assertMutationRejected { (view.public.grudges as MutableList<Int>)[0] = 99 }
+        assertMutationRejected { (view.public.recentEvents as MutableList<CosmicEvent>).clear() }
+        assertEquals(original, state)
+        assertEquals(listOf(3, 31), view.ownHand.map(CosmicCard::id))
+        assertEquals(listOf(2, 4), view.public.grudges)
+    }
+
+    @Test
+    fun emptyDrawPileRecyclesDiscardAndPassesWhenNoCardCanBeRecycled() {
+        val recyclable = exhaustedState(
+            shaiIds = listOf(11),
+            discardIds = listOf(20, 21, 5),
+            turn = CosmicPlayer.SHAI,
+        )
+        val recycled = applyOne(recyclable, CosmicAction.DrawCard)
+        assertEquals(listOf(5), recycled.discardPile.map(CosmicCard::id))
+        assertEquals(2, recycled.hand(CosmicPlayer.SHAI).size)
+        assertEquals(1, recycled.drawPile.size)
+        assertConserved(recycled)
+
+        val exhausted = exhaustedState(
+            shaiIds = listOf(11),
+            discardIds = listOf(5),
+            turn = CosmicPlayer.SHAI,
+        )
+        assertTrue(
+            exhausted.hand(CosmicPlayer.SHAI).none {
+                CosmicMischiefEngine.isPlayable(it, exhausted.topDiscard, exhausted.activeColor)
+            },
+        )
+        val passed = applyOne(exhausted, CosmicAction.DrawCard)
+        assertEquals(CosmicPlayer.RIVEN, passed.turn)
+        assertEquals(exhausted.hands, passed.hands)
+        assertEquals(CosmicEventType.NO_CARD_PASS, passed.events.last().type)
+        assertTrue(passed.events.last().message.contains("no card available"))
+        assertEquals(
+            CosmicMischiefSession(passed),
+            CosmicMischiefSnapshotCodec.decode(
+                CosmicMischiefSnapshotCodec.encode(CosmicMischiefSession(passed)),
+            ),
+        )
+        assertConserved(passed)
+    }
+
+    @Test
+    fun exhaustedDeckStillResolvesCaughtCheatAndProtectsPrimaryDiscard() {
+        val state = exhaustedState(
+            shaiIds = listOf(1, 17),
+            discardIds = listOf(5),
+            turn = CosmicPlayer.SHAI,
+        )
+        val cheated = CosmicMischiefEngine.apply(
+            CosmicMischiefSession(state),
+            CosmicCommand(
+                CosmicPlayer.SHAI,
+                state.revision,
+                CosmicAction.SneakExtraDiscard(primaryCardId = 1, extraCardId = 17),
+            ),
+        ).session
+
+        val caught = CosmicMischiefEngine.apply(
+            cheated,
+            CosmicCommand(CosmicPlayer.RIVEN, cheated.game.revision, CosmicAction.CallOut),
+        )
+
+        assertTrue(caught.changed)
+        assertNull(caught.session.game.pendingCheat)
+        assertEquals(1, caught.session.game.topDiscard.id)
+        assertTrue(caught.session.game.hand(CosmicPlayer.SHAI).any { it.id == 17 })
+        assertTrue(caught.events.single().message.contains("1 of 2 available"))
+        assertConserved(caught.session.game)
+    }
+
+    @Test
+    fun exhaustedDeckStillResolvesDrawTwoAndBetrayal() {
+        val drawTwoState = exhaustedState(
+            shaiIds = listOf(44, 22),
+            discardIds = listOf(5),
+            turn = CosmicPlayer.SHAI,
+        )
+        val drawTwo = applyOne(drawTwoState, CosmicAction.PlayCard(44))
+        assertEquals(44, drawTwo.topDiscard.id)
+        assertEquals(CosmicPlayer.SHAI, drawTwo.turn)
+        assertTrue(drawTwo.events.last().message.contains("1 of 2 available"))
+        assertConserved(drawTwo)
+
+        val betrayalState = exhaustedState(
+            shaiIds = listOf(22),
+            discardIds = listOf(5),
+            turn = CosmicPlayer.SHAI,
+        )
+        val betrayed = respond(offer(betrayalState, offeredId = 22), CosmicTradeDecision.BETRAY)
+        assertEquals(CosmicStatus.SHAI_WON, betrayed.status)
+        assertTrue(betrayed.events.any { it.type == CosmicEventType.BARGAIN_BETRAYED })
+        assertTrue(betrayed.events.any { it.type == CosmicEventType.GAME_WON })
+        assertTrue(betrayed.events.any { it.message.contains("no consolation card was available") })
+        assertConserved(betrayed)
+    }
+
+    @Test
     fun tradeCanBeHonoredRefusedOrBetrayedAsBoundedEvents() {
         val base = rigState(
             shaiIds = listOf(1, 22),
@@ -363,6 +484,39 @@ class CosmicMischiefEngineTest {
             randomState = 91L,
             grudges = grudges,
         ).also { require(CosmicMischiefEngine.isValid(it)) }
+    }
+
+    private fun exhaustedState(
+        shaiIds: List<Int>,
+        discardIds: List<Int>,
+        turn: CosmicPlayer,
+    ): CosmicMischiefState {
+        val placed = (shaiIds + discardIds).toSet()
+        require(placed.size == shaiIds.size + discardIds.size)
+        val discard = discardIds.map { requireNotNull(CosmicCard.fromId(it)) }
+        val riven = CosmicCard.fullDeck.filterNot { it.id in placed }
+        return CosmicMischiefState(
+            drawPile = emptyList(),
+            discardPile = discard,
+            hands = listOf(
+                shaiIds.map { requireNotNull(CosmicCard.fromId(it)) },
+                riven,
+            ),
+            activeColor = requireNotNull(discard.last().color),
+            turn = turn,
+            dealSeed = 101L,
+            randomState = 202L,
+        ).also { require(CosmicMischiefEngine.isValid(it)) }
+    }
+
+    private fun assertMutationRejected(block: () -> Unit) {
+        var rejected = false
+        try {
+            block()
+        } catch (_: UnsupportedOperationException) {
+            rejected = true
+        }
+        assertTrue("Observation collection must be immutable", rejected)
     }
 
     private fun assertConserved(state: CosmicMischiefState) {

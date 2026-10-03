@@ -1,5 +1,8 @@
 package com.shai.riven.ui.arcade.cosmic
 
+import java.util.ArrayList
+import java.util.Collections
+
 const val COSMIC_CARD_COUNT = 52
 const val COSMIC_STARTING_HAND_SIZE = 7
 const val COSMIC_CAUGHT_CHEAT_PENALTY = 2
@@ -87,6 +90,7 @@ enum class CosmicEventType {
     DEAL_STARTED,
     CARD_PLAYED,
     CARD_DRAWN,
+    NO_CARD_PASS,
     ECLIPSE_PLAYED,
     DOUBLE_TROUBLE_PLAYED,
     STARS_REWRITTEN,
@@ -413,7 +417,7 @@ object CosmicMischiefEngine {
         topDiscard = state.topDiscard,
         activeColor = state.activeColor,
         drawCount = state.drawPile.size,
-        handCounts = CosmicPlayer.entries.map { state.hand(it).size },
+        handCounts = immutableSnapshot(CosmicPlayer.entries.map { state.hand(it).size }),
         tradeAvailable = state.pendingCheat == null && state.pendingTrade == null && !state.tradeUsedThisTurn,
         visibleTell = state.pendingCheat?.let { cheat ->
             CosmicTellObservation(
@@ -428,13 +432,13 @@ object CosmicMischiefEngine {
                 offeredCard = requireNotNull(CosmicCard.fromId(offer.offeredCardId)),
             )
         },
-        grudges = state.grudges,
-        recentEvents = state.events,
+        grudges = immutableSnapshot(state.grudges),
+        recentEvents = immutableSnapshot(state.events),
     )
 
     fun opponentObservation(state: CosmicMischiefState): CosmicOpponentObservation = CosmicOpponentObservation(
         public = publicObservation(state),
-        ownHand = state.hand(CosmicPlayer.RIVEN),
+        ownHand = immutableSnapshot(state.hand(CosmicPlayer.RIVEN)),
     )
 
     fun isPlayable(
@@ -579,14 +583,15 @@ object CosmicMischiefEngine {
             turn = caller,
             tradeUsedThisTurn = false,
         )
-        val penalty = drawCards(caught, cheat.accused, COSMIC_CAUGHT_CHEAT_PENALTY) ?: return null
+        val penalty = drawCards(caught, cheat.accused, COSMIC_CAUGHT_CHEAT_PENALTY)
         caught = penalty.first.copy(turn = caller)
+        val penaltyText = availableDrawText(penalty.second.size, COSMIC_CAUGHT_CHEAT_PENALTY, "penalty")
         val event = CosmicEvent(
             type = CosmicEventType.CHEAT_CAUGHT,
             actor = caller,
             target = cheat.accused,
             cardId = extra.id,
-            message = "Caught: the extra card returned and ${cheat.accused.displayName} drew $COSMIC_CAUGHT_CHEAT_PENALTY. The primary effect was cancelled.",
+            message = "Caught: the extra card returned and ${cheat.accused.displayName} $penaltyText. The primary effect was cancelled.",
         )
         caught = caught.copy(events = appendEvents(caught.events, listOf(event)))
         return caught to listOf(event)
@@ -612,12 +617,13 @@ object CosmicMischiefEngine {
         state: CosmicMischiefState,
         actor: CosmicPlayer,
     ): Pair<CosmicMischiefState, List<CosmicEvent>>? {
-        val penalty = drawCards(state, actor, COSMIC_FALSE_CALLOUT_PENALTY) ?: return null
+        val penalty = drawCards(state, actor, COSMIC_FALSE_CALLOUT_PENALTY)
+        val penaltyText = availableDrawText(penalty.second.size, COSMIC_FALSE_CALLOUT_PENALTY, "penalty")
         val event = CosmicEvent(
             type = CosmicEventType.FALSE_CALLOUT,
             actor = actor,
             target = actor.other,
-            message = "False callout: ${actor.displayName} drew $COSMIC_FALSE_CALLOUT_PENALTY and yielded the turn.",
+            message = "False callout: ${actor.displayName} $penaltyText and yielded the turn.",
         )
         val updated = penalty.first.copy(
             turn = actor.other,
@@ -640,7 +646,7 @@ object CosmicMischiefEngine {
             actor = actor,
             target = actor.other,
             cardId = offered.id,
-            message = "${actor.displayName} offered ${offered.spokenName} for one blind chosen return card.",
+            message = "${actor.displayName} made a face-up offer of ${offered.spokenName}; the responder may privately choose one unseen return card.",
         )
         return state.copy(
             pendingTrade = CosmicTradeOffer(actor, offered.id),
@@ -717,17 +723,39 @@ object CosmicMischiefEngine {
                     },
                     betrayedBargains = state.betrayedBargains + 1,
                 )
-                val consolation = drawCards(transferred, offer.proposer, 1) ?: return null
+                val consolation = drawCards(transferred, offer.proposer, 1)
+                val consolationText = if (consolation.second.isEmpty()) {
+                    "no consolation card was available"
+                } else {
+                    "${offer.proposer.displayName} drew one consolation card"
+                }
                 val event = CosmicEvent(
                     type = CosmicEventType.BARGAIN_BETRAYED,
                     actor = actor,
                     target = offer.proposer,
                     cardId = offered.id,
-                    message = "Bargain betrayed: ${actor.displayName} kept ${offered.spokenName}; ${offer.proposer.displayName} drew one consolation card and gained a grudge.",
+                    message = "Bargain betrayed: ${actor.displayName} kept the offered ${offered.spokenName}; $consolationText and ${offer.proposer.displayName} gained a grudge.",
                 )
+                val proposerEmptied = consolation.first.hand(offer.proposer).isEmpty()
+                val winEvent = if (proposerEmptied) {
+                    CosmicEvent(
+                        type = CosmicEventType.GAME_WON,
+                        actor = offer.proposer,
+                        target = actor,
+                        message = "${offer.proposer.displayName} emptied their hand through the bargain and won Cosmic Mischief.",
+                    )
+                } else {
+                    null
+                }
+                val allEvents = listOfNotNull(event, winEvent)
                 consolation.first.copy(
-                    events = appendEvents(consolation.first.events, listOf(event)),
-                ) to listOf(event)
+                    status = when {
+                        !proposerEmptied -> consolation.first.status
+                        offer.proposer == CosmicPlayer.SHAI -> CosmicStatus.SHAI_WON
+                        else -> CosmicStatus.RIVEN_WON
+                    },
+                    events = appendEvents(consolation.first.events, allEvents),
+                ) to allEvents
             }
         }
     }
@@ -736,11 +764,16 @@ object CosmicMischiefEngine {
         state: CosmicMischiefState,
         actor: CosmicPlayer,
     ): Pair<CosmicMischiefState, List<CosmicEvent>>? {
-        val draw = drawCards(state, actor, 1) ?: return null
+        val draw = drawCards(state, actor, 1)
+        val message = if (draw.second.isEmpty()) {
+            "${actor.displayName} had no card available to draw, so they passed and yielded the turn."
+        } else {
+            "${actor.displayName} drew one card and yielded the turn."
+        }
         val event = CosmicEvent(
-            type = CosmicEventType.CARD_DRAWN,
+            type = if (draw.second.isEmpty()) CosmicEventType.NO_CARD_PASS else CosmicEventType.CARD_DRAWN,
             actor = actor,
-            message = "${actor.displayName} drew one card and yielded the turn.",
+            message = message,
         )
         return draw.first.copy(
             turn = actor.other,
@@ -796,14 +829,14 @@ object CosmicMischiefEngine {
                 )
             }
             CosmicCardKind.DoubleTrouble -> {
-                val penalty = drawCards(resolved, actor.other, 2) ?: return null
+                val penalty = drawCards(resolved, actor.other, 2)
                 resolved = penalty.first.copy(turn = actor)
                 effectEvents += CosmicEvent(
                     type = CosmicEventType.DOUBLE_TROUBLE_PLAYED,
                     actor = actor,
                     target = actor.other,
                     cardId = effectCard.id,
-                    message = "Double Trouble made ${actor.other.displayName} draw two and lose the turn.",
+                    message = "Double Trouble made ${actor.other.displayName} ${availableDrawText(penalty.second.size, 2, "required")} and lose the turn.",
                 )
             }
         }
@@ -816,13 +849,13 @@ object CosmicMischiefEngine {
         source: CosmicMischiefState,
         player: CosmicPlayer,
         count: Int,
-    ): Pair<CosmicMischiefState, List<CosmicCard>>? {
+    ): Pair<CosmicMischiefState, List<CosmicCard>> {
         var state = source
         val drawn = mutableListOf<CosmicCard>()
-        repeat(count) {
+        while (drawn.size < count) {
             if (state.drawPile.isEmpty()) {
                 val protectedCount = if (state.pendingCheat == null) 1 else 2
-                if (state.discardPile.size <= protectedCount) return null
+                if (state.discardPile.size <= protectedCount) break
                 val recyclable = state.discardPile.dropLast(protectedCount)
                 val protected = state.discardPile.takeLast(protectedCount)
                 val shuffled = shuffle(recyclable, state.randomState)
@@ -832,7 +865,7 @@ object CosmicMischiefEngine {
                     randomState = shuffled.second,
                 )
             }
-            val card = state.drawPile.lastOrNull() ?: return null
+            val card = state.drawPile.lastOrNull() ?: break
             state = state.copy(
                 drawPile = state.drawPile.dropLast(1),
                 hands = replaceHand(
@@ -844,6 +877,12 @@ object CosmicMischiefEngine {
             drawn += card
         }
         return state to drawn
+    }
+
+    private fun availableDrawText(actual: Int, requested: Int, kind: String): String = when {
+        actual == requested -> "drew $requested $kind ${if (requested == 1) "card" else "cards"}"
+        actual == 0 -> "had no $kind card available to draw"
+        else -> "drew $actual of $requested available $kind cards"
     }
 
     private fun cardEvent(
@@ -872,6 +911,9 @@ object CosmicMischiefEngine {
     ): List<List<CosmicCard>> = hands.mapIndexed { index, cards ->
         if (index == player.ordinal) replacement else cards
     }
+
+    private fun <T> immutableSnapshot(values: List<T>): List<T> =
+        Collections.unmodifiableList(ArrayList(values))
 
     private fun appendEvents(
         existing: List<CosmicEvent>,

@@ -104,7 +104,8 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("CHEAT").assertIsDisplayed()
         composeRule.onNodeWithText("CALL BLUFF").assertIsDisplayed()
         composeRule.onNodeWithText("OFFLINE RIVAL • NOT LIVE RIVEN").assertIsDisplayed()
-        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(8)
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(7)
+        composeRule.onNodeWithContentDescription("Face-down draw pile").assertIsDisplayed()
     }
 
     @Test
@@ -350,11 +351,9 @@ class ArcadeCompactActivityScreenshotTest {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
         composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
-        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(8)
-        repeat(5) {
-            composeRule.onNodeWithTag("cosmic_mischief_board").performTouchInput { swipeUp() }
-            composeRule.waitForIdle()
-        }
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(7)
+        composeRule.onNodeWithContentDescription("Face-down draw pile").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_table_settings").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("FRESH GAME").assertIsDisplayed()
         writeScreenshot("shared-card-table-compact.png")
     }
@@ -452,10 +451,7 @@ class ArcadeCompactLayoutTest {
         composeRule.onNodeWithTag("cosmic_user_card_${firstCard.id}")
             .assertWidthIsAtLeast(64.dp)
             .assertHeightIsAtLeast(96.dp)
-        repeat(5) {
-            composeRule.onNodeWithTag("cosmic_mischief_board").performTouchInput { swipeUp() }
-            composeRule.waitForIdle()
-        }
+        composeRule.onNodeWithTag("cosmic_table_settings").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("FRESH GAME").assertIsDisplayed()
     }
 

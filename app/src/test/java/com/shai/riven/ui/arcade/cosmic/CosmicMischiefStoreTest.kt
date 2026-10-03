@@ -76,4 +76,37 @@ class CosmicMischiefStoreTest {
         assertEquals(listOf(5, 2), store.loadSession()?.game?.grudges)
         assertEquals(CosmicMischiefSettings(largeCardText = true), store.loadSettings())
     }
+
+    @Test
+    fun exhaustedButValidTablePersistsWithoutInventingOrDroppingCards() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context,
+            "cosmic-exhausted-${System.nanoTime()}",
+        )
+        val shai = requireNotNull(CosmicCard.fromId(11))
+        val top = requireNotNull(CosmicCard.fromId(5))
+        val session = CosmicMischiefSession(
+            CosmicMischiefState(
+                drawPile = emptyList(),
+                discardPile = listOf(top),
+                hands = listOf(
+                    listOf(shai),
+                    CosmicCard.fullDeck.filterNot { it.id == shai.id || it.id == top.id },
+                ),
+                activeColor = requireNotNull(top.color),
+                turn = CosmicPlayer.SHAI,
+                dealSeed = 303L,
+                randomState = 404L,
+            ),
+        )
+        require(CosmicMischiefEngine.isValid(session.game))
+
+        store.saveSession(session)
+        val restored = requireNotNull(store.loadSession())
+
+        assertEquals(session, restored)
+        assertTrue(restored.game.drawPile.isEmpty())
+        assertEquals(COSMIC_CARD_COUNT, restored.game.discardPile.size + restored.game.hands.sumOf { it.size })
+    }
 }

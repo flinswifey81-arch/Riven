@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import com.shai.riven.ui.theme.RivenTheme
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -48,7 +49,8 @@ class CosmicMischiefComposeTest {
 
         composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
         composeRule.onNodeWithText("Offline rival • NOT LIVE RIVEN • 7 CARDS").assertIsDisplayed()
-        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(8)
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(7)
+        composeRule.onNodeWithContentDescription("Face-down draw pile").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Play selected Cosmic Mischief card").assertIsNotEnabled()
         composeRule.onNodeWithTag("cosmic_user_card_${firstCard.id}")
             .performScrollTo()
@@ -60,6 +62,22 @@ class CosmicMischiefComposeTest {
         composeRule.onNodeWithText("PROVISIONAL DEFAULTS", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "DECK: 52 = 4 colors x (0-9 + 1 Eclipse skip + 1 Double Trouble draw 2) + 4 Rewrite the Stars wilds",
+            substring = true,
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "primary stays discarded but its effect is cancelled",
+            substring = true,
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "TRADE: face-up offered card for one return chosen privately by the responder",
+            substring = true,
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "BETRAY: responder keeps the offered gift and proposer draws 1 available consolation card",
+            substring = true,
+        ).assertIsDisplayed()
     }
 
     @Test
@@ -147,7 +165,7 @@ class CosmicMischiefComposeTest {
     }
 
     @Test
-    fun invalidInjectedOpponentActionIsRejectedWithoutChangingAuthoritativeState() {
+    fun invalidInjectedOpponentActionUsesOneDeterministicValidatedFallback() {
         val initial = CosmicMischiefSession(
             rigState(
                 shaiIds = listOf(1, 22),
@@ -177,11 +195,53 @@ class CosmicMischiefComposeTest {
                 )
             }
         }
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            requireNotNull(store.savedSession).game.revision > initial.game.revision
+        }
+
+        val recovered = requireNotNull(store.savedSession).game
+        assertEquals(CosmicPlayer.SHAI, CosmicMischiefEngine.decisionPlayer(recovered))
+        assertTrue(recovered != initial.game)
+        composeRule.onNodeWithTag("cosmic_notice")
+            .assertTextContains("Offline fallback:", substring = true)
+    }
+
+    @Test
+    fun confirmedFreshGameCancelsBlockingOpponentAndDropsItsStaleAction() {
+        val initial = CosmicMischiefSession(
+            rigState(
+                shaiIds = listOf(1, 22),
+                rivenIds = listOf(3, 31),
+                topId = 5,
+                turn = CosmicPlayer.RIVEN,
+            ),
+        )
+        val store = FakeCosmicStore(initial)
+        val blocking = IgnoringBlockingOpponent()
+        composeRule.setContent {
+            RivenTheme {
+                CosmicMischiefGame(
+                    externallyWaiting = false,
+                    storeOverride = store,
+                    opponentOverride = blocking,
+                )
+            }
+        }
+        composeRule.waitUntil(timeoutMillis = 5_000) { blocking.actionCalls.get() == 1 }
+
+        composeRule.onNodeWithText("FRESH GAME").performScrollTo().performClick()
+        composeRule.onNodeWithText("START FRESH").performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            requireNotNull(store.savedSession).game.gameNumber == initial.game.gameNumber + 1
+        }
+        val fresh = requireNotNull(store.savedSession)
+        Thread.sleep(COSMIC_OPPONENT_ACTION_TIMEOUT_MILLIS + 250L)
         composeRule.waitForIdle()
 
-        assertEquals(initial, store.savedSession)
-        composeRule.onNodeWithTag("cosmic_notice")
-            .assertTextContains("not legal", substring = true)
+        assertEquals(fresh, store.savedSession)
+        assertEquals(0L, fresh.game.revision)
+        assertEquals(CosmicPlayer.SHAI, fresh.game.turn)
+        assertEquals(1, blocking.actionCalls.get())
     }
 
     private fun rigState(
@@ -216,6 +276,29 @@ private object PassiveOpponent : CosmicOpponentAgent {
         observation: CosmicPublicObservation,
         event: CosmicEvent,
     ): String = event.message
+}
+
+private class IgnoringBlockingOpponent : CosmicOpponentAgent {
+    override val displayName: String = "Blocking test opponent"
+    val actionCalls = AtomicInteger()
+
+    override fun chooseAction(observation: CosmicOpponentObservation): CosmicAction {
+        actionCalls.incrementAndGet()
+        val deadline = System.nanoTime() + 700_000_000L
+        while (System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(10L)
+            } catch (_: InterruptedException) {
+                // Deliberately ignore interruption to prove stale work cannot commit after a fresh game.
+            }
+        }
+        return CosmicAction.DrawCard
+    }
+
+    override fun commentary(
+        observation: CosmicPublicObservation,
+        event: CosmicEvent,
+    ): String = "Stale commentary must not appear."
 }
 
 private class FakeCosmicStore(
