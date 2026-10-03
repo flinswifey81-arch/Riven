@@ -47,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -80,7 +81,9 @@ import com.shai.riven.R
 import com.shai.riven.ui.arcade.comet.CometTrailGame
 import com.shai.riven.ui.arcade.cosmic.CosmicMischiefGame
 import com.shai.riven.ui.arcade.cosmic.CosmicMischiefStore
+import com.shai.riven.ui.arcade.cosmic.COSMIC_MISCHIEF_PROVISIONAL_RULES
 import com.shai.riven.ui.arcade.cosmic.CosmicOpponentAgent
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentTurnGate
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireGame
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireStore
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
@@ -152,6 +155,18 @@ fun ArcadeExperience(
     cosmicOpponentOverride: CosmicOpponentAgent? = null,
 ) {
     val lobbyListState = rememberLazyListState()
+    val cosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    val guardedOnAction = remember(onAction, state.selectedGameId, cosmicOpponentTurnGate) {
+        { action: ArcadeAction ->
+            if (
+                action == ArcadeAction.OpenConversation &&
+                state.selectedGame == ArcadeGame.RIVEN_CARD_TABLE
+            ) {
+                cosmicOpponentTurnGate.pause()
+            }
+            onAction(action)
+        }
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -163,20 +178,21 @@ fun ArcadeExperience(
     ) {
         val selectedGame = state.selectedGame
         if (selectedGame == null) {
-            ArcadeLobby(state = state, listState = lobbyListState, onAction = onAction)
+            ArcadeLobby(state = state, listState = lobbyListState, onAction = guardedOnAction)
         } else {
             ArcadeGameScreen(
                 game = selectedGame,
                 state = state,
-                onAction = onAction,
+                onAction = guardedOnAction,
                 solitaireStoreOverride = solitaireStoreOverride,
                 cosmicStoreOverride = cosmicStoreOverride,
                 cosmicOpponentOverride = cosmicOpponentOverride,
+                cosmicOpponentTurnGate = cosmicOpponentTurnGate,
             )
         }
 
         if (state.conversationOpen) {
-            ConversationOverlay(state = state, onAction = onAction)
+            ConversationOverlay(state = state, onAction = guardedOnAction)
         }
     }
 }
@@ -345,6 +361,7 @@ private fun ArcadeGameScreen(
     solitaireStoreOverride: MidnightSolitaireStore?,
     cosmicStoreOverride: CosmicMischiefStore?,
     cosmicOpponentOverride: CosmicOpponentAgent?,
+    cosmicOpponentTurnGate: CosmicOpponentTurnGate,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -361,6 +378,7 @@ private fun ArcadeGameScreen(
                 solitaireStoreOverride = solitaireStoreOverride,
                 cosmicStoreOverride = cosmicStoreOverride,
                 cosmicOpponentOverride = cosmicOpponentOverride,
+                cosmicOpponentTurnGate = cosmicOpponentTurnGate,
             )
         } else if (useScrollableLayout) {
             LazyColumn(
@@ -396,6 +414,7 @@ private fun ArcadeGameScreen(
                         solitaireStoreOverride = solitaireStoreOverride,
                         cosmicStoreOverride = cosmicStoreOverride,
                         cosmicOpponentOverride = cosmicOpponentOverride,
+                        cosmicOpponentTurnGate = cosmicOpponentTurnGate,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(compactBoardHeight(game)),
@@ -436,6 +455,7 @@ private fun ArcadeGameScreen(
                     solitaireStoreOverride = solitaireStoreOverride,
                     cosmicStoreOverride = cosmicStoreOverride,
                     cosmicOpponentOverride = cosmicOpponentOverride,
+                    cosmicOpponentTurnGate = cosmicOpponentTurnGate,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -460,6 +480,7 @@ private fun CompactPlayableGameScreen(
     solitaireStoreOverride: MidnightSolitaireStore?,
     cosmicStoreOverride: CosmicMischiefStore?,
     cosmicOpponentOverride: CosmicOpponentAgent?,
+    cosmicOpponentTurnGate: CosmicOpponentTurnGate,
 ) {
     Column(
         modifier = Modifier
@@ -506,6 +527,7 @@ private fun CompactPlayableGameScreen(
             solitaireStoreOverride = solitaireStoreOverride,
             cosmicStoreOverride = cosmicStoreOverride,
             cosmicOpponentOverride = cosmicOpponentOverride,
+            cosmicOpponentTurnGate = cosmicOpponentTurnGate,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -522,6 +544,7 @@ private fun GameBoardCard(
     solitaireStoreOverride: MidnightSolitaireStore? = null,
     cosmicStoreOverride: CosmicMischiefStore? = null,
     cosmicOpponentOverride: CosmicOpponentAgent? = null,
+    cosmicOpponentTurnGate: CosmicOpponentTurnGate,
 ) {
     Card(
         modifier = modifier,
@@ -552,6 +575,7 @@ private fun GameBoardCard(
                 compactLayout = compactGameLayout,
                 storeOverride = cosmicStoreOverride,
                 opponentOverride = cosmicOpponentOverride,
+                opponentTurnGateOverride = cosmicOpponentTurnGate,
             )
         }
     }
@@ -568,7 +592,7 @@ private fun PendingRulesLabel(
         color = MistBlue.copy(alpha = 0.8f),
         style = MaterialTheme.typography.bodySmall,
         textAlign = TextAlign.Center,
-        maxLines = if (expanded) Int.MAX_VALUE else 2,
+        maxLines = if (expanded || game == ArcadeGame.RIVEN_CARD_TABLE) Int.MAX_VALUE else 2,
         overflow = TextOverflow.Ellipsis,
     )
 }
@@ -1533,7 +1557,7 @@ private fun PlayingCard(
     }
 }
 
-private fun pendingRulesText(game: ArcadeGame): String = when (game) {
+internal fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.STACKER ->
         "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
     ArcadeGame.KLONDIKE ->
@@ -1543,8 +1567,7 @@ private fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.WRAPPING_SNAKE ->
         "Playable default for review • Predicted self-contact pauses before impact so another safe direction can be chosen without losing progress."
     ArcadeGame.RIVEN_CARD_TABLE ->
-        "Playable with an offline deterministic rival • Provisional 52-card deck, draw-2 caught-cheat penalty, " +
-            "draw-1 false callout, and blind trade protocol; live Riven remains unconnected."
+        COSMIC_MISCHIEF_PROVISIONAL_RULES
 }
 
 @Preview(name = "Arcade lobby", widthDp = 393, heightDp = 852, showBackground = true)

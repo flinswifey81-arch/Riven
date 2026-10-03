@@ -82,6 +82,7 @@ fun CosmicMischiefGame(
     compactLayout: Boolean = false,
     storeOverride: CosmicMischiefStore? = null,
     opponentOverride: CosmicOpponentAgent? = null,
+    opponentTurnGateOverride: CosmicOpponentTurnGate? = null,
     initialSeed: Long? = null,
 ) {
     val context = LocalContext.current
@@ -89,6 +90,8 @@ fun CosmicMischiefGame(
     val opponent = opponentOverride ?: remember { DeterministicCosmicOpponentAgent() }
     val opponentExecution = remember { CosmicOpponentExecution() }
     val opponentRunner = remember(opponentExecution) { CosmicOpponentTurnRunner(opponentExecution) }
+    val localOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    val opponentTurnGate = opponentTurnGateOverride ?: localOpponentTurnGate
     DisposableEffect(opponentExecution) {
         onDispose { opponentExecution.close() }
     }
@@ -144,25 +147,30 @@ fun CosmicMischiefGame(
         externallyWaiting,
         opponent,
     ) {
+        opponentTurnGate.updatePaused(externallyWaiting)
         if (
             !externallyWaiting &&
             state.status == CosmicStatus.PLAYING &&
             CosmicMischiefEngine.decisionPlayer(state) == CosmicPlayer.RIVEN
         ) {
+            val turnPermit = opponentTurnGate.acquirePermit() ?: return@LaunchedEffect
             val capturedSession = sessionHolder.value
             val outcome = opponentRunner.run(capturedSession, opponent) ?: return@LaunchedEffect
-            if (
-                sessionHolder.value !== capturedSession ||
-                externallyWaiting ||
-                CosmicMischiefEngine.decisionPlayer(sessionHolder.value.game) != CosmicPlayer.RIVEN
-            ) {
-                return@LaunchedEffect
-            }
-            session = outcome.actionResult.session
-            store.saveSession(outcome.actionResult.session)
-            selectedCardId = null
-            cheatPrimaryId = null
-            notice = outcome.notice
+            val committedSession = opponentTurnGate.commitIfPermitted(turnPermit) {
+                if (
+                    sessionHolder.value !== capturedSession ||
+                    CosmicMischiefEngine.decisionPlayer(sessionHolder.value.game) != CosmicPlayer.RIVEN
+                ) {
+                    null
+                } else {
+                    session = outcome.actionResult.session
+                    selectedCardId = null
+                    cheatPrimaryId = null
+                    notice = outcome.notice
+                    outcome.actionResult.session
+                }
+            } ?: return@LaunchedEffect
+            store.saveSession(committedSession)
         }
     }
 
@@ -539,13 +547,7 @@ private fun CosmicMischiefLayout(
             )
         }
         Text(
-            "PROVISIONAL DEFAULTS • DECK: 52 = 4 colors x (0-9 + 1 Eclipse skip + 1 Double Trouble draw 2) " +
-                "+ 4 Rewrite the Stars wilds • CAUGHT CHEAT: extra returns, cheater draws 2 available " +
-                "penalty cards, primary stays discarded but its effect is cancelled • FALSE CALLOUT: caller " +
-                "draws 1 available penalty card and yields • TRADE: face-up offered card for one return " +
-                "chosen privately by the responder; refuse, honor, or betray • BETRAY: responder keeps the " +
-                "offered gift and proposer draws 1 available consolation card • EMPTY DRAW: recycle all but " +
-                "protected top discard cards; if none are available, the draw is waived and the decision or turn resolves",
+            COSMIC_MISCHIEF_PROVISIONAL_RULES,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp),
