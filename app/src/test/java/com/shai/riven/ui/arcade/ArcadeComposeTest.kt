@@ -41,6 +41,11 @@ import com.shai.riven.ui.arcade.solitaire.SharedPreferencesMidnightSolitaireStor
 import com.shai.riven.ui.arcade.solitaire.SolitaireCard
 import com.shai.riven.ui.arcade.solitaire.SolitaireSuit
 import com.shai.riven.ui.arcade.solitaire.SolitaireTableauCard
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefEngine
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSession
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSettings
+import com.shai.riven.ui.arcade.cosmic.CosmicPlayer
+import com.shai.riven.ui.arcade.cosmic.SharedPreferencesCosmicMischiefStore
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
@@ -75,12 +80,12 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Four solo tables are playable • Cosmic Mischief and live Riven replies remain unconnected.",
+            "Five tables are playable • Cosmic Mischief uses an offline rival; live Riven remains unconnected.",
         ).assertIsDisplayed()
     }
 
     @Test
-    fun sharedTableShowsHiddenOpponentHandUserHandAndApprovedControls() {
+    fun sharedTableRunsOfflineWithHiddenOpponentHandAndApprovedControls() {
         composeRule.setContent {
             RivenTheme {
                 ArcadeExperience(
@@ -90,36 +95,16 @@ class ArcadeComposeTest {
             }
         }
 
-        composeRule.onNodeWithText("RIVEN • 7 CARDS").assertIsDisplayed()
-        composeRule.onNodeWithText("YOUR HAND").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+        composeRule.onNodeWithText("Offline rival • NOT LIVE RIVEN • 7 CARDS").assertIsDisplayed()
+        composeRule.onNodeWithText("YOUR HAND • 7 CARDS").assertIsDisplayed()
+        composeRule.onNodeWithText("PLAY").assertIsDisplayed()
+        composeRule.onNodeWithText("DRAW").assertIsDisplayed()
         composeRule.onNodeWithText("TRADE").assertIsDisplayed()
         composeRule.onNodeWithText("CHEAT").assertIsDisplayed()
-        composeRule.onNodeWithText("CALL OUT").assertIsDisplayed()
-        composeRule.onNodeWithText("Demo hand • no engine").assertIsDisplayed()
-        composeRule.onNodeWithText("DEMO COMMENTARY").assertIsDisplayed()
-        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
-        composeRule.onAllNodesWithContentDescription("Face-down card").assertCountEquals(8)
-        composeRule.onNodeWithContentDescription("Eclipse. Skip the next turn.").assertIsDisplayed()
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(4)
-        composeRule.onNodeWithContentDescription(
-            "Double Trouble. The next player draws two cards.",
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_double-trouble_primary",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_double-trouble_effect",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
-        composeRule.onNodeWithContentDescription(
-            "Rewrite the Stars. Choose the next color.",
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_rewrite-the-stars_effect",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
+        composeRule.onNodeWithText("CALL BLUFF").assertIsDisplayed()
+        composeRule.onNodeWithText("OFFLINE RIVAL • NOT LIVE RIVEN").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(8)
     }
 
     @Test
@@ -248,7 +233,7 @@ class ArcadeActivityScreenshotTest {
         writeScreenshot("arcade-lobby.png")
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
-        composeRule.onNodeWithText("SHARED TABLE").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
         writeScreenshot("shared-card-table.png")
     }
 
@@ -315,7 +300,7 @@ class ArcadeActivityScreenshotTest {
     fun returningFromGamePreservesTheLobbyScrollPosition() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
-        composeRule.onNodeWithText("SHARED TABLE").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
 
         composeRule.runOnIdle {
             composeRule.activity.onBackPressedDispatcher.onBackPressed()
@@ -364,17 +349,13 @@ class ArcadeCompactActivityScreenshotTest {
     fun rendersCompactSharedCardTableToInspectablePng() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
-        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(2)
-        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
-        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
-        composeRule.onNodeWithContentDescription(
-            "Rewrite the Stars. Choose the next color.",
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_rewrite-the-stars_effect",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(8)
+        repeat(5) {
+            composeRule.onNodeWithTag("cosmic_mischief_board").performTouchInput { swipeUp() }
+            composeRule.waitForIdle()
+        }
+        composeRule.onNodeWithText("FRESH GAME").assertIsDisplayed()
         writeScreenshot("shared-card-table-compact.png")
     }
 
@@ -441,6 +422,42 @@ class ArcadeCompactActivityScreenshotTest {
 class ArcadeCompactLayoutTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun shortLargeTextCosmicMischiefKeepsHandAndFreshGameReachable() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-compact-cosmic-${System.nanoTime()}",
+        )
+        val session = CosmicMischiefSession(CosmicMischiefEngine.newGame(seed = 420L))
+        store.saveSession(session)
+        store.saveSettings(CosmicMischiefSettings(largeCardText = true))
+        val firstCard = session.game.hand(CosmicPlayer.SHAI).first()
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(
+                        state = ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
+                        onAction = {},
+                        cosmicStoreOverride = store,
+                    )
+                }
+            }
+        }
+
+        composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_user_hand").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_user_card_${firstCard.id}")
+            .assertWidthIsAtLeast(64.dp)
+            .assertHeightIsAtLeast(96.dp)
+        repeat(5) {
+            composeRule.onNodeWithTag("cosmic_mischief_board").performTouchInput { swipeUp() }
+            composeRule.waitForIdle()
+        }
+        composeRule.onNodeWithText("FRESH GAME").assertIsDisplayed()
+    }
 
     @Test
     fun shortLargeTextMidnightSolitaireCanReachTheLastCardInALongTableau() {
@@ -579,41 +596,6 @@ class ArcadeCompactLayoutTest {
             .assertWidthIsAtLeast(48.dp)
         composeRule.onNodeWithContentDescription("Open conversation with Riven").assertIsDisplayed()
     }
-
-    @Test
-    fun shortLargeTextGameLayoutScrollsFromHeaderThroughControlsAndRules() {
-        composeRule.setContent {
-            RivenTheme {
-                WithFontScale(1.5f) {
-                    ArcadeExperience(
-                        state = ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
-                        onAction = {},
-                    )
-                }
-            }
-        }
-
-        composeRule.onNodeWithTag("arcade_game_scroll").assertIsDisplayed()
-        composeRule.onNodeWithText("Cosmic Mischief").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Quiet commentary").assertIsDisplayed()
-        composeRule.onNodeWithText("CALL OUT").performScrollTo().assertIsDisplayed()
-        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
-        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
-        composeRule.onNodeWithContentDescription(
-            "Rewrite the Stars. Choose the next color.",
-        ).assertIsDisplayed()
-        assertTrue(
-            composeRule.onAllNodesWithContentDescription(
-                "Double Trouble. The next player draws two cards.",
-            ).fetchSemanticsNodes().isNotEmpty(),
-        )
-        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(3)
-        composeRule.onNodeWithText(
-            "Preview only • Deck, penalties, challenges, trade protocol, and hidden-information engine remain pending.",
-        ).assertIsDisplayed()
-    }
-
 
     @Test
     fun compactLargeTextLobbyKeepsApprovedLongNamesReachable() {

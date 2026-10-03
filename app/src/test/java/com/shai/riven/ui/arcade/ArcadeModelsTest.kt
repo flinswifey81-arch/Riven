@@ -28,6 +28,7 @@ class ArcadeModelsTest {
                 ArcadeGame.KLONDIKE,
                 ArcadeGame.HEART_MATCH,
                 ArcadeGame.WRAPPING_SNAKE,
+                ArcadeGame.RIVEN_CARD_TABLE,
             ),
             ArcadeGame.entries.filter(ArcadeGame::hasPlayableEngine),
         )
