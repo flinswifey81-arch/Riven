@@ -87,6 +87,12 @@ import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.comet.CometTrailGame
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefGame
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefStore
+import com.shai.riven.ui.arcade.cosmic.COSMIC_MISCHIEF_PROVISIONAL_RULES
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentAgent
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentExecution
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentTurnGate
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireGame
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireStore
 import com.shai.riven.ui.arcade.spire.CelestialSpireGame
@@ -156,11 +162,20 @@ fun ArcadeApp(
     conversationHost: ArcadeConversationHost? = null,
     onObservation: (ArcadeGameObservation) -> Unit = {},
     onObservationCleared: () -> Unit = {},
+    cosmicStoreOverride: CosmicMischiefStore? = null,
+    cosmicOpponentOverride: CosmicOpponentAgent? = null,
+    cosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
+    cosmicOpponentTurnGateOverride: CosmicOpponentTurnGate? = null,
 ) {
     var state by rememberSaveable(stateSaver = ArcadeUiStateSaver) {
         mutableStateOf(ArcadeUiState())
     }
+    val localCosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    val cosmicOpponentTurnGate = cosmicOpponentTurnGateOverride ?: localCosmicOpponentTurnGate
     val dispatch: (ArcadeAction) -> Unit = { action ->
+        if (actionPausesOrLeavesCosmicTable(state, action)) {
+            cosmicOpponentTurnGate.pause()
+        }
         state = reduceArcadeState(state, action)
     }
     val commentaryGate = remember { ArcadeCommentaryGate() }
@@ -188,6 +203,10 @@ fun ArcadeApp(
         conversationHost = conversationHost,
         onObservation = publishObservation,
         modifier = modifier,
+        cosmicStoreOverride = cosmicStoreOverride,
+        cosmicOpponentOverride = cosmicOpponentOverride,
+        cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
+        cosmicOpponentTurnGateOverride = cosmicOpponentTurnGate,
     )
 }
 
@@ -200,8 +219,22 @@ fun ArcadeExperience(
     solitaireStoreOverride: MidnightSolitaireStore? = null,
     conversationHost: ArcadeConversationHost? = null,
     onObservation: (ArcadeGameObservation) -> Unit = {},
+    cosmicStoreOverride: CosmicMischiefStore? = null,
+    cosmicOpponentOverride: CosmicOpponentAgent? = null,
+    cosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
+    cosmicOpponentTurnGateOverride: CosmicOpponentTurnGate? = null,
 ) {
     val lobbyListState = rememberLazyListState()
+    val localCosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    val cosmicOpponentTurnGate = cosmicOpponentTurnGateOverride ?: localCosmicOpponentTurnGate
+    val guardedOnAction = remember(onAction, state, cosmicOpponentTurnGate) {
+        { action: ArcadeAction ->
+            if (actionPausesOrLeavesCosmicTable(state, action)) {
+                cosmicOpponentTurnGate.pause()
+            }
+            onAction(action)
+        }
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -216,29 +249,43 @@ fun ArcadeExperience(
             ArcadeLobby(
                 state = state,
                 listState = lobbyListState,
-                onAction = onAction,
+                onAction = guardedOnAction,
                 portraitResourceId = portraitResourceId,
             )
         } else {
             ArcadeGameScreen(
                 game = selectedGame,
                 state = state,
-                onAction = onAction,
+                onAction = guardedOnAction,
                 portraitResourceId = portraitResourceId,
                 solitaireStoreOverride = solitaireStoreOverride,
                 onObservation = onObservation,
+                cosmicStoreOverride = cosmicStoreOverride,
+                cosmicOpponentOverride = cosmicOpponentOverride,
+                cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
+                cosmicOpponentTurnGate = cosmicOpponentTurnGate,
             )
         }
 
         if (state.conversationOpen) {
             ConversationOverlay(
                 state = state,
-                onAction = onAction,
+                onAction = guardedOnAction,
                 portraitResourceId = portraitResourceId,
                 host = conversationHost,
             )
         }
     }
+}
+
+private fun actionPausesOrLeavesCosmicTable(
+    state: ArcadeUiState,
+    action: ArcadeAction,
+): Boolean {
+    if (state.selectedGame != ArcadeGame.RIVEN_CARD_TABLE) return false
+    val nextState = reduceArcadeState(state, action)
+    return nextState.selectedGame != ArcadeGame.RIVEN_CARD_TABLE ||
+        nextState.interactionHold != ArcadeInteractionHold.NONE
 }
 
 @Composable
@@ -322,9 +369,11 @@ private fun ArcadeLobby(
                                 "I will stay quiet, but you can tap me whenever you want to chat."
                             } else {
                                 if (portraitResourceId == null) {
-                                    "Four solo tables are ready. Tap this card to open conversation."
+                                    "Five tables are ready. Cosmic Mischief uses an offline rival until " +
+                                        "live Riven is connected. Tap this card to open conversation."
                                 } else {
-                                    "Four solo tables are ready. Tap my portrait to open conversation."
+                                    "Five tables are ready. Cosmic Mischief uses an offline rival until " +
+                                        "live Riven is connected. Tap my portrait to open conversation."
                                 }
                             },
                             color = MistBlue,
@@ -347,7 +396,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Four solo tables are playable • Cosmic Mischief remains a future shared table.",
+                text = "Five tables are playable • Cosmic Mischief uses an offline rival; live Riven remains unconnected.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -386,7 +435,7 @@ private fun GameCatalogCard(
                     letterSpacing = 1.5.sp,
                 )
                 StatusPill(
-                    text = if (game.mode == ArcadeGameMode.SOLO) "SOLO" else "WITH RIVEN",
+                    text = if (game.mode == ArcadeGameMode.SOLO) "SOLO" else "SHARED • OFFLINE READY",
                 )
             }
             Text(
@@ -416,6 +465,10 @@ private fun ArcadeGameScreen(
     portraitResourceId: Int?,
     solitaireStoreOverride: MidnightSolitaireStore?,
     onObservation: (ArcadeGameObservation) -> Unit,
+    cosmicStoreOverride: CosmicMischiefStore?,
+    cosmicOpponentOverride: CosmicOpponentAgent?,
+    cosmicOpponentExecutionOverride: CosmicOpponentExecution?,
+    cosmicOpponentTurnGate: CosmicOpponentTurnGate,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -431,6 +484,10 @@ private fun ArcadeGameScreen(
                 onAction = onAction,
                 solitaireStoreOverride = solitaireStoreOverride,
                 onObservation = onObservation,
+                cosmicStoreOverride = cosmicStoreOverride,
+                cosmicOpponentOverride = cosmicOpponentOverride,
+                cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
+                cosmicOpponentTurnGate = cosmicOpponentTurnGate,
             )
         } else if (useScrollableLayout) {
             LazyColumn(
@@ -467,10 +524,13 @@ private fun ArcadeGameScreen(
                 item {
                     GameBoardCard(
                         game = game,
-                        externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
-                        onAction = onAction,
+                        externallyPaused = state.interactionHold != ArcadeInteractionHold.NONE,
                         solitaireStoreOverride = solitaireStoreOverride,
                         onObservation = onObservation,
+                        cosmicStoreOverride = cosmicStoreOverride,
+                        cosmicOpponentOverride = cosmicOpponentOverride,
+                        cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
+                        cosmicOpponentTurnGate = cosmicOpponentTurnGate,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(compactBoardHeight(game)),
@@ -512,10 +572,13 @@ private fun ArcadeGameScreen(
                 )
                 GameBoardCard(
                     game = game,
-                    externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
-                    onAction = onAction,
+                    externallyPaused = state.interactionHold != ArcadeInteractionHold.NONE,
                     solitaireStoreOverride = solitaireStoreOverride,
                     onObservation = onObservation,
+                    cosmicStoreOverride = cosmicStoreOverride,
+                    cosmicOpponentOverride = cosmicOpponentOverride,
+                    cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
+                    cosmicOpponentTurnGate = cosmicOpponentTurnGate,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -539,6 +602,10 @@ private fun CompactPlayableGameScreen(
     onAction: (ArcadeAction) -> Unit,
     solitaireStoreOverride: MidnightSolitaireStore?,
     onObservation: (ArcadeGameObservation) -> Unit,
+    cosmicStoreOverride: CosmicMischiefStore?,
+    cosmicOpponentOverride: CosmicOpponentAgent?,
+    cosmicOpponentExecutionOverride: CosmicOpponentExecution?,
+    cosmicOpponentTurnGate: CosmicOpponentTurnGate,
 ) {
     Column(
         modifier = Modifier
@@ -583,11 +650,14 @@ private fun CompactPlayableGameScreen(
         }
         GameBoardCard(
             game = game,
-            externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
-            onAction = onAction,
+            externallyPaused = state.interactionHold != ArcadeInteractionHold.NONE,
             compactGameLayout = true,
             solitaireStoreOverride = solitaireStoreOverride,
             onObservation = onObservation,
+            cosmicStoreOverride = cosmicStoreOverride,
+            cosmicOpponentOverride = cosmicOpponentOverride,
+            cosmicOpponentExecutionOverride = cosmicOpponentExecutionOverride,
+            cosmicOpponentTurnGate = cosmicOpponentTurnGate,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -599,11 +669,14 @@ private fun CompactPlayableGameScreen(
 private fun GameBoardCard(
     game: ArcadeGame,
     externallyPaused: Boolean,
-    onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
     compactGameLayout: Boolean = false,
     solitaireStoreOverride: MidnightSolitaireStore? = null,
     onObservation: (ArcadeGameObservation) -> Unit = {},
+    cosmicStoreOverride: CosmicMischiefStore? = null,
+    cosmicOpponentOverride: CosmicOpponentAgent? = null,
+    cosmicOpponentExecutionOverride: CosmicOpponentExecution? = null,
+    cosmicOpponentTurnGate: CosmicOpponentTurnGate,
 ) {
     Card(
         modifier = modifier,
@@ -633,7 +706,14 @@ private fun GameBoardCard(
                 compactLayout = compactGameLayout,
                 onObservation = onObservation,
             )
-            ArcadeGame.RIVEN_CARD_TABLE -> SharedCardTablePreview(onAction)
+            ArcadeGame.RIVEN_CARD_TABLE -> CosmicMischiefGame(
+                externallyWaiting = externallyPaused,
+                compactLayout = compactGameLayout,
+                storeOverride = cosmicStoreOverride,
+                opponentOverride = cosmicOpponentOverride,
+                opponentExecutionOverride = cosmicOpponentExecutionOverride,
+                opponentTurnGateOverride = cosmicOpponentTurnGate,
+            )
         }
     }
 }
@@ -649,7 +729,7 @@ private fun PendingRulesLabel(
         color = MistBlue.copy(alpha = 0.8f),
         style = MaterialTheme.typography.bodySmall,
         textAlign = TextAlign.Center,
-        maxLines = if (expanded) Int.MAX_VALUE else 2,
+        maxLines = if (expanded || game == ArcadeGame.RIVEN_CARD_TABLE) Int.MAX_VALUE else 2,
         overflow = TextOverflow.Ellipsis,
     )
 }
@@ -659,7 +739,7 @@ private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
     ArcadeGame.KLONDIKE -> 520.dp
     ArcadeGame.HEART_MATCH -> error("Starstruck uses the responsive compact layout")
     ArcadeGame.WRAPPING_SNAKE -> error("Comet Trail uses the responsive compact layout")
-    ArcadeGame.RIVEN_CARD_TABLE -> 640.dp
+    ArcadeGame.RIVEN_CARD_TABLE -> error("Cosmic Mischief uses the responsive compact layout")
 }
 
 @Composable
@@ -676,7 +756,10 @@ private fun GameTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        TextButton(onClick = onBack) {
+        TextButton(
+            onClick = onBack,
+            modifier = Modifier.semantics { contentDescription = "Return to Arcade" },
+        ) {
             Text("‹ Arcade")
         }
         Column(modifier = Modifier.weight(1f)) {
@@ -734,11 +817,12 @@ private fun RivenCompanionBar(
                 Text(
                     text = when (hold) {
                         ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT -> "GAME PAUSED FOR CHAT"
-                        ArcadeInteractionHold.SHARED_GAME_WAITING_FOR_CHAT -> "RIVEN IS WAITING"
+                        ArcadeInteractionHold.SHARED_GAME_WAITING_FOR_CHAT -> "SHARED TABLE WAITING FOR CHAT"
                         ArcadeInteractionHold.NONE -> when {
                             commentaryCue != null -> "COMMENT CUE READY"
-                            commentaryCuesEnabled -> "COMMENT CUES ON"
                             quiet -> "QUIET MODE"
+                            game == ArcadeGame.RIVEN_CARD_TABLE -> "OFFLINE RIVAL • NOT LIVE RIVEN"
+                            commentaryCuesEnabled -> "COMMENT CUES ON"
                             else -> "TABLE CONTEXT LIVE"
                         }
                     },
@@ -1494,7 +1578,7 @@ private fun SharedCardTablePreview(onAction: (ArcadeAction) -> Unit) {
             motif = CelestialCardMotif.CONSTELLATION,
         ),
     )
-    PreviewBoard(title = "SHARED TABLE", status = "Demo hand • no engine") {
+    PreviewBoard(title = "LEGACY VISUAL SAMPLE", status = "Playable engine is used in Arcade") {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1860,7 +1944,7 @@ private fun PlayingCard(
     }
 }
 
-private fun pendingRulesText(game: ArcadeGame): String = when (game) {
+internal fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.STACKER ->
         "Playable • Endless line clearing with fixed manual speed; solo play refreshes instead of ending."
     ArcadeGame.KLONDIKE ->
@@ -1870,7 +1954,7 @@ private fun pendingRulesText(game: ArcadeGame): String = when (game) {
     ArcadeGame.WRAPPING_SNAKE ->
         "Playable default for review • Predicted self-contact pauses before impact so another safe direction can be chosen without losing progress."
     ArcadeGame.RIVEN_CARD_TABLE ->
-        "Preview only • Deck, penalties, challenges, trade protocol, and hidden-information engine remain pending."
+        COSMIC_MISCHIEF_PROVISIONAL_RULES
 }
 
 @Preview(name = "Arcade lobby", widthDp = 393, heightDp = 852, showBackground = true)

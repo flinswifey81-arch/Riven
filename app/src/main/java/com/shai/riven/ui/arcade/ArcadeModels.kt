@@ -53,12 +53,12 @@ enum class ArcadeGame(
         eyebrow = "SHARED CARD GAME",
         description = "Match color or number, bargain, bluff, and empty your hand first.",
         mode = ArcadeGameMode.SHARED_WITH_RIVEN,
-        commentary = "I might accept a trade. Whether I honor it is another question.",
+        commentary = "Offline fallback ready. Live Riven is not connected to this table yet.",
     ),
     ;
 
     val hasPlayableEngine: Boolean
-        get() = this == STACKER || this == KLONDIKE || this == HEART_MATCH || this == WRAPPING_SNAKE
+        get() = true
 
     /** Solo tables refresh or continue; only Cosmic Mischief may eventually end in a loss. */
     val allowsLoss: Boolean

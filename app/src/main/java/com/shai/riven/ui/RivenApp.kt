@@ -93,6 +93,7 @@ import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.ArcadeApp
 import com.shai.riven.ui.arcade.ArcadeConversationHost
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentTurnGate
 import com.shai.riven.ui.reminder.ReminderAlarmScreen
 import com.shai.riven.ui.theme.DeepInk
 import com.shai.riven.ui.theme.MistBlue
@@ -137,6 +138,7 @@ fun RivenApp(
         )
     }
     var destination by rememberSaveable { mutableStateOf(RivenDestination.CHAT) }
+    val arcadeOpponentTurnGate = remember { CosmicOpponentTurnGate() }
     var snapshot by remember { mutableStateOf<RivenRuntimeSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -181,6 +183,7 @@ fun RivenApp(
         val source = destination
         val jobToSettle = activeConversationJob
         val leavingArcade = source == RivenDestination.ARCADE && target != RivenDestination.ARCADE
+        if (leavingArcade) arcadeOpponentTurnGate.pause()
         if (!leavingArcade && (jobToSettle == null || !jobToSettle.isActive)) {
             destination = target
             return
@@ -352,6 +355,7 @@ fun RivenApp(
                         if (result is ArcadeObservationWriteResult.Failure) notice = result.message
                     }
                 },
+                cosmicOpponentTurnGateOverride = arcadeOpponentTurnGate,
             )
             loading -> LoadingScreen(padding)
             destination == RivenDestination.SETTINGS || destination == RivenDestination.MEMORY -> SettingsScreen(

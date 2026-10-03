@@ -2,8 +2,13 @@ package com.shai.riven.ui.arcade
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertContentDescriptionContains
 import androidx.compose.ui.test.assertHasClickAction
@@ -44,16 +49,33 @@ import com.shai.riven.ui.arcade.solitaire.SharedPreferencesMidnightSolitaireStor
 import com.shai.riven.ui.arcade.solitaire.SolitaireCard
 import com.shai.riven.ui.arcade.solitaire.SolitaireSuit
 import com.shai.riven.ui.arcade.solitaire.SolitaireTableauCard
+import com.shai.riven.ui.arcade.cosmic.COSMIC_MISCHIEF_PROVISIONAL_RULES
+import com.shai.riven.ui.arcade.cosmic.CosmicAction
+import com.shai.riven.ui.arcade.cosmic.CosmicCommand
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefEngine
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSession
+import com.shai.riven.ui.arcade.cosmic.CosmicMischiefSettings
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentAgent
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentExecution
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentObservation
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentTurnGate
+import com.shai.riven.ui.arcade.cosmic.CosmicPlayer
+import com.shai.riven.ui.arcade.cosmic.CosmicPublicEvent
+import com.shai.riven.ui.arcade.cosmic.CosmicPublicObservation
+import com.shai.riven.ui.arcade.cosmic.SharedPreferencesCosmicMischiefStore
 import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
-import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.atomic.AtomicInteger
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -80,7 +102,7 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Four solo tables are playable • Cosmic Mischief remains a future shared table.",
+            "Five tables are playable • Cosmic Mischief uses an offline rival; live Riven remains unconnected.",
         ).assertIsDisplayed()
     }
 
@@ -94,12 +116,13 @@ class ArcadeComposeTest {
 
         composeRule.onAllNodesWithTag("approved_arcade_portrait").assertCountEquals(0)
         composeRule.onNodeWithText(
-            "Four solo tables are ready. Tap this card to open conversation.",
+            "Five tables are ready. Cosmic Mischief uses an offline rival until " +
+                "live Riven is connected. Tap this card to open conversation.",
         ).assertIsDisplayed()
     }
 
     @Test
-    fun sharedTableShowsHiddenOpponentHandUserHandAndApprovedControls() {
+    fun sharedTableRunsOfflineWithHiddenOpponentHandAndApprovedControls() {
         composeRule.setContent {
             RivenTheme {
                 ArcadeExperience(
@@ -109,36 +132,17 @@ class ArcadeComposeTest {
             }
         }
 
-        composeRule.onNodeWithText("RIVEN • 7 CARDS").assertIsDisplayed()
-        composeRule.onNodeWithText("YOUR HAND").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+        composeRule.onNodeWithText("Offline rival • NOT LIVE RIVEN • 7 CARDS").assertIsDisplayed()
+        composeRule.onNodeWithText("YOUR HAND • 7 CARDS").assertIsDisplayed()
+        composeRule.onNodeWithText("PLAY").assertIsDisplayed()
+        composeRule.onNodeWithText("DRAW").assertIsDisplayed()
         composeRule.onNodeWithText("TRADE").assertIsDisplayed()
         composeRule.onNodeWithText("CHEAT").assertIsDisplayed()
-        composeRule.onNodeWithText("CALL OUT").assertIsDisplayed()
-        composeRule.onNodeWithText("Demo hand • no engine").assertIsDisplayed()
-        composeRule.onNodeWithText("TABLE CONTEXT LIVE").assertIsDisplayed()
-        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
-        composeRule.onAllNodesWithContentDescription("Face-down card").assertCountEquals(8)
-        composeRule.onNodeWithContentDescription("Eclipse. Skip the next turn.").assertIsDisplayed()
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(4)
-        composeRule.onNodeWithContentDescription(
-            "Double Trouble. The next player draws two cards.",
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_double-trouble_primary",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_double-trouble_effect",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
-        composeRule.onNodeWithContentDescription(
-            "Rewrite the Stars. Choose the next color.",
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_rewrite-the-stars_effect",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
+        composeRule.onNodeWithText("CALL BLUFF").assertIsDisplayed()
+        composeRule.onNodeWithText("OFFLINE RIVAL • NOT LIVE RIVEN").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(7)
+        composeRule.onNodeWithContentDescription("Face-down draw pile").assertIsDisplayed()
     }
 
     @Test
@@ -181,6 +185,193 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText(
             "Endless play • Reaching the top refreshes the board at your selected speed.",
         ).assertIsDisplayed()
+    }
+
+    @Test
+    fun openingChatInvalidatesBlockedOpponentBeforeThePauseRecomposes() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-chat-race-${System.nanoTime()}",
+        )
+        val fresh = CosmicMischiefSession(CosmicMischiefEngine.newGame(seed = 991L))
+        val initialResult = CosmicMischiefEngine.apply(
+            fresh,
+            CosmicCommand(CosmicPlayer.SHAI, fresh.game.revision, CosmicAction.DrawCard),
+        )
+        assertTrue(initialResult.changed)
+        val initial = initialResult.session
+        store.saveSession(initial)
+        val opponentTurnGate = CosmicOpponentTurnGate()
+        val opponentExecution = CosmicOpponentExecution(actionTimeoutMillis = 5_000L)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val blockedOpponent = object : CosmicOpponentAgent {
+            override val displayName: String = "Blocked review opponent"
+
+            override fun chooseAction(observation: CosmicOpponentObservation): CosmicAction {
+                if (calls.incrementAndGet() == 1) {
+                    started.countDown()
+                    while (true) {
+                        try {
+                            if (release.await(20L, TimeUnit.MILLISECONDS)) break
+                        } catch (_: InterruptedException) {
+                            // Hold through cancellation so the epoch check, not interruption, rejects it.
+                        }
+                    }
+                }
+                return CosmicAction.DrawCard
+            }
+
+            override fun commentary(
+                observation: CosmicPublicObservation,
+                event: CosmicPublicEvent,
+            ): String = event.message
+        }
+
+        composeRule.setContent {
+            var arcadeState by remember {
+                mutableStateOf(
+                    ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
+                )
+            }
+            RivenTheme {
+                ArcadeExperience(
+                    state = arcadeState,
+                    onAction = { action -> arcadeState = reduceArcadeState(arcadeState, action) },
+                    cosmicStoreOverride = store,
+                    cosmicOpponentOverride = blockedOpponent,
+                    cosmicOpponentExecutionOverride = opponentExecution,
+                    cosmicOpponentTurnGateOverride = opponentTurnGate,
+                )
+            }
+        }
+
+        try {
+            assertTrue(started.await(2L, TimeUnit.SECONDS))
+            composeRule.onNodeWithContentDescription("Open conversation with Riven").performClick()
+            assertNull(opponentTurnGate.acquirePermit())
+            composeRule.onNodeWithText("Shared table waiting").assertIsDisplayed()
+            release.countDown()
+            Thread.sleep(150L)
+            composeRule.waitForIdle()
+
+            assertEquals(initial, store.loadSession())
+            assertEquals(1, calls.get())
+
+            composeRule.onNodeWithText("Return to table").performClick()
+            composeRule.waitUntil(timeoutMillis = 5_000L) {
+                calls.get() == 2 && requireNotNull(store.loadSession()).game.revision > initial.game.revision
+            }
+        } finally {
+            release.countDown()
+        }
+        assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun toolbarExitInvalidatesBlockedOpponentBeforeLeavingAndReentering() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-toolbar-exit-race-${System.nanoTime()}",
+        )
+        val initial = rivenTurnSession(seed = 992L)
+        store.saveSession(initial)
+        val blockedOpponent = BlockingReviewOpponent(blockedCalls = 2)
+
+        composeRule.setContent {
+            var arcadeState by remember {
+                mutableStateOf(
+                    ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
+                )
+            }
+            RivenTheme {
+                ArcadeExperience(
+                    state = arcadeState,
+                    onAction = { action -> arcadeState = reduceArcadeState(arcadeState, action) },
+                    cosmicStoreOverride = store,
+                    cosmicOpponentOverride = blockedOpponent,
+                )
+            }
+        }
+
+        try {
+            assertTrue(blockedOpponent.awaitCall(1))
+            composeRule.onNodeWithContentDescription("Return to Arcade").performClick()
+            composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+            blockedOpponent.releaseCall(1)
+            Thread.sleep(150L)
+            composeRule.waitForIdle()
+            assertEquals(initial, store.loadSession())
+            assertEquals(1, blockedOpponent.calls.get())
+
+            openCosmicFromLobby()
+            assertTrue(blockedOpponent.awaitCall(2))
+            assertEquals(initial, store.loadSession())
+        } finally {
+            blockedOpponent.releaseAll()
+        }
+    }
+
+    @Test
+    fun androidBackInvalidatesBlockedOpponentBeforeLeavingAndReentering() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-android-back-race-${System.nanoTime()}",
+        )
+        val initial = rivenTurnSession(seed = 993L)
+        store.saveSession(initial)
+        val blockedOpponent = BlockingReviewOpponent(blockedCalls = 2)
+        var pressBack: (() -> Unit)? = null
+
+        composeRule.setContent {
+            val backOwner = LocalOnBackPressedDispatcherOwner.current
+            pressBack = { requireNotNull(backOwner).onBackPressedDispatcher.onBackPressed() }
+            RivenTheme {
+                ArcadeApp(
+                    cosmicStoreOverride = store,
+                    cosmicOpponentOverride = blockedOpponent,
+                )
+            }
+        }
+
+        try {
+            openCosmicFromLobby()
+            assertTrue(blockedOpponent.awaitCall(1))
+            composeRule.runOnIdle { requireNotNull(pressBack).invoke() }
+            composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+            blockedOpponent.releaseCall(1)
+            Thread.sleep(150L)
+            composeRule.waitForIdle()
+            assertEquals(initial, store.loadSession())
+            assertEquals(1, blockedOpponent.calls.get())
+
+            openCosmicFromLobby()
+            assertTrue(blockedOpponent.awaitCall(2))
+            assertEquals(initial, store.loadSession())
+        } finally {
+            blockedOpponent.releaseAll()
+        }
+    }
+
+    @Test
+    fun arcadeCosmicRulesUseTheSharedExactDefaults() {
+        val rules = pendingRulesText(ArcadeGame.RIVEN_CARD_TABLE)
+
+        assertEquals(COSMIC_MISCHIEF_PROVISIONAL_RULES, rules)
+        listOf(
+            "DECK: 52 = 4 colors",
+            "face-up offered card",
+            "chosen privately by the responder",
+            "primary stays discarded but its effect is cancelled",
+            "responder keeps the offered gift",
+            "recycle all but protected top discard cards",
+            "draw is waived and the decision or turn resolves",
+        ).forEach { requiredRule -> assertTrue(rules.contains(requiredRule)) }
+        assertTrue(!rules.contains("blind trade", ignoreCase = true))
     }
 
     @Test
@@ -245,6 +436,59 @@ class ArcadeComposeTest {
             assertTrue(actions.none { it is ArcadeAction.PreviewControl })
         }
     }
+
+    private fun openCosmicFromLobby() {
+        val cosmicIndex = ArcadeGame.entries.indexOf(ArcadeGame.RIVEN_CARD_TABLE) + 2
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(cosmicIndex)
+        composeRule.onNodeWithText("Cosmic Mischief").performClick()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+    }
+
+    private fun rivenTurnSession(seed: Long): CosmicMischiefSession {
+        val fresh = CosmicMischiefSession(CosmicMischiefEngine.newGame(seed))
+        val result = CosmicMischiefEngine.apply(
+            fresh,
+            CosmicCommand(CosmicPlayer.SHAI, fresh.game.revision, CosmicAction.DrawCard),
+        )
+        assertTrue(result.changed)
+        return result.session
+    }
+
+    private class BlockingReviewOpponent(blockedCalls: Int) : CosmicOpponentAgent {
+        override val displayName: String = "Blocked review opponent"
+        val calls = AtomicInteger()
+        private val started = List(blockedCalls) { CountDownLatch(1) }
+        private val releases = List(blockedCalls) { CountDownLatch(1) }
+
+        override fun chooseAction(observation: CosmicOpponentObservation): CosmicAction {
+            val callIndex = calls.incrementAndGet() - 1
+            val release = releases.getOrNull(callIndex) ?: return CosmicAction.DrawCard
+            started[callIndex].countDown()
+            while (true) {
+                try {
+                    if (release.await(20L, TimeUnit.MILLISECONDS)) break
+                } catch (_: InterruptedException) {
+                    // Exercise the epoch guard with provider code that ignores cancellation.
+                }
+            }
+            return CosmicAction.DrawCard
+        }
+
+        override fun commentary(
+            observation: CosmicPublicObservation,
+                event: CosmicPublicEvent,
+        ): String = event.message
+
+        fun awaitCall(call: Int): Boolean = started[call - 1].await(2L, TimeUnit.SECONDS)
+
+        fun releaseCall(call: Int) {
+            releases[call - 1].countDown()
+        }
+
+        fun releaseAll() {
+            releases.forEach(CountDownLatch::countDown)
+        }
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -267,7 +511,7 @@ class ArcadeActivityScreenshotTest {
         writeScreenshot("arcade-lobby.png")
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
-        composeRule.onNodeWithText("SHARED TABLE").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
         writeScreenshot("shared-card-table.png")
     }
 
@@ -343,7 +587,7 @@ class ArcadeActivityScreenshotTest {
     fun returningFromGamePreservesTheLobbyScrollPosition() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
-        composeRule.onNodeWithText("SHARED TABLE").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
 
         composeRule.runOnIdle {
             composeRule.activity.onBackPressedDispatcher.onBackPressed()
@@ -392,17 +636,11 @@ class ArcadeCompactActivityScreenshotTest {
     fun rendersCompactSharedCardTableToInspectablePng() {
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 1)
         composeRule.onNodeWithText("Cosmic Mischief").performClick()
-        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(2)
-        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
-        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
-        composeRule.onNodeWithContentDescription(
-            "Rewrite the Stars. Choose the next color.",
-        ).assertIsDisplayed()
-        composeRule.onNodeWithTag(
-            "celestial_hand_rewrite-the-stars_effect",
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Face-down opponent card").assertCountEquals(7)
+        composeRule.onNodeWithContentDescription("Face-down draw pile").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_table_settings").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("FRESH GAME").assertIsDisplayed()
         writeScreenshot("shared-card-table-compact.png")
     }
 
@@ -493,6 +731,39 @@ class ArcadeCompactActivityScreenshotTest {
 class ArcadeCompactLayoutTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun shortLargeTextCosmicMischiefKeepsHandAndFreshGameReachable() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-compact-cosmic-${System.nanoTime()}",
+        )
+        val session = CosmicMischiefSession(CosmicMischiefEngine.newGame(seed = 420L))
+        store.saveSession(session)
+        store.saveSettings(CosmicMischiefSettings(largeCardText = true))
+        val firstCard = session.game.hand(CosmicPlayer.SHAI).first()
+        composeRule.setContent {
+            RivenTheme {
+                WithFontScale(1.5f) {
+                    ArcadeExperience(
+                        state = ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
+                        onAction = {},
+                        cosmicStoreOverride = store,
+                    )
+                }
+            }
+        }
+
+        composeRule.onAllNodesWithTag("arcade_game_scroll").assertCountEquals(0)
+        composeRule.onNodeWithTag("compact_playable_game_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_user_hand").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("cosmic_user_card_${firstCard.id}")
+            .assertWidthIsAtLeast(64.dp)
+            .assertHeightIsAtLeast(96.dp)
+        composeRule.onNodeWithTag("cosmic_table_settings").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("FRESH GAME").assertIsDisplayed()
+    }
 
     @Test
     fun shortLargeTextMidnightSolitaireCanReachTheLastCardInALongTableau() {
@@ -631,41 +902,6 @@ class ArcadeCompactLayoutTest {
             .assertWidthIsAtLeast(48.dp)
         composeRule.onNodeWithContentDescription("Open conversation with Riven").assertIsDisplayed()
     }
-
-    @Test
-    fun shortLargeTextGameLayoutScrollsFromHeaderThroughControlsAndRules() {
-        composeRule.setContent {
-            RivenTheme {
-                WithFontScale(1.5f) {
-                    ArcadeExperience(
-                        state = ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
-                        onAction = {},
-                    )
-                }
-            }
-        }
-
-        composeRule.onNodeWithTag("arcade_game_scroll").assertIsDisplayed()
-        composeRule.onNodeWithText("Cosmic Mischief").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Quiet commentary").assertIsDisplayed()
-        composeRule.onNodeWithText("CALL OUT").performScrollTo().assertIsDisplayed()
-        composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
-        composeRule.onNodeWithTag("celestial_hand").performScrollToIndex(6)
-        composeRule.onNodeWithTag("arcade_game_scroll").performTouchInput { swipeUp() }
-        composeRule.onNodeWithContentDescription(
-            "Rewrite the Stars. Choose the next color.",
-        ).assertIsDisplayed()
-        assertTrue(
-            composeRule.onAllNodesWithContentDescription(
-                "Double Trouble. The next player draws two cards.",
-            ).fetchSemanticsNodes().isNotEmpty(),
-        )
-        composeRule.onNodeWithTag("arcade_game_scroll").performScrollToIndex(3)
-        composeRule.onNodeWithText(
-            "Preview only • Deck, penalties, challenges, trade protocol, and hidden-information engine remain pending.",
-        ).assertIsDisplayed()
-    }
-
 
     @Test
     fun compactLargeTextLobbyKeepsApprovedLongNamesReachable() {
