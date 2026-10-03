@@ -2,6 +2,7 @@ package com.shai.riven.ui.arcade
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -243,6 +244,93 @@ class ArcadeComposeTest {
     }
 
     @Test
+    fun toolbarExitInvalidatesBlockedOpponentBeforeLeavingAndReentering() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-toolbar-exit-race-${System.nanoTime()}",
+        )
+        val initial = rivenTurnSession(seed = 992L)
+        store.saveSession(initial)
+        val blockedOpponent = BlockingReviewOpponent(blockedCalls = 2)
+
+        composeRule.setContent {
+            var arcadeState by remember {
+                mutableStateOf(
+                    ArcadeUiState(selectedGameId = ArcadeGame.RIVEN_CARD_TABLE.gameId),
+                )
+            }
+            RivenTheme {
+                ArcadeExperience(
+                    state = arcadeState,
+                    onAction = { action -> arcadeState = reduceArcadeState(arcadeState, action) },
+                    cosmicStoreOverride = store,
+                    cosmicOpponentOverride = blockedOpponent,
+                )
+            }
+        }
+
+        try {
+            assertTrue(blockedOpponent.awaitCall(1))
+            composeRule.onNodeWithContentDescription("Return to Arcade").performClick()
+            composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+            blockedOpponent.releaseCall(1)
+            Thread.sleep(150L)
+            composeRule.waitForIdle()
+            assertEquals(initial, store.loadSession())
+            assertEquals(1, blockedOpponent.calls.get())
+
+            openCosmicFromLobby()
+            assertTrue(blockedOpponent.awaitCall(2))
+            assertEquals(initial, store.loadSession())
+        } finally {
+            blockedOpponent.releaseAll()
+        }
+    }
+
+    @Test
+    fun androidBackInvalidatesBlockedOpponentBeforeLeavingAndReentering() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val store = SharedPreferencesCosmicMischiefStore(
+            context = context,
+            preferenceName = "arcade-android-back-race-${System.nanoTime()}",
+        )
+        val initial = rivenTurnSession(seed = 993L)
+        store.saveSession(initial)
+        val blockedOpponent = BlockingReviewOpponent(blockedCalls = 2)
+        var pressBack: (() -> Unit)? = null
+
+        composeRule.setContent {
+            val backOwner = LocalOnBackPressedDispatcherOwner.current
+            pressBack = { requireNotNull(backOwner).onBackPressedDispatcher.onBackPressed() }
+            RivenTheme {
+                ArcadeApp(
+                    cosmicStoreOverride = store,
+                    cosmicOpponentOverride = blockedOpponent,
+                )
+            }
+        }
+
+        try {
+            openCosmicFromLobby()
+            assertTrue(blockedOpponent.awaitCall(1))
+            composeRule.runOnIdle { requireNotNull(pressBack).invoke() }
+            composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
+            blockedOpponent.releaseCall(1)
+            Thread.sleep(150L)
+            composeRule.waitForIdle()
+            assertEquals(initial, store.loadSession())
+            assertEquals(1, blockedOpponent.calls.get())
+
+            openCosmicFromLobby()
+            assertTrue(blockedOpponent.awaitCall(2))
+            assertEquals(initial, store.loadSession())
+        } finally {
+            blockedOpponent.releaseAll()
+        }
+    }
+
+    @Test
     fun arcadeCosmicRulesUseTheSharedExactDefaults() {
         val rules = pendingRulesText(ArcadeGame.RIVEN_CARD_TABLE)
 
@@ -319,6 +407,59 @@ class ArcadeComposeTest {
             .assertContentDescriptionContains("tile, row 1, column 2", substring = true)
         composeRule.runOnIdle {
             assertTrue(actions.none { it is ArcadeAction.PreviewControl })
+        }
+    }
+
+    private fun openCosmicFromLobby() {
+        val cosmicIndex = ArcadeGame.entries.indexOf(ArcadeGame.RIVEN_CARD_TABLE) + 2
+        composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(cosmicIndex)
+        composeRule.onNodeWithText("Cosmic Mischief").performClick()
+        composeRule.onNodeWithTag("cosmic_mischief_board").assertIsDisplayed()
+    }
+
+    private fun rivenTurnSession(seed: Long): CosmicMischiefSession {
+        val fresh = CosmicMischiefSession(CosmicMischiefEngine.newGame(seed))
+        val result = CosmicMischiefEngine.apply(
+            fresh,
+            CosmicCommand(CosmicPlayer.SHAI, fresh.game.revision, CosmicAction.DrawCard),
+        )
+        assertTrue(result.changed)
+        return result.session
+    }
+
+    private class BlockingReviewOpponent(blockedCalls: Int) : CosmicOpponentAgent {
+        override val displayName: String = "Blocked review opponent"
+        val calls = AtomicInteger()
+        private val started = List(blockedCalls) { CountDownLatch(1) }
+        private val releases = List(blockedCalls) { CountDownLatch(1) }
+
+        override fun chooseAction(observation: CosmicOpponentObservation): CosmicAction {
+            val callIndex = calls.incrementAndGet() - 1
+            val release = releases.getOrNull(callIndex) ?: return CosmicAction.DrawCard
+            started[callIndex].countDown()
+            while (true) {
+                try {
+                    if (release.await(20L, TimeUnit.MILLISECONDS)) break
+                } catch (_: InterruptedException) {
+                    // Exercise the epoch guard with provider code that ignores cancellation.
+                }
+            }
+            return CosmicAction.DrawCard
+        }
+
+        override fun commentary(
+            observation: CosmicPublicObservation,
+            event: CosmicEvent,
+        ): String = event.message
+
+        fun awaitCall(call: Int): Boolean = started[call - 1].await(2L, TimeUnit.SECONDS)
+
+        fun releaseCall(call: Int) {
+            releases[call - 1].countDown()
+        }
+
+        fun releaseAll() {
+            releases.forEach(CountDownLatch::countDown)
         }
     }
 }

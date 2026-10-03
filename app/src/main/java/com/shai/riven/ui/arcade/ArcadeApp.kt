@@ -127,11 +127,21 @@ private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
 )
 
 @Composable
-fun ArcadeApp(modifier: Modifier = Modifier) {
+fun ArcadeApp(
+    modifier: Modifier = Modifier,
+    cosmicStoreOverride: CosmicMischiefStore? = null,
+    cosmicOpponentOverride: CosmicOpponentAgent? = null,
+    cosmicOpponentTurnGateOverride: CosmicOpponentTurnGate? = null,
+) {
     var state by rememberSaveable(stateSaver = ArcadeUiStateSaver) {
         mutableStateOf(ArcadeUiState())
     }
+    val localCosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    val cosmicOpponentTurnGate = cosmicOpponentTurnGateOverride ?: localCosmicOpponentTurnGate
     val dispatch: (ArcadeAction) -> Unit = { action ->
+        if (actionPausesOrLeavesCosmicTable(state, action)) {
+            cosmicOpponentTurnGate.pause()
+        }
         state = reduceArcadeState(state, action)
     }
 
@@ -142,6 +152,9 @@ fun ArcadeApp(modifier: Modifier = Modifier) {
         state = state,
         onAction = dispatch,
         modifier = modifier,
+        cosmicStoreOverride = cosmicStoreOverride,
+        cosmicOpponentOverride = cosmicOpponentOverride,
+        cosmicOpponentTurnGateOverride = cosmicOpponentTurnGate,
     )
 }
 
@@ -153,15 +166,14 @@ fun ArcadeExperience(
     solitaireStoreOverride: MidnightSolitaireStore? = null,
     cosmicStoreOverride: CosmicMischiefStore? = null,
     cosmicOpponentOverride: CosmicOpponentAgent? = null,
+    cosmicOpponentTurnGateOverride: CosmicOpponentTurnGate? = null,
 ) {
     val lobbyListState = rememberLazyListState()
-    val cosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
-    val guardedOnAction = remember(onAction, state.selectedGameId, cosmicOpponentTurnGate) {
+    val localCosmicOpponentTurnGate = remember { CosmicOpponentTurnGate() }
+    val cosmicOpponentTurnGate = cosmicOpponentTurnGateOverride ?: localCosmicOpponentTurnGate
+    val guardedOnAction = remember(onAction, state, cosmicOpponentTurnGate) {
         { action: ArcadeAction ->
-            if (
-                action == ArcadeAction.OpenConversation &&
-                state.selectedGame == ArcadeGame.RIVEN_CARD_TABLE
-            ) {
+            if (actionPausesOrLeavesCosmicTable(state, action)) {
                 cosmicOpponentTurnGate.pause()
             }
             onAction(action)
@@ -195,6 +207,16 @@ fun ArcadeExperience(
             ConversationOverlay(state = state, onAction = guardedOnAction)
         }
     }
+}
+
+private fun actionPausesOrLeavesCosmicTable(
+    state: ArcadeUiState,
+    action: ArcadeAction,
+): Boolean {
+    if (state.selectedGame != ArcadeGame.RIVEN_CARD_TABLE) return false
+    val nextState = reduceArcadeState(state, action)
+    return nextState.selectedGame != ArcadeGame.RIVEN_CARD_TABLE ||
+        nextState.interactionHold != ArcadeInteractionHold.NONE
 }
 
 @Composable
@@ -617,7 +639,10 @@ private fun GameTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        TextButton(onClick = onBack) {
+        TextButton(
+            onClick = onBack,
+            modifier = Modifier.semantics { contentDescription = "Return to Arcade" },
+        ) {
             Text("‹ Arcade")
         }
         Column(modifier = Modifier.weight(1f)) {

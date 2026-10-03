@@ -76,6 +76,7 @@ import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.ArcadeApp
+import com.shai.riven.ui.arcade.cosmic.CosmicOpponentTurnGate
 import com.shai.riven.ui.reminder.ReminderAlarmScreen
 import com.shai.riven.ui.theme.DeepInk
 import com.shai.riven.ui.theme.MistBlue
@@ -111,6 +112,7 @@ fun RivenApp(
     val context = LocalContext.current
     val runtime = remember(context, runtimeFactory) { runtimeFactory(context.applicationContext) }
     var destination by rememberSaveable { mutableStateOf(RivenDestination.CHAT) }
+    val arcadeOpponentTurnGate = remember { CosmicOpponentTurnGate() }
     var snapshot by remember { mutableStateOf<RivenRuntimeSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -150,6 +152,9 @@ fun RivenApp(
     }
 
     fun navigateTo(target: RivenDestination) {
+        if (destination == RivenDestination.ARCADE && target != RivenDestination.ARCADE) {
+            arcadeOpponentTurnGate.pause()
+        }
         if (destination == RivenDestination.CHAT && target != RivenDestination.CHAT) {
             activeConversationJob?.cancel(CancellationException("Chat screen left"))
         }
@@ -232,7 +237,10 @@ fun RivenApp(
                 modifier = Modifier.padding(padding),
                 controllerFactory = reminderControllerFactory,
             )
-            destination == RivenDestination.ARCADE -> ArcadeApp(modifier = Modifier.padding(padding))
+            destination == RivenDestination.ARCADE -> ArcadeApp(
+                modifier = Modifier.padding(padding),
+                cosmicOpponentTurnGateOverride = arcadeOpponentTurnGate,
+            )
             loading -> LoadingScreen(padding)
             destination == RivenDestination.SETTINGS -> SettingsScreen(
                 runtime = runtime,
