@@ -34,9 +34,16 @@ class RivenPresenceContextSource(
                             fragmentId = PRIMARY_FRAGMENT_ID,
                             content = buildString {
                                 appendLine("RIVEN ROOM PRESENCE AND SEMANTIC SPRITE CONTROL")
-                                appendLine("Riven's persisted actual_room=${state.actualRoom.stableId}.")
-                                appendLine("Riven's persisted semantic_sprite=${state.semanticSprite.stableId}.")
-                                appendLine("The room the user is browsing is UI state and does not move Riven.")
+                                appendLine("CURRENT_USER_VIEWED_ROOM=${state.browsedRoom.stableId}")
+                                appendLine("RIVEN_ACTUAL_ROOM=${state.actualRoom.stableId}")
+                                appendLine("RIVEN_SEMANTIC_SPRITE=${state.semanticSprite.stableId}")
+                                appendLine("The user can see the current viewed room and expects Riven to know which room is on screen.")
+                                appendLine("Viewing a room is UI state only: it does not move Riven or imply that Riven is visible there.")
+                                if (state.isRivenVisibleInBrowsedRoom) {
+                                    appendLine("Riven is physically present in the room the user is viewing.")
+                                } else {
+                                    appendLine("Riven is not physically present in the room the user is viewing; keep both locations distinct.")
+                                }
                                 appendLine("Allowed room ids: ${RivenRoom.entries.joinToString { it.stableId }}.")
                                 appendLine("Allowed semantic sprite ids: ${RivenSemanticSprite.entries.joinToString { it.stableId }}.")
                                 appendLine("To change room or sprite before narrating it as accomplished, begin the reply with exactly one line:")
@@ -51,6 +58,8 @@ class RivenPresenceContextSource(
                             actualRoomId = state.actualRoom.stableId,
                             semanticSpriteId = state.semanticSprite.stableId,
                             presenceRevision = state.presenceRevision,
+                            browsedRoomId = state.browsedRoom.stableId,
+                            browserRevision = state.browserRevision,
                         ),
                     ),
                 )

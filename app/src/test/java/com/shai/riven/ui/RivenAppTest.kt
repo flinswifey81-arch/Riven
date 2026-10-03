@@ -139,6 +139,42 @@ class RivenAppNormalTest {
     }
 
     @Test
+    fun assistantMarkdownRendersAsReadableTextWithoutProviderMarkers() {
+        val markdownReply = "## Update\n**Bold** and *careful*\n\n- first\n- `second`"
+        val snapshot = configuredSnapshot().copy(
+            messages = configuredSnapshot().messages.map { message ->
+                if (message.role == MessageRole.ASSISTANT) message.copy(content = markdownReply) else message
+            },
+        )
+        val runtime = FakeRivenRuntime(snapshot)
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+
+        composeRule.onNodeWithTag("message_text_assistant")
+            .assertTextContains("Update\nBold and careful\n\n• first\n• second")
+        composeRule.onAllNodesWithText("role=ASSISTANT", substring = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("**Bold**", substring = true).assertCountEquals(0)
+        writeScreenshot("chat-markdown-normal.png")
+    }
+
+    @Test
+    fun imageDraftKeepsFocusedMultilineCaptionVisibleAndIntact() {
+        val runtime = FakeRivenRuntime(configuredSnapshot().withImageDraft())
+        composeRule.runOnIdle {
+            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+        }
+        val caption = "First visible line\nSecond visible line with enough text to wrap safely"
+
+        composeRule.onNodeWithTag("chat_input").performTextReplacement(caption)
+
+        composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_input").assertIsDisplayed().assertTextContains(caption)
+        composeRule.onNodeWithTag("chat_send").assertIsEnabled()
+        writeScreenshot("chat-image-caption-normal.png")
+    }
+
+    @Test
     fun liveArcadeConversationOverlayRendersToInspectablePng() {
         val runtime = FakeRivenRuntime(configuredSnapshot())
         composeRule.runOnIdle {
@@ -835,6 +871,19 @@ class RivenAppCompactTest {
         composeRule.setContent { RivenTheme { RivenApp { runtime } } }
 
         composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_send").assertIsEnabled()
+    }
+
+    @Test
+    fun compactImageDraftKeepsMultilineCaptionVisibleAndIntact() {
+        val runtime = FakeRivenRuntime(configuredSnapshot().withImageDraft())
+        composeRule.setContent { RivenTheme { RivenApp { runtime } } }
+        val caption = "Visible compact caption\nwith a second line"
+
+        composeRule.onNodeWithTag("chat_input").performTextReplacement(caption)
+
+        composeRule.onNodeWithTag("draft_image_preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_input").assertIsDisplayed().assertTextContains(caption)
         composeRule.onNodeWithTag("chat_send").assertIsEnabled()
     }
 }

@@ -28,6 +28,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -39,6 +41,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -56,6 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
@@ -69,6 +73,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -564,6 +569,7 @@ private fun ChatScreen(
     var floorPlanOpen by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val composerBringIntoViewRequester = remember { BringIntoViewRequester() }
 
     fun apply(
         result: RivenRuntimeResult,
@@ -661,7 +667,7 @@ private fun ChatScreen(
         onConversationJobChanged(conversationJob)
     }
 
-    LaunchedEffect(snapshot?.messages?.size, streamedReply) {
+    LaunchedEffect(snapshot?.messages?.size, streamedReply, floorPlanOpen) {
         val total = (snapshot?.messages?.size ?: 0) + if (streamedReply.isBlank()) 0 else 1
         if (total > 0) listState.animateScrollToItem(total - 1)
     }
@@ -893,11 +899,35 @@ private fun ChatScreen(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChange,
-                    modifier = Modifier.weight(1f).testTag("chat_input"),
+                    modifier = Modifier
+                        .weight(1f)
+                        .bringIntoViewRequester(composerBringIntoViewRequester)
+                        .onFocusChanged { focusState ->
+                            if (focusState.isFocused) {
+                                scope.launch {
+                                    delay(COMPOSER_BRING_INTO_VIEW_DELAY_MILLIS)
+                                    composerBringIntoViewRequester.bringIntoView()
+                                }
+                            }
+                        }
+                        .testTag("chat_input"),
                     enabled = !sending && !cancelling,
                     label = { Text("Message Riven") },
                     minLines = 1,
                     maxLines = if (compact) 3 else 5,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = WarmIvory,
+                        unfocusedTextColor = WarmIvory,
+                        disabledTextColor = MistBlue,
+                        cursorColor = MutedGold,
+                        focusedContainerColor = DeepInk.copy(alpha = 0.94f),
+                        unfocusedContainerColor = DeepInk.copy(alpha = 0.88f),
+                        disabledContainerColor = DeepInk.copy(alpha = 0.72f),
+                        focusedBorderColor = MutedGold,
+                        unfocusedBorderColor = MutedGold.copy(alpha = 0.72f),
+                        focusedLabelColor = MutedGold,
+                        unfocusedLabelColor = MistBlue,
+                    ),
                 )
                 OutlinedButton(
                     onClick = { imagePicker.launch(arrayOf("image/jpeg", "image/png", "image/webp")) },
@@ -994,10 +1024,17 @@ private fun MessageBubble(
                     Spacer(Modifier.height(8.dp))
                 }
                 if (message.content.isNotBlank() || streaming) {
+                    val renderedContent = remember(message.content, streaming) {
+                        buildAnnotatedString {
+                            append(chatMarkdown(message.content))
+                            if (streaming) append(" ▌")
+                        }
+                    }
                     Text(
-                        message.content + if (streaming) " …" else "",
+                        renderedContent,
                         color = WarmIvory,
                         style = if (compact) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.testTag("message_text_${message.id}"),
                     )
                 }
             }
@@ -1650,6 +1687,7 @@ private fun SectionTitle(text: String) {
 }
 
 private const val DRAFT_SAVE_DELAY_MILLIS = 350L
+private const val COMPOSER_BRING_INTO_VIEW_DELAY_MILLIS = 120L
 private const val MAX_VISIBLE_MODEL_CHOICES = 24
 private const val MAX_PREVIEW_EDGE = 1_024
 private val ShaiHunterGreen = Color(0xFF123629)

@@ -57,6 +57,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 
 class OpenRouterAutomaticMemoryModelFactory(
     private val profileResolver: ProviderRuntimeProfileResolver,
@@ -352,7 +353,7 @@ class OpenRouterAutomaticMemoryModel(
             .put("max_completion_tokens", MAX_COMPLETION_TOKENS)
             .put("response_format", JSONObject().put("type", "json_object"))
             .put("messages", JSONArray()
-                .put(JSONObject().put("role", "system").put("content", systemPrompt))
+                .put(JSONObject().put("role", "system").put("content", "$systemPrompt\n\n$RAW_JSON_ONLY_INSTRUCTION"))
                 .put(JSONObject().put("role", "user").put("content", payload.toString())))
             .put("metadata", JSONObject().put("riven_memory_operation", operation))
             .toString()
@@ -416,8 +417,35 @@ class OpenRouterAutomaticMemoryModel(
             ?.optString("content")
             ?.takeIf(String::isNotBlank)
             ?: throw AutomaticMemoryModelFailure("MISSING_CONTENT", retryable = true)
-        return runCatching { JSONObject(content) }
+        return runCatching { parseStrictJsonObject(content) }
             .getOrElse { throw AutomaticMemoryModelFailure("MALFORMED_CONTENT", retryable = true) }
+    }
+
+    private fun parseStrictJsonObject(content: String): JSONObject {
+        val normalized = content.trim().removePrefix("\uFEFF").trimStart()
+        val candidate = if (normalized.startsWith(JSON_FENCE)) {
+            val headerEnd = normalized.indexOf('\n')
+            require(headerEnd >= JSON_FENCE.length) { "JSON fence must have a body" }
+            val fenceLanguage = normalized.substring(JSON_FENCE.length, headerEnd).trim()
+            require(fenceLanguage.isEmpty() || fenceLanguage.equals("json", ignoreCase = true)) {
+                "Unsupported JSON fence language"
+            }
+            val closingFence = normalized.lastIndexOf(JSON_FENCE)
+            require(closingFence > headerEnd) { "JSON fence must be closed" }
+            require(normalized.substring(closingFence + JSON_FENCE.length).isBlank()) {
+                "Content after JSON fence"
+            }
+            normalized.substring(headerEnd + 1, closingFence).also { body ->
+                require(!body.contains(JSON_FENCE)) { "Multiple JSON fences" }
+            }.trim()
+        } else {
+            normalized
+        }
+        val tokener = JSONTokener(candidate)
+        val parsed = tokener.nextValue() as? JSONObject
+            ?: throw IllegalArgumentException("Expected a JSON object")
+        require(tokener.nextClean() == '\u0000') { "Content after JSON object" }
+        return parsed
     }
 
     private fun parseAnalysis(json: JSONObject): AutomaticMemoryAnalysis {
@@ -689,6 +717,9 @@ class OpenRouterAutomaticMemoryModel(
     companion object {
         const val MAX_RESPONSE_CHARS = 262_144
         const val MAX_COMPLETION_TOKENS = 2_048
+        private const val JSON_FENCE = "```"
+        private const val RAW_JSON_ONLY_INSTRUCTION =
+            "Return raw JSON only. Do not wrap it in Markdown fences or add prose, commentary, or trailing content."
 
         private val SHORT_WINDOW_DEFER_STATES = setOf(
             CandidateMemoryState.PENDING_CONTEXT,

@@ -185,6 +185,40 @@ class OpenRouterConversationAdapterTest {
     }
 
     @Test
+    fun stripsInternalConversationRoleMarkersBeforeProviderDispatch() = runBlocking {
+        val http = RecordingHttpClient(200, listOf("data: [DONE]", ""))
+        val context = listOf(
+            fragment(
+                sourceId = "prior-user",
+                content = "role=USER\nHello",
+                authority = RivenContextContentAuthority.UNTRUSTED_DATA,
+                role = MessageRole.USER,
+            ),
+            fragment(
+                sourceId = "prior-assistant",
+                content = "role=ASSISTANT\nHi, Shai.",
+                authority = RivenContextContentAuthority.UNTRUSTED_DATA,
+                role = MessageRole.ASSISTANT,
+            ),
+            fragment(
+                sourceId = "current-user",
+                content = "role=CURRENT_INTERACTION\nWhere are you?",
+                authority = RivenContextContentAuthority.UNTRUSTED_DATA,
+                role = MessageRole.USER,
+            ),
+        )
+
+        OpenRouterConversationAdapter(http).stream(request().copy(context = context)) {}
+
+        val messages = JSONObject(checkNotNull(http.request?.body)).getJSONArray("messages")
+        assertEquals("Hello", messages.getJSONObject(0).getString("content"))
+        assertEquals("Hi, Shai.", messages.getJSONObject(1).getString("content"))
+        assertEquals("Where are you?", messages.getJSONObject(2).getString("content"))
+        assertFalse(checkNotNull(http.request?.body).contains("role=ASSISTANT"))
+        assertFalse(checkNotNull(http.request?.body).contains("role=CURRENT_INTERACTION"))
+    }
+
+    @Test
     fun missingCredentialFailsClosedWithoutHttp() = runBlocking {
         val http = RecordingHttpClient(200, emptyList())
         val events = mutableListOf<ProviderStreamEvent>()

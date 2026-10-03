@@ -149,6 +149,8 @@ sealed interface RivenContextFreshnessReceipt {
         val actualRoomId: String,
         val semanticSpriteId: String,
         val presenceRevision: Long,
+        val browsedRoomId: String,
+        val browserRevision: Long,
     ) : RivenContextFreshnessReceipt
 }
 

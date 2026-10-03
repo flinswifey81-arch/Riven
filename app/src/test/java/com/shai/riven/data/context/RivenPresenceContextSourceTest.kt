@@ -8,7 +8,7 @@ import com.shai.riven.data.presence.RivenPresenceService
 import com.shai.riven.data.presence.RivenRoom
 import kotlinx.coroutines.runBlocking
 import org.junit.After
-import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -33,7 +33,7 @@ class RivenPresenceContextSourceTest {
     fun tearDown() = database.close()
 
     @Test
-    fun exposesPersistedActualPresenceButNotTheBrowsedRoom() = runBlocking {
+    fun exposesViewedAndActualRoomsWithoutConflatingOrMovingRiven() = runBlocking {
         val service = RivenPresenceService(database)
         service.initialize(1)
         service.browse(RivenRoom.STUDY, 2)
@@ -42,9 +42,13 @@ class RivenPresenceContextSourceTest {
             as RivenContextSourceResult.Success
         val content = result.payloads.single().content
 
-        assertTrue(content.contains("actual_room=living_room"))
-        assertFalse(content.contains("browsed_room=study"))
+        assertTrue(content.contains("CURRENT_USER_VIEWED_ROOM=study"))
+        assertTrue(content.contains("RIVEN_ACTUAL_ROOM=living_room"))
+        assertTrue(content.contains("not physically present"))
         assertTrue(content.contains(RivenPresenceContextSource.CONTROL_PREFIX))
-        assertTrue(result.freshnessReceipts.single() is RivenContextFreshnessReceipt.RivenPresence)
+        val receipt = result.freshnessReceipts.single() as RivenContextFreshnessReceipt.RivenPresence
+        assertEquals("living_room", receipt.actualRoomId)
+        assertEquals("study", receipt.browsedRoomId)
+        assertEquals(1L, receipt.browserRevision)
     }
 }

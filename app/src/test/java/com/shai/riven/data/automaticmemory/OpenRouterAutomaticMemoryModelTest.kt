@@ -53,6 +53,47 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class OpenRouterAutomaticMemoryModelTest {
     @Test
+    fun singleJsonMarkdownFenceIsAcceptedAtProviderBoundary() = runBlocking {
+        val response = JSONObject()
+            .put("attention", JSONObject()
+                .put("outcome", "NO_CANDIDATE")
+                .put("positiveSignals", JSONArray())
+                .put("antiSignals", JSONArray()))
+            .put("candidates", JSONArray())
+        val model = OpenRouterAutomaticMemoryModel(
+            runtimeProfile(),
+            RecordingHttpClient.raw("\uFEFF  ```json\r\n$response\r\n```  "),
+        )
+
+        val result = model.analyze(snapshot())
+
+        assertEquals(AttentionOutcome.NO_CANDIDATE, result.outcome)
+    }
+
+    @Test
+    fun proseOrMultipleFencesRemainMalformedProviderContent() = runBlocking {
+        val response = JSONObject()
+            .put("attention", JSONObject()
+                .put("outcome", "NO_CANDIDATE")
+                .put("positiveSignals", JSONArray())
+                .put("antiSignals", JSONArray()))
+            .put("candidates", JSONArray())
+        listOf(
+            "Here is the result: $response",
+            "```json\n$response\n```\n```json\n$response\n```",
+            "$response trailing commentary",
+        ).forEach { rawContent ->
+            val model = OpenRouterAutomaticMemoryModel(runtimeProfile(), RecordingHttpClient.raw(rawContent))
+
+            val failure = runCatching { model.analyze(snapshot()) }.exceptionOrNull()
+
+            assertTrue(failure is AutomaticMemoryModelFailure)
+            assertEquals("MALFORMED_CONTENT", (failure as AutomaticMemoryModelFailure).errorCode)
+            assertTrue(failure.retryable)
+        }
+    }
+
+    @Test
     fun analysisUsesSelectedProfileCredentialBoundaryAndOneBoundedJsonCall() = runBlocking {
         val response = JSONObject()
             .put("attention", JSONObject()
@@ -486,10 +527,12 @@ class OpenRouterAutomaticMemoryModelTest {
         credential = ProviderSecret.fromPlaintext("test-secret-key"),
     )
 
-    private class RecordingHttpClient(
-        private val content: JSONObject,
+    private class RecordingHttpClient private constructor(
+        private val content: String,
         private val statusCode: Int = 200,
     ) : OpenRouterHttpClient {
+        constructor(content: JSONObject, statusCode: Int = 200) : this(content.toString(), statusCode)
+
         val requests = mutableListOf<OpenRouterHttpRequest>()
 
         override suspend fun execute(
@@ -499,9 +542,13 @@ class OpenRouterAutomaticMemoryModelTest {
             requests += request
             val envelope = JSONObject()
                 .put("choices", JSONArray().put(JSONObject()
-                    .put("message", JSONObject().put("content", content.toString()))))
+                    .put("message", JSONObject().put("content", content))))
             onLine(envelope.toString())
             return OpenRouterHttpResponse(statusCode, emptyMap())
+        }
+
+        companion object {
+            fun raw(content: String, statusCode: Int = 200) = RecordingHttpClient(content, statusCode)
         }
     }
 }

@@ -672,7 +672,9 @@ internal class ConversationRunPersistence(
                     ) ?: return false
                     if (state.presenceRevision != receipt.presenceRevision ||
                         state.actualRoomId != receipt.actualRoomId ||
-                        state.semanticSpriteId != receipt.semanticSpriteId
+                        state.semanticSpriteId != receipt.semanticSpriteId ||
+                        state.browserRevision != receipt.browserRevision ||
+                        state.browsedRoomId != receipt.browsedRoomId
                     ) {
                         return false
                     }

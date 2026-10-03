@@ -449,6 +449,8 @@ class ProviderNeutralConversationEngine(
                                                 actualRoomId = controlled.actualRoomId,
                                                 semanticSpriteId = controlled.semanticSpriteId,
                                                 presenceRevision = controlled.presenceRevision,
+                                                browsedRoomId = receipt.browsedRoomId,
+                                                browserRevision = receipt.browserRevision,
                                             ),
                                     )
                                 }

@@ -363,7 +363,7 @@ class RivenConversationRuntimeTest {
         assertTrue((0 until messages.length()).any { messages.getJSONObject(it).optString("content") == canon })
         assertTrue(
             (0 until messages.length()).any {
-                messages.getJSONObject(it).optString("content") == "role=USER\n${"b".repeat(3_000)}"
+                messages.getJSONObject(it).optString("content") == "b".repeat(3_000)
             },
         )
     }
@@ -900,7 +900,7 @@ class RivenConversationRuntimeTest {
         assertEquals(com.shai.riven.data.presence.RivenRoom.STUDY, snapshot.roomState.actualRoom)
         assertEquals(com.shai.riven.data.presence.RivenRoom.LIVING_ROOM, snapshot.roomState.browsedRoom)
         assertFalse(snapshot.roomState.isRivenVisibleInBrowsedRoom)
-        assertTrue(checkNotNull(http.requests.single().body).contains("actual_room=living_room"))
+        assertTrue(checkNotNull(http.requests.single().body).contains("RIVEN_ACTUAL_ROOM=living_room"))
 
         first.close()
         runtimes.remove(first)
@@ -908,6 +908,27 @@ class RivenConversationRuntimeTest {
         assertEquals(com.shai.riven.data.presence.RivenRoom.STUDY, restored.actualRoom)
         assertEquals(com.shai.riven.data.presence.RivenSemanticSprite.STANDING_TEASING, restored.semanticSprite)
         assertEquals(com.shai.riven.data.presence.RivenRoom.LIVING_ROOM, restored.browsedRoom)
+    }
+
+    @Test
+    fun providerReceivesViewedAndActualRoomsWithoutBrowsingTeleportingRiven() = runBlocking {
+        val http = QueueHttpClient(successJson("I know you're viewing the study while I'm elsewhere."))
+        val first = runtime(http)
+        first.initialize()
+        assertTrue(first.saveProfile(null, "Primary", "anthropic/example", "private-key") is RivenProfileSaveResult.Success)
+
+        val browsed = first.browseRoom(com.shai.riven.data.presence.RivenRoom.STUDY)
+        val sent = first.send("Can you see which room I opened?")
+
+        assertTrue(browsed is RivenRuntimeResult.Success)
+        assertTrue(sent is RivenRuntimeResult.Success)
+        val body = checkNotNull(http.requests.single().body)
+        assertTrue(body.contains("CURRENT_USER_VIEWED_ROOM=study"))
+        assertTrue(body.contains("RIVEN_ACTUAL_ROOM=living_room"))
+        val roomState = (sent as RivenRuntimeResult.Success).snapshot.roomState
+        assertEquals(com.shai.riven.data.presence.RivenRoom.STUDY, roomState.browsedRoom)
+        assertEquals(com.shai.riven.data.presence.RivenRoom.LIVING_ROOM, roomState.actualRoom)
+        assertFalse(roomState.isRivenVisibleInBrowsedRoom)
     }
 
     @Test
