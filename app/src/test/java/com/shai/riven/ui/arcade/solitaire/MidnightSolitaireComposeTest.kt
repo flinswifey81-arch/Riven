@@ -11,6 +11,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -94,12 +95,16 @@ class MidnightSolitaireComposeTest {
             composeRule.onNodeWithTag("solitaire_notice")
                 .fetchSemanticsNode().config[SemanticsProperties.LiveRegion],
         )
+        composeRule.onNodeWithTag("solitaire_notice")
+            .assertTextContains("Selected:", substring = true)
 
         composeRule.onNodeWithContentDescription("Move selected card to its matching foundation")
             .performClick()
         composeRule.waitForIdle()
         assertEquals(original.game, store.savedSession?.game)
         composeRule.onNodeWithTag("solitaire_tableau_0_0").assertIsSelected()
+        composeRule.onNodeWithTag("solitaire_notice")
+            .assertTextContains("That is not a legal Klondike move.", substring = true)
 
         composeRule.onNodeWithTag("solitaire_tableau_0_1").performClick().assertIsSelected()
         composeRule.onNodeWithContentDescription("hearts foundation empty.").performClick()

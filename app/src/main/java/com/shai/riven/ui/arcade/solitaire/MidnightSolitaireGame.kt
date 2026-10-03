@@ -115,6 +115,7 @@ fun MidnightSolitaireGame(
     var notice by rememberSaveable {
         mutableStateOf("Draw one, move by standard Klondike rules, or choose a fresh deal whenever you want.")
     }
+    var prioritizeNotice by remember { mutableStateOf(false) }
     var confirmation by remember { mutableStateOf<SolitaireConfirmation?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
     var lifecycleResumed by remember(lifecycleOwner) {
@@ -138,12 +139,14 @@ fun MidnightSolitaireGame(
     }
     LaunchedEffect(session, store) { store.saveSession(session) }
     LaunchedEffect(settings, store) { store.saveSettings(settings) }
+    LaunchedEffect(selection) { prioritizeNotice = false }
 
     val paused = externallyPaused || manuallyPaused || !lifecycleResumed
     val performMove: (SolitaireMove) -> Unit = { move ->
         if (!paused) {
             val result = MidnightSolitaireEngine.apply(sessionHolder.value, move)
             notice = result.message
+            prioritizeNotice = !result.changed
             if (result.changed) {
                 session = result.session
                 store.saveSession(result.session)
@@ -202,6 +205,7 @@ fun MidnightSolitaireGame(
             else -> "PLAYING"
         },
         notice = notice,
+        prioritizeNotice = prioritizeNotice,
         canUndo = session.undoStack.isNotEmpty(),
         compactLayout = compactLayout,
         onDrawOrRecycle = { performMove(SolitaireMove.DrawOrRecycle) },
@@ -270,6 +274,7 @@ fun MidnightSolitaireGame(
             if (!paused) {
                 val result = MidnightSolitaireEngine.undo(sessionHolder.value)
                 notice = result.message
+                prioritizeNotice = !result.changed
                 if (result.changed) {
                     session = result.session
                     store.saveSession(result.session)
@@ -328,6 +333,7 @@ private fun MidnightSolitaireLayout(
     paused: Boolean,
     pauseLabel: String,
     notice: String,
+    prioritizeNotice: Boolean,
     canUndo: Boolean,
     compactLayout: Boolean,
     onDrawOrRecycle: () -> Unit,
@@ -343,6 +349,14 @@ private fun MidnightSolitaireLayout(
     onToggleLargeText: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val displayedNotice = when {
+        state.status == SolitaireStatus.WON ->
+            "You won. There is no timer or loss; undo, restart, or choose another deal."
+
+        selected != null && prioritizeNotice -> notice
+        selected != null -> "Selected: ${selectionDescription(selected, state)}. Choose a target."
+        else -> notice
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -477,17 +491,11 @@ private fun MidnightSolitaireLayout(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("solitaire_notice")
-                    .semantics { liveRegion = LiveRegionMode.Polite },
+                    .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
                 color = TableNavy.copy(alpha = 0.94f),
             ) {
                 Text(
-                    text = when {
-                        state.status == SolitaireStatus.WON ->
-                            "You won. There is no timer or loss; undo, restart, or choose another deal."
-
-                        selected != null -> "Selected: ${selectionDescription(selected, state)}. Choose a target."
-                        else -> notice
-                    },
+                    text = displayedNotice,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                     color = if (state.status == SolitaireStatus.WON) MutedGold else WarmIvory,
                     fontSize = if (settings.largeCardText) 14.sp else 11.sp,
