@@ -119,7 +119,10 @@ private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
 )
 
 @Composable
-fun ArcadeApp(modifier: Modifier = Modifier) {
+fun ArcadeApp(
+    modifier: Modifier = Modifier,
+    portraitResourceId: Int? = null,
+) {
     var state by rememberSaveable(stateSaver = ArcadeUiStateSaver) {
         mutableStateOf(ArcadeUiState())
     }
@@ -133,6 +136,7 @@ fun ArcadeApp(modifier: Modifier = Modifier) {
     ArcadeExperience(
         state = state,
         onAction = dispatch,
+        portraitResourceId = portraitResourceId,
         modifier = modifier,
     )
 }
@@ -142,6 +146,7 @@ fun ArcadeExperience(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
     modifier: Modifier = Modifier,
+    portraitResourceId: Int? = null,
 ) {
     val lobbyListState = rememberLazyListState()
     Box(
@@ -155,13 +160,27 @@ fun ArcadeExperience(
     ) {
         val selectedGame = state.selectedGame
         if (selectedGame == null) {
-            ArcadeLobby(state = state, listState = lobbyListState, onAction = onAction)
+            ArcadeLobby(
+                state = state,
+                listState = lobbyListState,
+                onAction = onAction,
+                portraitResourceId = portraitResourceId,
+            )
         } else {
-            ArcadeGameScreen(game = selectedGame, state = state, onAction = onAction)
+            ArcadeGameScreen(
+                game = selectedGame,
+                state = state,
+                onAction = onAction,
+                portraitResourceId = portraitResourceId,
+            )
         }
 
         if (state.conversationOpen) {
-            ConversationOverlay(state = state, onAction = onAction)
+            ConversationOverlay(
+                state = state,
+                onAction = onAction,
+                portraitResourceId = portraitResourceId,
+            )
         }
     }
 }
@@ -171,6 +190,7 @@ private fun ArcadeLobby(
     state: ArcadeUiState,
     listState: LazyListState,
     onAction: (ArcadeAction) -> Unit,
+    portraitResourceId: Int?,
 ) {
     LazyColumn(
         state = listState,
@@ -228,7 +248,7 @@ private fun ArcadeLobby(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    TemporaryRivenPortrait()
+                    ApprovedRivenPortrait(resourceId = portraitResourceId)
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (state.quietMode) "Quiet mode is on" else "Choose a table",
@@ -239,7 +259,11 @@ private fun ArcadeLobby(
                             text = if (state.quietMode) {
                                 "I will stay quiet, but you can tap me whenever you want to chat."
                             } else {
-                                "Five tables are being prepared. Tap my portrait to open conversation."
+                                if (portraitResourceId == null) {
+                                    "Five tables are being prepared. Tap this card to open conversation."
+                                } else {
+                                    "Five tables are being prepared. Tap my portrait to open conversation."
+                                }
                             },
                             color = MistBlue,
                             style = MaterialTheme.typography.bodyMedium,
@@ -327,6 +351,7 @@ private fun ArcadeGameScreen(
     game: ArcadeGame,
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
+    portraitResourceId: Int?,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -365,6 +390,7 @@ private fun ArcadeGameScreen(
                         game = game,
                         quiet = state.quietMode,
                         hold = state.interactionHold,
+                        portraitResourceId = portraitResourceId,
                         onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
                     )
                 }
@@ -405,6 +431,7 @@ private fun ArcadeGameScreen(
                     game = game,
                     quiet = state.quietMode,
                     hold = state.interactionHold,
+                    portraitResourceId = portraitResourceId,
                     onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
                 )
                 GameBoardCard(
@@ -578,6 +605,7 @@ private fun RivenCompanionBar(
     game: ArcadeGame,
     quiet: Boolean,
     hold: ArcadeInteractionHold,
+    portraitResourceId: Int?,
     onPortraitTap: () -> Unit,
 ) {
     Surface(
@@ -595,7 +623,7 @@ private fun RivenCompanionBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            TemporaryRivenPortrait(compact = true)
+            ApprovedRivenPortrait(resourceId = portraitResourceId, compact = true)
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = when (hold) {
@@ -629,37 +657,22 @@ private fun RivenCompanionBar(
 }
 
 @Composable
-private fun TemporaryRivenPortrait(compact: Boolean = false) {
+private fun ApprovedRivenPortrait(
+    resourceId: Int?,
+    compact: Boolean = false,
+) {
+    if (resourceId == null) return
     val size = if (compact) 54.dp else 68.dp
-    Box(
+    Image(
+        painter = painterResource(resourceId),
+        contentDescription = "Riven",
         modifier = Modifier
             .size(size)
             .clip(CircleShape)
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(Color(0xFF34546A), TableNavy, DeepInk),
-                ),
-            )
-            .border(2.dp, MutedGold, CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "R",
-            color = WarmIvory,
-            fontSize = if (compact) 25.sp else 31.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Text(
-            text = "TEMP",
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .background(MutedGold, RoundedCornerShape(6.dp))
-                .padding(horizontal = 4.dp, vertical = 1.dp),
-            color = DeepInk,
-            fontSize = 7.sp,
-            fontWeight = FontWeight.Bold,
-        )
-    }
+            .border(2.dp, MutedGold, CircleShape)
+            .testTag("approved_arcade_portrait"),
+        contentScale = ContentScale.Crop,
+    )
 }
 
 @Composable
@@ -712,6 +725,7 @@ private fun StatusPill(text: String) {
 private fun ConversationOverlay(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
+    portraitResourceId: Int?,
 ) {
     Dialog(
         onDismissRequest = { onAction(ArcadeAction.DismissConversation) },
@@ -748,7 +762,7 @@ private fun ConversationOverlay(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        TemporaryRivenPortrait(compact = true)
+                        ApprovedRivenPortrait(resourceId = portraitResourceId, compact = true)
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Conversation",

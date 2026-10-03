@@ -72,7 +72,9 @@ class RivenPresenceServiceTest {
 
     @Test
     fun approvedArtCatalogKeepsRoomSpritesAndArcadePortraitSeparate() {
+        assertNull(NoApprovedRivenVisualAssets.roomBackgroundAssetId(RivenRoom.LIVING_ROOM))
         assertNull(NoApprovedRivenVisualAssets.fullBodyAssetId(RivenSemanticSprite.STANDING_WARM_SMILE))
+        assertNull(NoApprovedRivenVisualAssets.brandIconAssetId())
         assertNull(NoApprovedRivenVisualAssets.arcadePortraitAssetId())
     }
 }

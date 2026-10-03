@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -64,6 +66,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -108,6 +111,7 @@ enum class RivenDestination(val label: String) {
     CHAT("Chat"),
     ALARMS("Alarms"),
     ARCADE("Arcade"),
+    MEMORY("Memory"),
     SETTINGS("Settings"),
 }
 
@@ -116,6 +120,7 @@ fun RivenApp(
     reminderControllerFactory: (android.content.Context) -> ReminderController = {
         ReminderRuntime.from(it).repository
     },
+    uiAssets: RivenUiAssets = RivenUiAssets.Empty,
     runtimeFactory: (android.content.Context) -> RivenRuntimeController = {
         RivenConversationRuntime.fromContext(it)
     },
@@ -244,12 +249,16 @@ fun RivenApp(
                 modifier = Modifier.padding(padding),
                 controllerFactory = reminderControllerFactory,
             )
-            destination == RivenDestination.ARCADE -> ArcadeApp(modifier = Modifier.padding(padding))
+            destination == RivenDestination.ARCADE -> ArcadeApp(
+                modifier = Modifier.padding(padding),
+                portraitResourceId = uiAssets.arcadePortraitResourceId,
+            )
             loading -> LoadingScreen(padding)
-            destination == RivenDestination.SETTINGS -> SettingsScreen(
+            destination == RivenDestination.SETTINGS || destination == RivenDestination.MEMORY -> SettingsScreen(
                 runtime = runtime,
                 snapshot = snapshot,
                 onSnapshot = { snapshot = it },
+                memoryOnly = destination == RivenDestination.MEMORY,
                 modifier = Modifier.padding(padding),
             )
             else -> ChatScreen(
@@ -267,6 +276,7 @@ fun RivenApp(
                 onSnapshot = { snapshot = it },
                 onConversationJobChanged = { activeConversationJob = it },
                 onOpenSettings = { navigateTo(RivenDestination.SETTINGS) },
+                uiAssets = uiAssets,
                 modifier = Modifier.padding(padding),
             )
         }
@@ -344,6 +354,29 @@ private fun DestinationIcon(destination: RivenDestination) {
                 drawLine(gold, Offset(8.dp.toPx(), 22.dp.toPx()), Offset(6.dp.toPx(), 25.dp.toPx()), thin)
                 drawLine(gold, Offset(20.dp.toPx(), 22.dp.toPx()), Offset(22.dp.toPx(), 25.dp.toPx()), thin)
             }
+            RivenDestination.MEMORY -> {
+                val left = 4.dp.toPx()
+                val top = 4.dp.toPx()
+                val pageWidth = 9.dp.toPx()
+                val pageHeight = 20.dp.toPx()
+                drawRoundRect(
+                    color = gold,
+                    topLeft = Offset(left, top),
+                    size = Size(pageWidth, pageHeight),
+                    cornerRadius = CornerRadius(1.5.dp.toPx()),
+                    style = Stroke(stroke),
+                )
+                drawRoundRect(
+                    color = gold,
+                    topLeft = Offset(size.width - left - pageWidth, top),
+                    size = Size(pageWidth, pageHeight),
+                    cornerRadius = CornerRadius(1.5.dp.toPx()),
+                    style = Stroke(stroke),
+                )
+                drawLine(gold, Offset(center.x, top + 1.dp.toPx()), Offset(center.x, top + pageHeight), thin)
+                drawLine(gold, Offset(left + 2.dp.toPx(), 10.dp.toPx()), Offset(left + pageWidth - 2.dp.toPx(), 10.dp.toPx()), thin)
+                drawLine(gold, Offset(size.width - left - pageWidth + 2.dp.toPx(), 10.dp.toPx()), Offset(size.width - left - 2.dp.toPx(), 10.dp.toPx()), thin)
+            }
             RivenDestination.SETTINGS -> {
                 val left = 3.dp.toPx()
                 val top = 4.dp.toPx()
@@ -387,6 +420,7 @@ private fun ChatScreen(
     onSnapshot: (RivenRuntimeSnapshot) -> Unit,
     onConversationJobChanged: (Job?) -> Unit,
     onOpenSettings: () -> Unit,
+    uiAssets: RivenUiAssets,
     modifier: Modifier = Modifier,
 ) {
     var snapshot by remember(initialSnapshot) { mutableStateOf(initialSnapshot) }
@@ -513,7 +547,7 @@ private fun ChatScreen(
         ),
     ) {
         val compact = maxHeight < 640.dp || maxWidth < 360.dp
-        RoomBackdrop(snapshot?.roomState)
+        RoomBackdrop(snapshot?.roomState, uiAssets)
         Column(
             modifier = Modifier.fillMaxSize().imePadding().testTag(if (compact) "chat_compact" else "chat_normal"),
         ) {
@@ -522,9 +556,19 @@ private fun ChatScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
-                    Text("RIVEN", color = MutedGold, style = MaterialTheme.typography.labelMedium)
-                    Text("Conversation", color = WarmIvory, style = MaterialTheme.typography.headlineSmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    uiAssets.brandIconResourceId?.let { resourceId ->
+                        Image(
+                            painter = painterResource(resourceId),
+                            contentDescription = "Riven brand icon",
+                            modifier = Modifier.size(36.dp).testTag("riven_brand_icon"),
+                            contentScale = ContentScale.Fit,
+                        )
+                    }
+                    Column(modifier = Modifier.padding(start = if (uiAssets.brandIconResourceId == null) 0.dp else 8.dp)) {
+                        Text("RIVEN", color = MutedGold, style = MaterialTheme.typography.labelMedium)
+                        Text("Conversation", color = WarmIvory, style = MaterialTheme.typography.headlineSmall)
+                    }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -573,7 +617,7 @@ private fun ChatScreen(
                     }
                 }
                 items(messages, key = { it.id }) { message ->
-                    MessageBubble(message, onLoadImagePreview = ::loadImagePreview)
+                    MessageBubble(message, compact = compact, onLoadImagePreview = ::loadImagePreview)
                 }
                 if (streamedReply.isNotBlank()) {
                     item(key = "streaming") {
@@ -586,6 +630,7 @@ private fun ChatScreen(
                                 providerModel = null,
                             ),
                             streaming = true,
+                            compact = compact,
                             onLoadImagePreview = {},
                         )
                     }
@@ -784,6 +829,7 @@ private fun StatusBanner(message: String) {
 private fun MessageBubble(
     message: RivenChatMessage,
     streaming: Boolean = false,
+    compact: Boolean = false,
     onLoadImagePreview: (String) -> Unit,
 ) {
     val isRiven = message.role == MessageRole.ASSISTANT
@@ -792,14 +838,18 @@ private fun MessageBubble(
         horizontalArrangement = if (isRiven) Arrangement.Start else Arrangement.End,
     ) {
         Card(
-            modifier = Modifier.fillMaxWidth(0.88f),
+            modifier = Modifier.fillMaxWidth(if (compact) 0.94f else 0.86f),
             colors = CardDefaults.cardColors(
-                containerColor = if (isRiven) DeepInk else ShaiHunterGreen,
+                containerColor = if (isRiven) DeepInk.copy(alpha = 0.94f) else ShaiHunterGreen.copy(alpha = 0.96f),
             ),
-            shape = RoundedCornerShape(18.dp),
+            border = BorderStroke(1.dp, MutedGold.copy(alpha = if (isRiven) 0.34f else 0.46f)),
+            shape = RoundedCornerShape(if (compact) 16.dp else 20.dp),
         ) {
             Column(
-                Modifier.artDecoBubbleFiligree().padding(horizontal = 32.dp, vertical = 24.dp),
+                Modifier.artDecoBubbleFiligree().padding(
+                    horizontal = if (compact) 20.dp else 28.dp,
+                    vertical = if (compact) 15.dp else 20.dp,
+                ),
             ) {
                 Text(if (isRiven) "Riven" else "Shai", color = MutedGold, fontWeight = FontWeight.Bold)
                 message.images.forEach { image ->
@@ -816,7 +866,7 @@ private fun MessageBubble(
                     Text(
                         message.content + if (streaming) " …" else "",
                         color = WarmIvory,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = if (compact) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodyLarge,
                     )
                 }
             }
@@ -825,27 +875,61 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun RoomBackdrop(state: RivenPresenceSnapshot?) {
+private fun RoomBackdrop(state: RivenPresenceSnapshot?, uiAssets: RivenUiAssets) {
     val room = state?.browsedRoom ?: RivenRoom.LIVING_ROOM
+    val backgroundResourceId = uiAssets.roomBackgroundResourceId(room)
+    val spriteResourceId = uiAssets.visibleSpriteResourceId(state)
     Box(
         modifier = Modifier.fillMaxSize().testTag("room_backdrop_${room.stableId}"),
     ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val gold = MutedGold.copy(alpha = 0.20f)
-            val green = ShaiHunterGreen.copy(alpha = 0.22f)
-            drawRect(green, topLeft = Offset(0f, size.height * 0.64f), size = Size(size.width, size.height * 0.36f))
-            drawLine(gold, Offset(size.width * 0.08f, size.height * 0.64f), Offset(size.width * 0.92f, size.height * 0.64f), 2.dp.toPx())
-            drawRoundRect(
-                color = gold,
-                topLeft = Offset(size.width * 0.12f, size.height * 0.18f),
-                size = Size(size.width * 0.76f, size.height * 0.32f),
-                cornerRadius = CornerRadius(8.dp.toPx()),
-                style = Stroke(1.2.dp.toPx()),
+        if (backgroundResourceId != null) {
+            Image(
+                painter = painterResource(backgroundResourceId),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().testTag("approved_room_art_${room.stableId}"),
+                contentScale = ContentScale.Crop,
             )
-            drawCircle(gold, 2.dp.toPx(), Offset(size.width * 0.18f, size.height * 0.12f))
-            drawCircle(gold, 1.5.dp.toPx(), Offset(size.width * 0.78f, size.height * 0.09f))
-            drawCircle(gold, 1.dp.toPx(), Offset(size.width * 0.88f, size.height * 0.28f))
+        } else {
+            Canvas(Modifier.fillMaxSize()) {
+                val gold = MutedGold.copy(alpha = 0.20f)
+                val green = ShaiHunterGreen.copy(alpha = 0.22f)
+                drawRect(green, topLeft = Offset(0f, size.height * 0.64f), size = Size(size.width, size.height * 0.36f))
+                drawLine(gold, Offset(size.width * 0.08f, size.height * 0.64f), Offset(size.width * 0.92f, size.height * 0.64f), 2.dp.toPx())
+                drawRoundRect(
+                    color = gold,
+                    topLeft = Offset(size.width * 0.12f, size.height * 0.18f),
+                    size = Size(size.width * 0.76f, size.height * 0.32f),
+                    cornerRadius = CornerRadius(8.dp.toPx()),
+                    style = Stroke(1.2.dp.toPx()),
+                )
+                drawCircle(gold, 2.dp.toPx(), Offset(size.width * 0.18f, size.height * 0.12f))
+                drawCircle(gold, 1.5.dp.toPx(), Offset(size.width * 0.78f, size.height * 0.09f))
+                drawCircle(gold, 1.dp.toPx(), Offset(size.width * 0.88f, size.height * 0.28f))
+            }
         }
+        if (spriteResourceId != null && state != null) {
+            val placement = state.semanticSprite.uiPlacement()
+            val alignment = when (placement.anchor) {
+                RivenSpriteAnchor.START -> Alignment.BottomStart
+                RivenSpriteAnchor.CENTER -> Alignment.BottomCenter
+                RivenSpriteAnchor.END -> Alignment.BottomEnd
+            }
+            Image(
+                painter = painterResource(spriteResourceId),
+                contentDescription = "Riven ${state.semanticSprite.stableId.replace('_', ' ')}",
+                modifier = Modifier
+                    .align(alignment)
+                    .fillMaxHeight(placement.heightFraction)
+                    .padding(bottom = placement.bottomPaddingDp.dp)
+                    .testTag("approved_riven_sprite_${state.semanticSprite.stableId}"),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        Box(
+            modifier = Modifier.fillMaxSize().background(
+                DeepInk.copy(alpha = if (backgroundResourceId == null) 0.08f else 0.30f),
+            ),
+        )
         Text(
             room.displayName.uppercase(),
             color = MutedGold.copy(alpha = 0.62f),
@@ -853,8 +937,6 @@ private fun RoomBackdrop(state: RivenPresenceSnapshot?) {
             modifier = Modifier.align(Alignment.TopCenter).padding(top = 78.dp)
                 .testTag("browsed_room_label"),
         )
-        // Full-body art is intentionally absent until an approved asset id is supplied. The
-        // browsing room may therefore be empty, including when Riven's actual room differs.
     }
 }
 
@@ -1047,6 +1129,7 @@ private fun SettingsScreen(
     snapshot: RivenRuntimeSnapshot?,
     onSnapshot: (RivenRuntimeSnapshot) -> Unit,
     modifier: Modifier = Modifier,
+    memoryOnly: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     var editingProfileId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1093,15 +1176,21 @@ private fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = modifier.fillMaxSize().background(PenthouseNavy).testTag("settings_screen"),
+        modifier = modifier.fillMaxSize().background(PenthouseNavy)
+            .testTag(if (memoryOnly) "memory_screen" else "settings_screen"),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            Text("Settings", color = WarmIvory, style = MaterialTheme.typography.headlineMedium)
-            Text("Provider secrets stay in Android Keystore-backed app storage.", color = MistBlue)
+            Text(if (memoryOnly) "Memory" else "Settings", color = WarmIvory, style = MaterialTheme.typography.headlineMedium)
+            Text(
+                if (memoryOnly) "Review what Riven may carry forward."
+                else "Provider secrets stay in Android Keystore-backed app storage.",
+                color = MistBlue,
+            )
         }
         notice?.let { item { StatusBanner(it) } }
+        if (!memoryOnly) {
         item { SectionTitle("OpenRouter profiles") }
         item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1273,6 +1362,7 @@ private fun SettingsScreen(
             ) { Text("Save instructions") }
         }
         item { HorizontalDivider(color = MutedGold.copy(alpha = 0.3f)) }
+        }
         item { SectionTitle("Automatic memory") }
         item {
             val status = snapshot?.automaticMemoryStatus

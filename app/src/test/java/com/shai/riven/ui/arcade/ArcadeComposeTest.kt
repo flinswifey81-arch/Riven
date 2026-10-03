@@ -71,6 +71,20 @@ class ArcadeComposeTest {
     }
 
     @Test
+    fun lobbyWithoutMaterializedPortraitUsesNoVisualSubstitute() {
+        composeRule.setContent {
+            RivenTheme {
+                ArcadeExperience(state = ArcadeUiState(), onAction = {})
+            }
+        }
+
+        composeRule.onAllNodesWithTag("approved_arcade_portrait").assertCountEquals(0)
+        composeRule.onNodeWithText(
+            "Five tables are being prepared. Tap this card to open conversation.",
+        ).assertIsDisplayed()
+    }
+
+    @Test
     fun sharedTableShowsHiddenOpponentHandUserHandAndApprovedControls() {
         composeRule.setContent {
             RivenTheme {

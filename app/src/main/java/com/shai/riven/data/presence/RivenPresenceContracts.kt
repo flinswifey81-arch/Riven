@@ -48,13 +48,17 @@ sealed interface RivenPresenceWriteResult {
     data class Rejected(val reason: String) : RivenPresenceWriteResult
 }
 
-/** Approved art is deliberately supplied later; room state never fabricates replacement assets. */
+/** Consumer-local approved art stays nullable until materialized; room state never fabricates it. */
 interface RivenVisualAssetCatalog {
+    fun roomBackgroundAssetId(room: RivenRoom): String?
     fun fullBodyAssetId(sprite: RivenSemanticSprite): String?
+    fun brandIconAssetId(): String?
     fun arcadePortraitAssetId(): String?
 }
 
 object NoApprovedRivenVisualAssets : RivenVisualAssetCatalog {
+    override fun roomBackgroundAssetId(room: RivenRoom): String? = null
     override fun fullBodyAssetId(sprite: RivenSemanticSprite): String? = null
+    override fun brandIconAssetId(): String? = null
     override fun arcadePortraitAssetId(): String? = null
 }

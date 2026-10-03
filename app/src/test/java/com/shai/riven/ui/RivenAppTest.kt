@@ -89,6 +89,7 @@ class RivenAppNormalTest {
         composeRule.onNodeWithContentDescription("Chat destination", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Alarms destination", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Arcade destination", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Memory destination", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Settings destination", useUnmergedTree = true).assertIsDisplayed()
         writeScreenshot("chat-normal.png")
 
@@ -100,6 +101,9 @@ class RivenAppNormalTest {
         composeRule.onNodeWithTag("nav_settings").performClick()
         composeRule.onNodeWithTag("settings_screen").assertIsDisplayed()
         composeRule.onNodeWithTag("credential_status").assertIsDisplayed()
+        composeRule.onNodeWithTag("nav_memory").performClick()
+        composeRule.onNodeWithTag("memory_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("automatic_memory_status").assertIsDisplayed()
         composeRule.onNodeWithTag("nav_arcade").performClick()
         composeRule.onNodeWithTag("arcade_catalog").assertIsDisplayed()
     }
