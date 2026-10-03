@@ -62,10 +62,16 @@ import com.shai.riven.ui.theme.MutedGold
 import com.shai.riven.ui.theme.PenthouseNavy
 import com.shai.riven.ui.theme.TableNavyRaised
 import com.shai.riven.ui.theme.WarmIvory
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.ui.arcade.ArcadeGame
+import com.shai.riven.ui.arcade.ArcadeObservationSignature
+import com.shai.riven.ui.arcade.meaningfulArcadeEvent
+import com.shai.riven.ui.arcade.toArcadeObservation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlin.math.min
+import java.util.UUID
 
 private val DustyTeal = Color(0xFF67A7A2)
 private val MutedCoral = Color(0xFFC7796E)
@@ -83,6 +89,7 @@ fun CelestialSpireGame(
     storeOverride: CelestialSpireStore? = null,
     soundPlayerFactory: () -> CelestialSpireSoundPlayer = { AndroidCelestialSpireSoundPlayer() },
     initialSeed: Long? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
 ) {
     val context = LocalContext.current
     val store = storeOverride ?: remember(context) { SharedPreferencesCelestialSpireStore(context) }
@@ -131,6 +138,34 @@ fun CelestialSpireGame(
     }
 
     val paused = externallyPaused || manuallyPaused || settingsOpen || !lifecycleResumed
+    val observationSessionId = rememberSaveable { UUID.randomUUID().toString() }
+    var observationSequence by rememberSaveable(observationSessionId) { mutableStateOf(0L) }
+    var previousObservationSignature by remember(observationSessionId) {
+        mutableStateOf<ArcadeObservationSignature?>(null)
+    }
+    val observationSignature = ArcadeObservationSignature(
+        primary = state.piecesPlaced,
+        secondary = state.linesCleared,
+        tertiary = state.boardRefreshes,
+        paused = paused,
+    )
+    LaunchedEffect(observationSignature, observationSessionId) {
+        observationSequence += 1L
+        onObservation(
+            state.toArcadeObservation(
+                sessionId = observationSessionId,
+                sequence = observationSequence,
+                paused = paused,
+                event = meaningfulArcadeEvent(
+                    ArcadeGame.STACKER,
+                    previousObservationSignature,
+                    observationSignature,
+                ),
+                observedAt = System.currentTimeMillis(),
+            ),
+        )
+        previousObservationSignature = observationSignature
+    }
     val performAction: (SpireAction) -> Unit = { action ->
         if (!paused) {
             val result = CelestialSpireEngine.step(state, action)

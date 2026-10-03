@@ -68,6 +68,12 @@ import com.shai.riven.ui.theme.MutedGold
 import com.shai.riven.ui.theme.TableNavy
 import com.shai.riven.ui.theme.TableNavyRaised
 import com.shai.riven.ui.theme.WarmIvory
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.ui.arcade.ArcadeGame
+import com.shai.riven.ui.arcade.ArcadeObservationSignature
+import com.shai.riven.ui.arcade.meaningfulArcadeEvent
+import com.shai.riven.ui.arcade.toArcadeObservation
+import java.util.UUID
 
 private val HunterGreen = Color(0xFF173F35)
 private val CardRed = Color(0xFF9F3345)
@@ -97,6 +103,7 @@ fun MidnightSolitaireGame(
     compactLayout: Boolean = false,
     storeOverride: MidnightSolitaireStore? = null,
     initialSeed: Long? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
 ) {
     val context = LocalContext.current
     val store = storeOverride ?: remember(context) { SharedPreferencesMidnightSolitaireStore(context) }
@@ -142,6 +149,36 @@ fun MidnightSolitaireGame(
     LaunchedEffect(selection) { prioritizeNotice = false }
 
     val paused = externallyPaused || manuallyPaused || !lifecycleResumed
+    val dealIdentity = "${session.game.dealNumber}:${session.game.dealSeed}"
+    val observationSessionId = rememberSaveable(dealIdentity) { UUID.randomUUID().toString() }
+    var observationSequence by rememberSaveable(observationSessionId) { mutableStateOf(0L) }
+    var previousObservationSignature by remember(observationSessionId) {
+        mutableStateOf<ArcadeObservationSignature?>(null)
+    }
+    val observationSignature = ArcadeObservationSignature(
+        primary = session.game.moves,
+        secondary = session.game.foundations.sumOf { pile -> pile.size },
+        tertiary = session.game.recycles,
+        paused = paused,
+        sessionMarker = session.game.dealNumber,
+    )
+    LaunchedEffect(observationSignature, observationSessionId) {
+        observationSequence += 1L
+        onObservation(
+            session.game.toArcadeObservation(
+                sessionId = observationSessionId,
+                sequence = observationSequence,
+                paused = paused,
+                event = meaningfulArcadeEvent(
+                    ArcadeGame.KLONDIKE,
+                    previousObservationSignature,
+                    observationSignature,
+                ),
+                observedAt = System.currentTimeMillis(),
+            ),
+        )
+        previousObservationSignature = observationSignature
+    }
     val performMove: (SolitaireMove) -> Unit = { move ->
         if (!paused) {
             val result = MidnightSolitaireEngine.apply(sessionHolder.value, move)

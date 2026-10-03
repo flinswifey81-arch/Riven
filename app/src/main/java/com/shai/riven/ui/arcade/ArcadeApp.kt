@@ -45,8 +45,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -77,6 +80,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.shai.riven.R
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.data.persistence.model.MessageRole
+import com.shai.riven.data.runtime.RivenRuntimeController
+import com.shai.riven.data.runtime.RivenRuntimeResult
+import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.comet.CometTrailGame
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireGame
 import com.shai.riven.ui.arcade.solitaire.MidnightSolitaireStore
@@ -98,12 +106,29 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+data class ArcadeConversationHost(
+    val runtime: RivenRuntimeController,
+    val snapshot: RivenRuntimeSnapshot?,
+    val draft: String,
+    val onDraftChange: (String) -> Unit,
+    val onRuntimeSnapshot: (RivenRuntimeSnapshot) -> Unit,
+    val onOpenSettings: () -> Unit,
+    val onConversationJobChanged: (Job?) -> Unit,
+)
 
 private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
     save = { state ->
         listOf(
             state.selectedGameId.orEmpty(),
             state.quietMode,
+            state.commentaryCuesEnabled,
+            state.commentaryCue.orEmpty(),
             state.conversationOpen,
             state.conversationDraft,
             state.demoNotice.orEmpty(),
@@ -113,9 +138,11 @@ private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
         ArcadeUiState(
             selectedGameId = (saved[0] as String).ifBlank { null },
             quietMode = saved[1] as Boolean,
-            conversationOpen = saved[2] as Boolean,
-            conversationDraft = saved[3] as String,
-            demoNotice = (saved[4] as String).ifBlank { null },
+            commentaryCuesEnabled = saved[2] as Boolean,
+            commentaryCue = (saved[3] as String).ifBlank { null },
+            conversationOpen = saved[4] as Boolean,
+            conversationDraft = saved[5] as String,
+            demoNotice = (saved[6] as String).ifBlank { null },
         )
     },
 )
@@ -124,12 +151,29 @@ private val ArcadeUiStateSaver = listSaver<ArcadeUiState, Any>(
 fun ArcadeApp(
     modifier: Modifier = Modifier,
     portraitResourceId: Int? = null,
+    conversationHost: ArcadeConversationHost? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
+    onObservationCleared: () -> Unit = {},
 ) {
     var state by rememberSaveable(stateSaver = ArcadeUiStateSaver) {
         mutableStateOf(ArcadeUiState())
     }
     val dispatch: (ArcadeAction) -> Unit = { action ->
         state = reduceArcadeState(state, action)
+    }
+    val commentaryGate = remember { ArcadeCommentaryGate() }
+    val publishObservation: (ArcadeGameObservation) -> Unit = { observation ->
+        onObservation(observation)
+        commentaryGate.consider(state.commentaryCuesEnabled, observation)?.let { cue ->
+            dispatch(ArcadeAction.ShowCommentaryCue(cue))
+        }
+    }
+
+    DisposableEffect(state.selectedGameId) {
+        val observedGameId = state.selectedGameId
+        onDispose {
+            if (observedGameId != null) onObservationCleared()
+        }
     }
 
     BackHandler(enabled = state.conversationOpen || state.selectedGame != null) {
@@ -139,6 +183,8 @@ fun ArcadeApp(
         state = state,
         onAction = dispatch,
         portraitResourceId = portraitResourceId,
+        conversationHost = conversationHost,
+        onObservation = publishObservation,
         modifier = modifier,
     )
 }
@@ -150,6 +196,8 @@ fun ArcadeExperience(
     modifier: Modifier = Modifier,
     portraitResourceId: Int? = null,
     solitaireStoreOverride: MidnightSolitaireStore? = null,
+    conversationHost: ArcadeConversationHost? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
 ) {
     val lobbyListState = rememberLazyListState()
     Box(
@@ -176,6 +224,7 @@ fun ArcadeExperience(
                 onAction = onAction,
                 portraitResourceId = portraitResourceId,
                 solitaireStoreOverride = solitaireStoreOverride,
+                onObservation = onObservation,
             )
         }
 
@@ -184,6 +233,7 @@ fun ArcadeExperience(
                 state = state,
                 onAction = onAction,
                 portraitResourceId = portraitResourceId,
+                host = conversationHost,
             )
         }
     }
@@ -230,10 +280,16 @@ private fun ArcadeLobby(
                         color = WarmIvory,
                     )
                 }
-                QuietControl(
-                    quiet = state.quietMode,
-                    onToggle = { onAction(ArcadeAction.ToggleQuietMode) },
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    QuietControl(
+                        quiet = state.quietMode,
+                        onToggle = { onAction(ArcadeAction.ToggleQuietMode) },
+                    )
+                    CommentaryCueControl(
+                        enabled = state.commentaryCuesEnabled,
+                        onToggle = { onAction(ArcadeAction.ToggleCommentaryCues) },
+                    )
+                }
             }
         }
 
@@ -289,7 +345,7 @@ private fun ArcadeLobby(
 
         item {
             Text(
-                text = "Four solo tables are playable • Cosmic Mischief and live Riven replies remain unconnected.",
+                text = "Four solo tables are playable • Cosmic Mischief remains a future shared table.",
                 modifier = Modifier.fillMaxWidth(),
                 color = MistBlue.copy(alpha = 0.78f),
                 style = MaterialTheme.typography.bodySmall,
@@ -357,6 +413,7 @@ private fun ArcadeGameScreen(
     onAction: (ArcadeAction) -> Unit,
     portraitResourceId: Int?,
     solitaireStoreOverride: MidnightSolitaireStore?,
+    onObservation: (ArcadeGameObservation) -> Unit,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -371,6 +428,7 @@ private fun ArcadeGameScreen(
                 state = state,
                 onAction = onAction,
                 solitaireStoreOverride = solitaireStoreOverride,
+                onObservation = onObservation,
             )
         } else if (useScrollableLayout) {
             LazyColumn(
@@ -387,8 +445,10 @@ private fun ArcadeGameScreen(
                     GameTopBar(
                         game = game,
                         quiet = state.quietMode,
+                        commentaryCuesEnabled = state.commentaryCuesEnabled,
                         onBack = { onAction(ArcadeAction.ExitGame) },
                         onQuietToggle = { onAction(ArcadeAction.ToggleQuietMode) },
+                        onCommentaryCuesToggle = { onAction(ArcadeAction.ToggleCommentaryCues) },
                     )
                 }
                 item {
@@ -396,6 +456,8 @@ private fun ArcadeGameScreen(
                         game = game,
                         quiet = state.quietMode,
                         hold = state.interactionHold,
+                        commentaryCuesEnabled = state.commentaryCuesEnabled,
+                        commentaryCue = state.commentaryCue,
                         portraitResourceId = portraitResourceId,
                         onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
                     )
@@ -406,6 +468,7 @@ private fun ArcadeGameScreen(
                         externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                         onAction = onAction,
                         solitaireStoreOverride = solitaireStoreOverride,
+                        onObservation = onObservation,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(compactBoardHeight(game)),
@@ -431,13 +494,17 @@ private fun ArcadeGameScreen(
                 GameTopBar(
                     game = game,
                     quiet = state.quietMode,
+                    commentaryCuesEnabled = state.commentaryCuesEnabled,
                     onBack = { onAction(ArcadeAction.ExitGame) },
                     onQuietToggle = { onAction(ArcadeAction.ToggleQuietMode) },
+                    onCommentaryCuesToggle = { onAction(ArcadeAction.ToggleCommentaryCues) },
                 )
                 RivenCompanionBar(
                     game = game,
                     quiet = state.quietMode,
                     hold = state.interactionHold,
+                    commentaryCuesEnabled = state.commentaryCuesEnabled,
+                    commentaryCue = state.commentaryCue,
                     portraitResourceId = portraitResourceId,
                     onPortraitTap = { onAction(ArcadeAction.OpenConversation) },
                 )
@@ -446,6 +513,7 @@ private fun ArcadeGameScreen(
                     externallyPaused = state.interactionHold == ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT,
                     onAction = onAction,
                     solitaireStoreOverride = solitaireStoreOverride,
+                    onObservation = onObservation,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -468,6 +536,7 @@ private fun CompactPlayableGameScreen(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
     solitaireStoreOverride: MidnightSolitaireStore?,
+    onObservation: (ArcadeGameObservation) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -500,6 +569,9 @@ private fun CompactPlayableGameScreen(
                 onToggle = { onAction(ArcadeAction.ToggleQuietMode) },
                 compact = true,
             )
+            TextButton(onClick = { onAction(ArcadeAction.ToggleCommentaryCues) }) {
+                Text(if (state.commentaryCuesEnabled) "CUES ON" else "CUES OFF", fontSize = 9.sp)
+            }
             TextButton(
                 onClick = { onAction(ArcadeAction.OpenConversation) },
                 modifier = Modifier.semantics { contentDescription = "Open conversation with Riven" },
@@ -513,6 +585,7 @@ private fun CompactPlayableGameScreen(
             onAction = onAction,
             compactGameLayout = true,
             solitaireStoreOverride = solitaireStoreOverride,
+            onObservation = onObservation,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
@@ -528,6 +601,7 @@ private fun GameBoardCard(
     modifier: Modifier = Modifier,
     compactGameLayout: Boolean = false,
     solitaireStoreOverride: MidnightSolitaireStore? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
 ) {
     Card(
         modifier = modifier,
@@ -539,19 +613,23 @@ private fun GameBoardCard(
             ArcadeGame.STACKER -> CelestialSpireGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
+                onObservation = onObservation,
             )
             ArcadeGame.KLONDIKE -> MidnightSolitaireGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
                 storeOverride = solitaireStoreOverride,
+                onObservation = onObservation,
             )
             ArcadeGame.HEART_MATCH -> StarstruckGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
+                onObservation = onObservation,
             )
             ArcadeGame.WRAPPING_SNAKE -> CometTrailGame(
                 externallyPaused = externallyPaused,
                 compactLayout = compactGameLayout,
+                onObservation = onObservation,
             )
             ArcadeGame.RIVEN_CARD_TABLE -> SharedCardTablePreview(onAction)
         }
@@ -586,8 +664,10 @@ private fun compactBoardHeight(game: ArcadeGame): Dp = when (game) {
 private fun GameTopBar(
     game: ArcadeGame,
     quiet: Boolean,
+    commentaryCuesEnabled: Boolean,
     onBack: () -> Unit,
     onQuietToggle: () -> Unit,
+    onCommentaryCuesToggle: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -611,7 +691,14 @@ private fun GameTopBar(
                 style = MaterialTheme.typography.labelSmall,
             )
         }
-        QuietControl(quiet = quiet, onToggle = onQuietToggle, compact = true)
+        Column(horizontalAlignment = Alignment.End) {
+            QuietControl(quiet = quiet, onToggle = onQuietToggle, compact = true)
+            CommentaryCueControl(
+                enabled = commentaryCuesEnabled,
+                onToggle = onCommentaryCuesToggle,
+                compact = true,
+            )
+        }
     }
 }
 
@@ -620,6 +707,8 @@ private fun RivenCompanionBar(
     game: ArcadeGame,
     quiet: Boolean,
     hold: ArcadeInteractionHold,
+    commentaryCuesEnabled: Boolean,
+    commentaryCue: String?,
     portraitResourceId: Int?,
     onPortraitTap: () -> Unit,
 ) {
@@ -644,14 +733,19 @@ private fun RivenCompanionBar(
                     text = when (hold) {
                         ArcadeInteractionHold.SOLO_PAUSED_FOR_CHAT -> "GAME PAUSED FOR CHAT"
                         ArcadeInteractionHold.SHARED_GAME_WAITING_FOR_CHAT -> "RIVEN IS WAITING"
-                        ArcadeInteractionHold.NONE -> if (quiet) "QUIET MODE" else "DEMO COMMENTARY"
+                        ArcadeInteractionHold.NONE -> when {
+                            commentaryCue != null -> "COMMENT CUE READY"
+                            commentaryCuesEnabled -> "COMMENT CUES ON"
+                            quiet -> "QUIET MODE"
+                            else -> "TABLE CONTEXT LIVE"
+                        }
                     },
                     color = MutedGold,
                     style = MaterialTheme.typography.labelSmall,
                     letterSpacing = 1.2.sp,
                 )
                 Text(
-                    text = if (quiet) {
+                    text = commentaryCue ?: if (quiet) {
                         "Tap me when you want company."
                     } else {
                         game.commentary
@@ -724,6 +818,39 @@ private fun QuietControl(
 }
 
 @Composable
+private fun CommentaryCueControl(
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    compact: Boolean = false,
+) {
+    Row(
+        modifier = Modifier
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Local commentary cues"
+                stateDescription = if (enabled) "On" else "Off"
+            }
+            .toggleable(
+                value = enabled,
+                role = Role.Switch,
+                onValueChange = { onToggle() },
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 7.dp),
+    ) {
+        Text(
+            text = "Cues",
+            color = MistBlue,
+            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
+        )
+        Switch(
+            checked = enabled,
+            onCheckedChange = null,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
+    }
+}
+
+@Composable
 private fun StatusPill(text: String) {
     Text(
         text = text,
@@ -741,7 +868,75 @@ private fun ConversationOverlay(
     state: ArcadeUiState,
     onAction: (ArcadeAction) -> Unit,
     portraitResourceId: Int?,
+    host: ArcadeConversationHost?,
 ) {
+    val scope = rememberCoroutineScope()
+    var sending by remember { mutableStateOf(false) }
+    var cancelling by remember { mutableStateOf(false) }
+    var streamedReply by remember { mutableStateOf("") }
+    var runtimeNotice by remember { mutableStateOf<String?>(null) }
+    var conversationJob by remember { mutableStateOf<Job?>(null) }
+    val draft = host?.draft ?: state.conversationDraft
+
+    fun applyResult(result: RivenRuntimeResult) {
+        when (result) {
+            is RivenRuntimeResult.Success -> {
+                host?.onRuntimeSnapshot?.invoke(result.snapshot)
+                runtimeNotice = null
+            }
+            is RivenRuntimeResult.Failure -> {
+                result.snapshot?.let { host?.onRuntimeSnapshot?.invoke(it) }
+                runtimeNotice = result.message
+            }
+        }
+    }
+
+    fun runConversation(
+        preserveDraft: Boolean = false,
+        block: suspend (suspend (String) -> Unit) -> RivenRuntimeResult,
+    ) {
+        if (host == null || sending || cancelling) return
+        sending = true
+        streamedReply = ""
+        runtimeNotice = null
+        conversationJob = scope.launch {
+            try {
+                if (preserveDraft) {
+                    when (val saved = withContext(Dispatchers.IO) { host.runtime.saveDraft(draft) }) {
+                        is RivenRuntimeResult.Success -> host.onRuntimeSnapshot(saved.snapshot)
+                        is RivenRuntimeResult.Failure -> {
+                            applyResult(saved)
+                            return@launch
+                        }
+                    }
+                }
+                val result = withContext(Dispatchers.IO) {
+                    block { delta ->
+                        withContext(Dispatchers.Main.immediate) { streamedReply += delta }
+                    }
+                }
+                applyResult(result)
+            } catch (_: CancellationException) {
+                runtimeNotice = "Reply cancelled. Your message remains in the persistent conversation."
+            } catch (_: Exception) {
+                runtimeNotice = "Riven could not complete this reply. Your draft remains saved."
+            } finally {
+                streamedReply = ""
+                sending = false
+                conversationJob = null
+                host.onConversationJobChanged(null)
+            }
+        }
+        host.onConversationJobChanged(conversationJob)
+    }
+
+    DisposableEffect(host?.runtime) {
+        onDispose {
+            conversationJob?.cancel(CancellationException("Arcade conversation closed"))
+            host?.onConversationJobChanged?.invoke(null)
+        }
+    }
+
     Dialog(
         onDismissRequest = { onAction(ArcadeAction.DismissConversation) },
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -796,28 +991,140 @@ private fun ConversationOverlay(
                     }
                     HorizontalDivider(color = MutedGold.copy(alpha = 0.22f))
                     Text(
-                        text = "Your draft stays here across dismissal and activity recreation.",
+                        text = "This is the same persistent conversation and selected OpenRouter profile used in Chat.",
                         color = MistBlue,
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    OutlinedTextField(
-                        value = state.conversationDraft,
-                        onValueChange = { onAction(ArcadeAction.UpdateConversationDraft(it)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                        maxLines = 5,
-                        label = { Text("Say something to Riven") },
-                        supportingText = {
-                            Text("${state.conversationDraft.length}/$MAX_ARCADE_CONVERSATION_DRAFT_CHARS")
-                        },
-                    )
+                    val runtimeSnapshot = host?.snapshot
+                    val configured = runtimeSnapshot?.selectedProfileId != null &&
+                        runtimeSnapshot.selectedProfileHasCredential
                     Surface(
                         shape = RoundedCornerShape(14.dp),
                         color = PenthouseNavy.copy(alpha = 0.76f),
                     ) {
+                        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                            Text(
+                                text = if (configured) {
+                                    runtimeSnapshot.profiles.singleOrNull {
+                                        it.profileId == runtimeSnapshot.selectedProfileId
+                                    }?.displayName ?: "Selected profile"
+                                } else {
+                                    "Provider unavailable: configure an OpenRouter profile and key."
+                                },
+                                color = if (configured) WarmIvory else RubyHeart,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.testTag("arcade_provider_status"),
+                            )
+                            Text(
+                                text = "Gameplay context is transient. It is not written to memory. " +
+                                    "Every Send, Retry, or Continue is an explicit provider request; " +
+                                    "gameplay never sends one automatically.",
+                                color = MistBlue,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            if (!configured && host != null) {
+                                TextButton(onClick = host.onOpenSettings) { Text("Open Settings") }
+                            }
+                        }
+                    }
+                    state.commentaryCue?.let { cue ->
+                        Text(cue, color = MutedGold, style = MaterialTheme.typography.bodySmall)
+                    }
+                    runtimeSnapshot?.messages.orEmpty().takeLast(6).forEach { message ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (message.role == MessageRole.ASSISTANT) {
+                                DeepInk.copy(alpha = 0.86f)
+                            } else {
+                                TableNavy.copy(alpha = 0.9f)
+                            },
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(10.dp)) {
+                                Text(
+                                    if (message.role == MessageRole.ASSISTANT) "Riven" else "Shai",
+                                    color = MutedGold,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                                if (message.content.isNotBlank()) {
+                                    Text(message.content, color = WarmIvory, style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                        }
+                    }
+                    if (streamedReply.isNotBlank()) {
+                        Text("Riven: $streamedReply .", color = WarmIvory, modifier = Modifier.testTag("arcade_streaming_reply"))
+                    }
+                    runtimeNotice?.let { notice ->
+                        Text(notice, color = RubyHeart, modifier = Modifier.testTag("arcade_runtime_notice"))
+                    }
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { value ->
+                            if (host == null) onAction(ArcadeAction.UpdateConversationDraft(value))
+                            else host.onDraftChange(value.take(MAX_ARCADE_CONVERSATION_DRAFT_CHARS))
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("arcade_chat_input"),
+                        enabled = !sending && !cancelling,
+                        minLines = 3,
+                        maxLines = 5,
+                        label = { Text("Say something to Riven") },
+                        supportingText = {
+                            Text("${draft.length}/$MAX_ARCADE_CONVERSATION_DRAFT_CHARS")
+                        },
+                    )
+                    if (host != null) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            item {
+                                TextButton(
+                                    onClick = {
+                                        runConversation(preserveDraft = true) { host.runtime.retryFromArcade(it) }
+                                    },
+                                    enabled = !sending && !cancelling && configured,
+                                ) { Text("Retry") }
+                            }
+                            item {
+                                TextButton(
+                                    onClick = {
+                                        runConversation(preserveDraft = true) { host.runtime.continueFromArcade(it) }
+                                    },
+                                    enabled = !sending && !cancelling && configured,
+                                ) { Text("Continue") }
+                            }
+                            if (sending || cancelling) {
+                                item {
+                                    TextButton(
+                                        onClick = {
+                                            if (cancelling) return@TextButton
+                                            cancelling = true
+                                            val jobToCancel = conversationJob
+                                            jobToCancel?.cancel(CancellationException("Arcade reply cancelled by user"))
+                                            scope.launch {
+                                                try {
+                                                    val result = withContext(Dispatchers.IO) { host.runtime.cancel() }
+                                                    jobToCancel?.join()
+                                                    applyResult(result)
+                                                } finally {
+                                                    cancelling = false
+                                                }
+                                            }
+                                        },
+                                        enabled = !cancelling,
+                                        modifier = Modifier.testTag("arcade_chat_cancel"),
+                                    ) { Text(if (cancelling) "Cancelling" else "Cancel") }
+                                }
+                            }
+                        }
+                        Button(
+                            onClick = { runConversation { host.runtime.sendFromArcade(draft, it) } },
+                            enabled = configured && !sending && !cancelling && draft.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth().testTag("arcade_chat_send"),
+                            colors = ButtonDefaults.buttonColors(containerColor = RubyHeart),
+                        ) {
+                            Text(if (sending || cancelling) "." else "Send")
+                        }
+                    } else {
                         Text(
-                            text = "Layout only: sending and live provider replies are not connected yet.",
-                            modifier = Modifier.padding(12.dp),
+                            text = "Conversation runtime unavailable in this preview.",
                             color = MistBlue,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -826,7 +1133,7 @@ private fun ConversationOverlay(
                         onClick = { onAction(ArcadeAction.DismissConversation) },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Keep draft & return to table")
+                        Text("Return to table")
                     }
                 }
             }

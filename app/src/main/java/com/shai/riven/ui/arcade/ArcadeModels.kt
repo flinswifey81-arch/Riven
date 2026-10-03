@@ -78,6 +78,8 @@ enum class ArcadeInteractionHold {
 data class ArcadeUiState(
     val selectedGameId: String? = null,
     val quietMode: Boolean = false,
+    val commentaryCuesEnabled: Boolean = false,
+    val commentaryCue: String? = null,
     val conversationOpen: Boolean = false,
     val conversationDraft: String = "",
     val demoNotice: String? = null,
@@ -103,6 +105,8 @@ sealed interface ArcadeAction {
     data object DismissConversation : ArcadeAction
     data class UpdateConversationDraft(val value: String) : ArcadeAction
     data object ToggleQuietMode : ArcadeAction
+    data object ToggleCommentaryCues : ArcadeAction
+    data class ShowCommentaryCue(val message: String) : ArcadeAction
     data class PreviewControl(val label: String) : ArcadeAction
     data object DismissDemoNotice : ArcadeAction
     data object Back : ArcadeAction
@@ -116,6 +120,7 @@ fun reduceArcadeState(
         state.copy(
             selectedGameId = game.gameId,
             conversationOpen = false,
+            commentaryCue = null,
             demoNotice = null,
         )
     } ?: state
@@ -123,6 +128,7 @@ fun reduceArcadeState(
     ArcadeAction.ExitGame -> state.copy(
         selectedGameId = null,
         conversationOpen = false,
+        commentaryCue = null,
         demoNotice = null,
     )
 
@@ -137,6 +143,13 @@ fun reduceArcadeState(
     )
 
     ArcadeAction.ToggleQuietMode -> state.copy(quietMode = !state.quietMode)
+    ArcadeAction.ToggleCommentaryCues -> state.copy(
+        commentaryCuesEnabled = !state.commentaryCuesEnabled,
+        commentaryCue = null,
+    )
+    is ArcadeAction.ShowCommentaryCue -> state.copy(
+        commentaryCue = action.message.take(MAX_ARCADE_COMMENTARY_CUE_CHARS),
+    )
     is ArcadeAction.PreviewControl -> state.copy(
         demoNotice = "${action.label} is shown for layout review; its game rule is not implemented yet.",
     )
@@ -148,3 +161,5 @@ fun reduceArcadeState(
         else -> state
     }
 }
+
+private const val MAX_ARCADE_COMMENTARY_CUE_CHARS = 320

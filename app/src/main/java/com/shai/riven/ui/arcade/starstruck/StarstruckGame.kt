@@ -64,6 +64,12 @@ import com.shai.riven.ui.theme.RubyHeart
 import com.shai.riven.ui.theme.TableNavyRaised
 import com.shai.riven.ui.theme.VioletHeart
 import com.shai.riven.ui.theme.WarmIvory
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.ui.arcade.ArcadeGame
+import com.shai.riven.ui.arcade.ArcadeObservationSignature
+import com.shai.riven.ui.arcade.meaningfulArcadeEvent
+import com.shai.riven.ui.arcade.toArcadeObservation
+import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -80,6 +86,7 @@ fun StarstruckGame(
     storeOverride: StarstruckStore? = null,
     soundPlayerFactory: () -> StarstruckSoundPlayer = { AndroidStarstruckSoundPlayer() },
     initialSeed: Long? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
 ) {
     val context = LocalContext.current
     val store = storeOverride ?: remember(context) { SharedPreferencesStarstruckStore(context) }
@@ -130,6 +137,34 @@ fun StarstruckGame(
         soundPlayer.update(normalized.soundVolume, normalized.soundMuted)
     }
     val paused = externallyPaused || manuallyPaused || settingsOpen || !lifecycleResumed
+    val observationSessionId = rememberSaveable { UUID.randomUUID().toString() }
+    var observationSequence by rememberSaveable(observationSessionId) { mutableStateOf(0L) }
+    var previousObservationSignature by remember(observationSessionId) {
+        mutableStateOf<ArcadeObservationSignature?>(null)
+    }
+    val observationSignature = ArcadeObservationSignature(
+        primary = state.movesMade,
+        secondary = state.matchesMade,
+        tertiary = state.reshuffles,
+        paused = paused,
+    )
+    LaunchedEffect(observationSignature, observationSessionId) {
+        observationSequence += 1L
+        onObservation(
+            state.toArcadeObservation(
+                sessionId = observationSessionId,
+                sequence = observationSequence,
+                paused = paused,
+                event = meaningfulArcadeEvent(
+                    ArcadeGame.HEART_MATCH,
+                    previousObservationSignature,
+                    observationSignature,
+                ),
+                observedAt = System.currentTimeMillis(),
+            ),
+        )
+        previousObservationSignature = observationSignature
+    }
     val updateSettings: (StarstruckSettings) -> Unit = { updated ->
         val normalized = updated.normalized()
         settings = normalized

@@ -148,6 +148,70 @@ class AutomaticMemoryPipelineIntegrationTest {
     }
 
     @Test
+    fun arcadeTurnIsDurablyExcludedWithoutSchedulingOrLaterReconciliation() = runBlocking {
+        val turn = appendSuccessfulTurn(
+            "How does this table look?",
+            "The public position looks steady.",
+        )
+
+        val excluded = queue.excludeSucceededRun(
+            runId = turn.runId,
+            sourceTimelineRevision = turn.finalRevision,
+            occurredAt = now(),
+            reasonCode = "ARCADE_TRANSIENT_CONTEXT",
+        ) as AutomaticMemoryExclusionResult.Excluded
+        val replay = queue.excludeSucceededRun(
+            runId = turn.runId,
+            sourceTimelineRevision = turn.finalRevision,
+            occurredAt = now(),
+            reasonCode = "ARCADE_TRANSIENT_CONTEXT",
+        ) as AutomaticMemoryExclusionResult.Excluded
+
+        assertEquals(2, excluded.jobIds.size)
+        assertEquals(excluded.jobIds, replay.jobIds)
+        excluded.jobIds.forEach { jobId ->
+            val job = checkNotNull(database.automaticMemoryDao().job(jobId))
+            assertEquals(AutomaticMemoryJobState.EXCLUDED, job.state)
+            assertEquals(AutomaticMemoryJobStage.COMPLETE, job.nextStage)
+            assertEquals("ARCADE_TRANSIENT_CONTEXT", job.lastErrorCode)
+        }
+        assertEquals(2, queue.status().excluded)
+        assertTrue(scheduler.automaticMemoryJobIds.isEmpty())
+        assertTrue(queue.schedulePending(limit = 10).isEmpty())
+
+        val reconciliation = queue.reconcileSucceededRuns(limit = 10, occurredAt = now())
+        assertEquals(0, reconciliation.inspectedRuns)
+        assertTrue(reconciliation.jobIds.isEmpty())
+        assertTrue(scheduler.automaticMemoryJobIds.isEmpty())
+        assertEquals(0, model.totalCalls)
+    }
+
+    @Test
+    fun arcadeExclusionWinsIfPendingRowsAlreadyExist() = runBlocking {
+        val turn = appendSuccessfulTurn("Comment on this game.", "The public board is close.")
+        val queued = queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())
+            as AutomaticMemoryEnqueueResult.Enqueued
+        assertEquals(2, queued.jobIds.size)
+
+        val excluded = queue.excludeSucceededRun(
+            runId = turn.runId,
+            sourceTimelineRevision = turn.finalRevision,
+            occurredAt = now(),
+            reasonCode = "ARCADE_TRANSIENT_CONTEXT",
+        ) as AutomaticMemoryExclusionResult.Excluded
+
+        assertEquals(queued.jobIds, excluded.jobIds)
+        excluded.jobIds.forEach { jobId ->
+            val job = checkNotNull(database.automaticMemoryDao().job(jobId))
+            assertEquals(AutomaticMemoryJobState.EXCLUDED, job.state)
+            assertEquals(AutomaticMemoryJobStage.COMPLETE, job.nextStage)
+            assertEquals("ARCADE_TRANSIENT_CONTEXT", job.lastErrorCode)
+        }
+        assertTrue(queue.schedulePending(limit = 10).isEmpty())
+        assertEquals(0, model.totalCalls)
+    }
+
+    @Test
     fun missingCredentialBlocksWithoutConsumingAttemptAndRemainsRecoverable() = runBlocking {
         val turn = appendSuccessfulTurn("I love sardines.", "Noted.")
         queue.ensureForSucceededRun(turn.runId, turn.finalRevision, now())

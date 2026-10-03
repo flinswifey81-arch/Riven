@@ -22,10 +22,14 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import com.shai.riven.MainActivity
 import com.shai.riven.data.instructions.ShaiSystemInstructionsSnapshot
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.data.arcade.ArcadeObservationWriteResult
 import com.shai.riven.data.persistence.model.MessageDeliveryState
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.persistence.model.MemoryCertainty
 import com.shai.riven.data.presence.RivenRoom
+import com.shai.riven.data.presence.RivenPresenceSnapshot
+import com.shai.riven.data.presence.RivenSemanticSprite
 import com.shai.riven.data.provider.ProviderCapability
 import com.shai.riven.data.provider.ProviderProfileSnapshot
 import com.shai.riven.data.provider.openrouter.OpenRouterModelCatalogError
@@ -51,6 +55,7 @@ import com.shai.riven.ui.theme.RivenTheme
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -80,7 +85,14 @@ class RivenAppNormalTest {
     fun normalChatStreamsSendsNavigatesAndRendersInspectablePng() {
         val runtime = FakeRivenRuntime(configuredSnapshot())
         composeRule.runOnIdle {
-            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+            composeRule.activity.setContent {
+                RivenTheme {
+                    RivenApp(
+                        uiAssets = RivenUiAssets.Approved,
+                        runtimeFactory = { runtime },
+                    )
+                }
+            }
         }
 
         composeRule.onNodeWithTag("chat_normal").assertIsDisplayed()
@@ -109,10 +121,46 @@ class RivenAppNormalTest {
     }
 
     @Test
+    fun approvedRoomsAndEverySemanticPoseRenderToInspectablePngs() {
+        val rooms = listOf(
+            RivenRoom.LIVING_ROOM,
+            RivenRoom.BEDROOM,
+            RivenRoom.STUDY,
+            RivenRoom.TERRACE,
+        )
+
+        RivenSemanticSprite.entries.forEachIndexed { index, sprite ->
+            val room = rooms[index % rooms.size]
+            val state = RivenPresenceSnapshot(
+                actualRoom = room,
+                semanticSprite = sprite,
+                browsedRoom = room,
+                presenceRevision = index.toLong(),
+                browserRevision = index.toLong(),
+            )
+            composeRule.runOnIdle {
+                composeRule.activity.setContent {
+                    RivenTheme { RoomBackdrop(state = state, uiAssets = RivenUiAssets.Approved) }
+                }
+            }
+            composeRule.onNodeWithTag("approved_room_art_${room.stableId}").assertIsDisplayed()
+            composeRule.onNodeWithTag("approved_riven_sprite_${sprite.stableId}").assertIsDisplayed()
+            writeScreenshot("approved-${room.stableId}-${sprite.stableId}.png")
+        }
+    }
+
+    @Test
     fun brassKeyFloorPlanBrowsesWithoutMovingRivenOrShowingALocationMarker() {
         val runtime = FakeRivenRuntime(configuredSnapshot())
         composeRule.runOnIdle {
-            composeRule.activity.setContent { RivenTheme { RivenApp { runtime } } }
+            composeRule.activity.setContent {
+                RivenTheme {
+                    RivenApp(
+                        uiAssets = RivenUiAssets.Approved,
+                        runtimeFactory = { runtime },
+                    )
+                }
+            }
         }
 
         composeRule.onNodeWithTag("room_key").performClick()
@@ -501,6 +549,42 @@ class RivenAppSavedStateTest {
         composeRule.onNodeWithTag("nav_chat").performClick()
         composeRule.onNodeWithTag("chat_input").assertTextContains("Draft behind alarms")
     }
+
+    @Test
+    fun arcadeGameplayAndLocalCuesNeverMakeAutomaticProviderCalls() {
+        val runtime = FakeRivenRuntime(configuredSnapshot())
+        composeRule.setContent { RivenTheme { RivenApp { runtime } } }
+
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.onNodeWithText("Celestial Spire").performClick()
+        composeRule.onNodeWithContentDescription("Local commentary cues").performClick()
+        composeRule.waitForIdle()
+
+        assertTrue(runtime.sendCalls == 0)
+
+        composeRule.onNodeWithTag("nav_chat").performClick()
+        composeRule.waitForIdle()
+        assertTrue(runtime.sendCalls == 0)
+    }
+
+    @Test
+    fun arcadeConversationUsesSameRuntimeAndCancelsWhileSoloTableStaysPaused() {
+        val runtime = FakeRivenRuntime(configuredSnapshot(), holdSend = true)
+        composeRule.setContent { RivenTheme { RivenApp { runtime } } }
+        composeRule.onNodeWithTag("nav_arcade").performClick()
+        composeRule.onNodeWithText("Celestial Spire").performClick()
+        composeRule.onNodeWithContentDescription("Open conversation with Riven").performClick()
+        composeRule.onNodeWithText("Solo table paused").assertIsDisplayed()
+        composeRule.onNodeWithTag("arcade_chat_input").performTextReplacement("How is the table looking?")
+        composeRule.onNodeWithTag("arcade_chat_send").performScrollTo().performClick()
+        composeRule.waitUntil(5_000) { runtime.sendCalls == 1 }
+
+        composeRule.onNodeWithTag("arcade_chat_cancel").performScrollTo().performClick()
+        composeRule.waitUntil(5_000) { runtime.cancelCalls == 1 && runtime.sendCancelled }
+
+        assertTrue(runtime.sentContents.single() == "How is the table looking?")
+        assertTrue(runtime.arcadeObservations.any { it.phase == "paused" })
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -569,6 +653,10 @@ private class FakeRivenRuntime(
         private set
     var retryCalls = 0
         private set
+    val arcadeObservations = CopyOnWriteArrayList<ArcadeGameObservation>()
+    @Volatile
+    var arcadeClearCalls = 0
+        private set
     var failMemoryWrites = false
     val savedApiKeys = mutableListOf<String>()
     var removeImageCalls = 0
@@ -582,6 +670,22 @@ private class FakeRivenRuntime(
 
     override suspend fun initialize() = success()
     override suspend fun snapshot() = success()
+
+    override suspend fun publishArcadeObservation(
+        observation: ArcadeGameObservation,
+    ): ArcadeObservationWriteResult {
+        arcadeObservations += observation
+        return ArcadeObservationWriteResult.Published(
+            gameId = observation.gameId,
+            sessionId = observation.sessionId,
+            contextRevision = arcadeObservations.size.toLong(),
+        )
+    }
+
+    override suspend fun clearArcadeObservation(): ArcadeObservationWriteResult {
+        arcadeClearCalls += 1
+        return ArcadeObservationWriteResult.Cleared(changed = true)
+    }
 
     override suspend fun browseRoom(room: RivenRoom): RivenRuntimeResult {
         if (current.roomState.browsedRoom != room) {

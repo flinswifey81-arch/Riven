@@ -73,6 +73,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.data.arcade.ArcadeObservationWriteResult
 import com.shai.riven.data.persistence.model.MessageRole
 import com.shai.riven.data.presence.RivenPresenceSnapshot
 import com.shai.riven.data.presence.RivenRoom
@@ -91,6 +93,7 @@ import com.shai.riven.data.runtime.RivenRuntimeController
 import com.shai.riven.data.runtime.RivenRuntimeResult
 import com.shai.riven.data.runtime.RivenRuntimeSnapshot
 import com.shai.riven.ui.arcade.ArcadeApp
+import com.shai.riven.ui.arcade.ArcadeConversationHost
 import com.shai.riven.ui.reminder.ReminderAlarmScreen
 import com.shai.riven.ui.theme.DeepInk
 import com.shai.riven.ui.theme.MistBlue
@@ -140,6 +143,8 @@ fun RivenApp(
     }
     var nextSubmissionId by rememberSaveable { mutableStateOf(0L) }
     var activeConversationJob by remember { mutableStateOf<Job?>(null) }
+    var arcadeObservation by remember { mutableStateOf<ArcadeGameObservation?>(null) }
+    var arcadeObservationCommandRevision by remember { mutableStateOf(0L) }
 
     fun beginSubmission(baselineUserMessageIds: Set<String>): Long {
         val submissionId = ++nextSubmissionId
@@ -167,8 +172,8 @@ fun RivenApp(
     }
 
     fun navigateTo(target: RivenDestination) {
-        if (destination == RivenDestination.CHAT && target != RivenDestination.CHAT) {
-            activeConversationJob?.cancel(CancellationException("Chat screen left"))
+        if (destination != target) {
+            activeConversationJob?.cancel(CancellationException("Conversation surface left"))
         }
         destination = target
     }
@@ -223,6 +228,16 @@ fun RivenApp(
         }
     }
 
+    LaunchedEffect(runtime, arcadeObservationCommandRevision) {
+        if (arcadeObservationCommandRevision > 0L) {
+            val result = withContext(Dispatchers.IO) {
+                arcadeObservation?.let { runtime.publishArcadeObservation(it) }
+                    ?: runtime.clearArcadeObservation()
+            }
+            if (result is ArcadeObservationWriteResult.Failure) notice = result.message
+        }
+    }
+
     BackHandler(enabled = destination == RivenDestination.ALARMS) {
         navigateTo(RivenDestination.CHAT)
     }
@@ -252,6 +267,28 @@ fun RivenApp(
             destination == RivenDestination.ARCADE -> ArcadeApp(
                 modifier = Modifier.padding(padding),
                 portraitResourceId = uiAssets.arcadePortraitResourceId,
+                conversationHost = ArcadeConversationHost(
+                    runtime = runtime,
+                    snapshot = snapshot,
+                    draft = draft,
+                    onDraftChange = { draft = it },
+                    onRuntimeSnapshot = { restored ->
+                        snapshot = restored
+                        draft = restored.draft
+                        persistedDraft = restored.draft
+                        draftInitialized = true
+                    },
+                    onOpenSettings = { navigateTo(RivenDestination.SETTINGS) },
+                    onConversationJobChanged = { activeConversationJob = it },
+                ),
+                onObservation = { observation ->
+                    arcadeObservation = observation
+                    arcadeObservationCommandRevision += 1L
+                },
+                onObservationCleared = {
+                    arcadeObservation = null
+                    arcadeObservationCommandRevision += 1L
+                },
             )
             loading -> LoadingScreen(padding)
             destination == RivenDestination.SETTINGS || destination == RivenDestination.MEMORY -> SettingsScreen(
@@ -551,10 +588,9 @@ private fun ChatScreen(
         Column(
             modifier = Modifier.fillMaxSize().imePadding().testTag(if (compact) "chat_compact" else "chat_normal"),
         ) {
-            Row(
+            Column(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     uiAssets.brandIconResourceId?.let { resourceId ->
@@ -570,13 +606,18 @@ private fun ChatScreen(
                         Text("Conversation", color = WarmIvory, style = MaterialTheme.typography.headlineSmall)
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
                         snapshot?.profiles?.singleOrNull { it.profileId == snapshot?.selectedProfileId }?.displayName
                             ?: "Not configured",
                         color = if (snapshot?.selectedProfileHasCredential == true) MistBlue else RubyHeart,
                         style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.testTag("chat_profile_status"),
+                        modifier = Modifier.weight(1f).testTag("chat_profile_status"),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     OutlinedButton(
                         onClick = { floorPlanOpen = !floorPlanOpen },
@@ -875,7 +916,7 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun RoomBackdrop(state: RivenPresenceSnapshot?, uiAssets: RivenUiAssets) {
+internal fun RoomBackdrop(state: RivenPresenceSnapshot?, uiAssets: RivenUiAssets) {
     val room = state?.browsedRoom ?: RivenRoom.LIVING_ROOM
     val backgroundResourceId = uiAssets.roomBackgroundResourceId(room)
     val spriteResourceId = uiAssets.visibleSpriteResourceId(state)

@@ -49,6 +49,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -75,7 +77,7 @@ class ArcadeComposeTest {
         }
         composeRule.onNodeWithTag("arcade_catalog").performScrollToIndex(ArcadeGame.entries.size + 2)
         composeRule.onNodeWithText(
-            "Four solo tables are playable • Cosmic Mischief and live Riven replies remain unconnected.",
+            "Four solo tables are playable • Cosmic Mischief remains a future shared table.",
         ).assertIsDisplayed()
     }
 
@@ -110,7 +112,7 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("CHEAT").assertIsDisplayed()
         composeRule.onNodeWithText("CALL OUT").assertIsDisplayed()
         composeRule.onNodeWithText("Demo hand • no engine").assertIsDisplayed()
-        composeRule.onNodeWithText("DEMO COMMENTARY").assertIsDisplayed()
+        composeRule.onNodeWithText("TABLE CONTEXT LIVE").assertIsDisplayed()
         composeRule.onAllNodesWithTag("riven_card_back_art").assertCountEquals(8)
         composeRule.onAllNodesWithContentDescription("Face-down card").assertCountEquals(8)
         composeRule.onNodeWithContentDescription("Eclipse. Skip the next turn.").assertIsDisplayed()
@@ -137,7 +139,7 @@ class ArcadeComposeTest {
     }
 
     @Test
-    fun conversationOverlayStatesThatLiveRepliesAreNotConnected() {
+    fun conversationOverlayHonestlyStatesWhenRuntimeIsUnavailable() {
         composeRule.setContent {
             RivenTheme {
                 ArcadeExperience(
@@ -154,7 +156,7 @@ class ArcadeComposeTest {
         composeRule.onNodeWithText("Solo table paused").assertIsDisplayed()
         composeRule.onNodeWithText("Draft survives").assertIsDisplayed()
         composeRule.onNodeWithText(
-            "Layout only: sending and live provider replies are not connected yet.",
+            "Conversation runtime unavailable in this preview.",
         ).assertIsDisplayed()
     }
 
@@ -664,9 +666,30 @@ class ArcadeCompactLayoutTest {
         }
 
         composeRule.onNode(hasSetTextAction()).assertIsDisplayed().performClick()
-        composeRule.onNodeWithText("Keep draft & return to table")
+        composeRule.onNodeWithText("Return to table")
             .performScrollTo()
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun selectedSoloGamePublishesPlayerVisibleObservation() {
+        val observed = AtomicReference<com.shai.riven.data.arcade.ArcadeGameObservation?>()
+        val clears = AtomicInteger()
+        composeRule.setContent {
+            RivenTheme {
+                ArcadeApp(
+                    onObservation = observed::set,
+                    onObservationCleared = { clears.incrementAndGet() },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Celestial Spire").performClick()
+        composeRule.onNodeWithTag("celestial_spire_board").assertIsDisplayed()
+        composeRule.waitUntil(5_000) { observed.get() != null }
+        assertEquals(ArcadeGame.STACKER.gameId, observed.get()?.gameId)
+        composeRule.onNodeWithContentDescription("Return to Arcade").performClick()
+        composeRule.waitUntil(5_000) { clears.get() == 1 }
     }
 }
 

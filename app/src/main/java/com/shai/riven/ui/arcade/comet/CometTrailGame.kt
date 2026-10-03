@@ -58,6 +58,12 @@ import com.shai.riven.ui.theme.MutedGold
 import com.shai.riven.ui.theme.PenthouseNavy
 import com.shai.riven.ui.theme.TableNavyRaised
 import com.shai.riven.ui.theme.WarmIvory
+import com.shai.riven.data.arcade.ArcadeGameObservation
+import com.shai.riven.ui.arcade.ArcadeGame
+import com.shai.riven.ui.arcade.ArcadeObservationSignature
+import com.shai.riven.ui.arcade.meaningfulArcadeEvent
+import com.shai.riven.ui.arcade.toArcadeObservation
+import java.util.UUID
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -77,6 +83,7 @@ fun CometTrailGame(
     compactLayout: Boolean = false,
     storeOverride: CometTrailStore? = null,
     initialSeed: Long? = null,
+    onObservation: (ArcadeGameObservation) -> Unit = {},
 ) {
     val context = LocalContext.current
     val store = storeOverride ?: remember(context) { SharedPreferencesCometTrailStore(context) }
@@ -120,6 +127,34 @@ fun CometTrailGame(
     val collisionPaused = state.collisionDirection != null
     val trapped = collisionPaused && CometTrailEngine.safeDirections(state).isEmpty()
     val paused = hostPaused || collisionPaused
+    val observationSessionId = rememberSaveable { UUID.randomUUID().toString() }
+    var observationSequence by rememberSaveable(observationSessionId) { mutableStateOf(0L) }
+    var previousObservationSignature by remember(observationSessionId) {
+        mutableStateOf<ArcadeObservationSignature?>(null)
+    }
+    val observationSignature = ArcadeObservationSignature(
+        primary = if (state.collisionDirection == null) 0 else 1,
+        secondary = state.treatsEaten,
+        tertiary = state.boardRefreshes,
+        paused = paused,
+    )
+    LaunchedEffect(observationSignature, observationSessionId) {
+        observationSequence += 1L
+        onObservation(
+            state.toArcadeObservation(
+                sessionId = observationSessionId,
+                sequence = observationSequence,
+                paused = paused,
+                event = meaningfulArcadeEvent(
+                    ArcadeGame.WRAPPING_SNAKE,
+                    previousObservationSignature,
+                    observationSignature,
+                ),
+                observedAt = System.currentTimeMillis(),
+            ),
+        )
+        previousObservationSignature = observationSignature
+    }
     val onDirection: (TrailDirection) -> Unit = { direction ->
         if (!hostPaused) {
             val updated = CometTrailEngine.turn(state, direction)

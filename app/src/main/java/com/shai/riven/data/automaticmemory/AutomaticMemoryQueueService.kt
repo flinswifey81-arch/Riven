@@ -35,6 +35,11 @@ sealed interface AutomaticMemoryEnqueueResult {
     data class Failure(val errorCode: String) : AutomaticMemoryEnqueueResult
 }
 
+sealed interface AutomaticMemoryExclusionResult {
+    data class Excluded(val jobIds: List<String>) : AutomaticMemoryExclusionResult
+    data class Failure(val errorCode: String) : AutomaticMemoryExclusionResult
+}
+
 data class AutomaticMemoryReconciliationResult(
     val inspectedRuns: Int,
     val jobIds: List<String>,
@@ -111,6 +116,49 @@ class AutomaticMemoryQueueService(
             jobIds = jobs.map { it.id },
             schedulingFailedJobIds = failed,
         )
+    }
+
+    /**
+     * Durably records that a successful run used transient context and must not feed automatic
+     * memory extraction. Excluded rows also prevent reconciliation from recreating pending work.
+     */
+    suspend fun excludeSucceededRun(
+        runId: String,
+        sourceTimelineRevision: Long,
+        occurredAt: Long,
+        reasonCode: String,
+    ): AutomaticMemoryExclusionResult {
+        return try {
+            val run = runDao.run(runId)
+                ?: return AutomaticMemoryExclusionResult.Failure("RUN_NOT_FOUND")
+            if (run.state != ConversationRunState.SUCCEEDED || sourceTimelineRevision < 0L) {
+                return AutomaticMemoryExclusionResult.Failure("RUN_NOT_SUCCEEDED")
+            }
+            val jobs = database.withTransaction {
+                listOf(run.userMessageId, run.assistantMessageId).map { messageId ->
+                    automaticMemoryDao.jobForMessage(messageId)?.let { existing ->
+                        excludeExistingMessageJobInCurrentTransaction(
+                            existing = existing,
+                            occurredAt = occurredAt,
+                            reasonCode = reasonCode,
+                        )
+                    } ?: excludedMessageJobInCurrentTransaction(
+                            run = run,
+                            messageId = messageId,
+                            sourceTimelineRevision = sourceTimelineRevision,
+                            occurredAt = occurredAt,
+                            reasonCode = reasonCode,
+                        )
+                }
+            }
+            AutomaticMemoryExclusionResult.Excluded(jobs.map(AutomaticMemoryJobEntity::id))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            AutomaticMemoryExclusionResult.Failure(
+                "EXCLUDE_${failure::class.java.simpleName.safeCodeFragment()}",
+            )
+        }
     }
 
     suspend fun reconcileSucceededRuns(
@@ -246,6 +294,63 @@ class AutomaticMemoryQueueService(
             return requireNotNull(automaticMemoryDao.jobForMessage(messageId))
         }
         return job
+    }
+
+    private fun excludedMessageJobInCurrentTransaction(
+        run: ConversationRunEntity,
+        messageId: String,
+        sourceTimelineRevision: Long,
+        occurredAt: Long,
+        reasonCode: String,
+    ): AutomaticMemoryJobEntity {
+        val experiences = memoryDao.canonicalConversationExperiencesForMessage(messageId)
+        require(experiences.size == 1) { "Canonical experience is missing or duplicated" }
+        val experience = experiences.single()
+        require(experience.availability == ExperienceAvailability.AVAILABLE) {
+            "Canonical experience is unavailable"
+        }
+        val job = AutomaticMemoryJobEntity(
+            id = automaticMemoryJobId(messageId),
+            originatingRunId = run.runId,
+            sourceMessageId = messageId,
+            sourceExperienceId = experience.id,
+            sourceTimelineRevision = sourceTimelineRevision,
+            state = AutomaticMemoryJobState.EXCLUDED,
+            nextStage = AutomaticMemoryJobStage.COMPLETE,
+            attemptCount = 0,
+            createdAt = occurredAt,
+            updatedAt = occurredAt,
+            lastErrorCode = reasonCode.safeCodeFragment(),
+        )
+        try {
+            automaticMemoryDao.insertJob(job)
+        } catch (_: SQLiteConstraintException) {
+            return excludeExistingMessageJobInCurrentTransaction(
+                existing = requireNotNull(automaticMemoryDao.jobForMessage(messageId)),
+                occurredAt = occurredAt,
+                reasonCode = reasonCode,
+            )
+        }
+        return job
+    }
+
+    private fun excludeExistingMessageJobInCurrentTransaction(
+        existing: AutomaticMemoryJobEntity,
+        occurredAt: Long,
+        reasonCode: String,
+    ): AutomaticMemoryJobEntity {
+        if (existing.state != AutomaticMemoryJobState.EXCLUDED) {
+            check(
+                automaticMemoryDao.excludeForMessage(
+                    messageId = existing.sourceMessageId,
+                    excludedState = AutomaticMemoryJobState.EXCLUDED,
+                    completeStage = AutomaticMemoryJobStage.COMPLETE,
+                    updatedAt = occurredAt,
+                    reasonCode = reasonCode.safeCodeFragment(),
+                ) == 1,
+            )
+        }
+        return requireNotNull(automaticMemoryDao.jobForMessage(existing.sourceMessageId))
     }
 
     private fun excludeDiscardedMessageInCurrentTransaction(

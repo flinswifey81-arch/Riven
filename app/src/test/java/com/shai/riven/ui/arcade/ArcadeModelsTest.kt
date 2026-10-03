@@ -142,4 +142,20 @@ class ArcadeModelsTest {
 
         assertEquals(MAX_ARCADE_CONVERSATION_DRAFT_CHARS, result.conversationDraft.length)
     }
+
+    @Test
+    fun localCommentaryCuesAreConservativeAndNeverOpenConversation() {
+        val initial = ArcadeUiState()
+
+        val enabled = reduceArcadeState(initial, ArcadeAction.ToggleCommentaryCues)
+        val withCue = reduceArcadeState(
+            enabled,
+            ArcadeAction.ShowCommentaryCue("A meaningful move happened. Nothing was sent."),
+        )
+
+        assertFalse(initial.commentaryCuesEnabled)
+        assertTrue(enabled.commentaryCuesEnabled)
+        assertFalse(withCue.conversationOpen)
+        assertEquals("A meaningful move happened. Nothing was sent.", withCue.commentaryCue)
+    }
 }
